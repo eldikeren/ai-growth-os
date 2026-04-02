@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Website Access & Deployment</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f8f9fb;--surface:#fff;--border:#e5e7eb;--border2:#d1d5db;--accent:#6366f1;--green:#10b981;--amber:#f59e0b;--red:#ef4444;--dark:#0f0f1a;--text:#111827;--muted:#6b7280;--light:#f3f4f6}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px}
+
+/* SHELL */
+.shell{max-width:1100px;margin:0 auto;padding:28px}
+
+/* PAGE HEADER */
+.page-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px}
+.page-header h1{font-size:22px;font-weight:800;margin-bottom:4px}
+.page-header p{font-size:13px;color:var(--muted)}
+
+/* SUB-TABS */
+.subtabs{display:flex;gap:2px;background:var(--light);padding:4px;border-radius:10px;margin-bottom:24px;width:fit-content;flex-wrap:wrap}
+.stab{padding:7px 14px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;border:none;background:transparent;font-family:'DM Sans',sans-serif;color:var(--muted);transition:all .15s;white-space:nowrap}
+.stab.active{background:var(--surface);color:var(--accent);box-shadow:0 1px 4px rgba(0,0,0,.1)}
+
+/* STATUS CARDS GRID */
+.status-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.status-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px}
+.status-card .sc-label{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.status-card .sc-value{font-size:15px;font-weight:700;margin-bottom:4px}
+.status-card .sc-sub{font-size:11px;color:var(--muted)}
+.status-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:100px;font-size:11px;font-weight:700}
+.sp-connected{background:#d1fae5;color:#065f46}
+.sp-limited{background:#fef3c7;color:#92400e}
+.sp-failed{background:#fee2e2;color:#991b1b}
+.sp-untested{background:var(--light);color:var(--muted)}
+.sp-readonly{background:#ede9fe;color:#5b21b6}
+
+/* ACCESS METHOD CARDS */
+.access-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-bottom:24px}
+.access-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .2s}
+.access-card.active-method{border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,.1)}
+.access-card.has-connection{border-color:var(--green)}
+.ac-head{display:flex;align-items:center;gap:12px;padding:18px 20px;cursor:pointer}
+.ac-icon{width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0}
+.ac-icon.git{background:#f0f9ff;border:1px solid #bae6fd}
+.ac-icon.cms{background:#fdf4ff;border:1px solid #e9d5ff}
+.ac-icon.server{background:#fff7ed;border:1px solid #fed7aa}
+.ac-icon.readonly{background:#f0fdf4;border:1px solid #bbf7d0}
+.ac-info{flex:1}
+.ac-title{font-size:14px;font-weight:700;margin-bottom:2px}
+.ac-desc{font-size:12px;color:var(--muted);line-height:1.4}
+.ac-form{display:none;padding:0 20px 20px;border-top:1px solid var(--border)}
+.ac-form.open{display:block}
+
+/* FORM FIELDS */
+.field{margin-top:14px}
+.field label{display:block;font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+.field input,.field select,.field textarea{width:100%;border:1px solid var(--border2);border-radius:7px;padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .15s;background:#fff;color:var(--text)}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent)}
+.field .help{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.field-row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.pw-wrap{position:relative}
+.pw-eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--muted);font-size:14px}
+
+/* BUTTONS */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;cursor:pointer;border:none;transition:all .15s}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#4f46e5}
+.btn-primary:disabled{background:var(--border);color:var(--muted);cursor:not-allowed}
+.btn-secondary{background:var(--light);color:var(--text);border:1px solid var(--border2)}
+.btn-secondary:hover{background:var(--border)}
+.btn-green{background:var(--green);color:#fff}
+.btn-green:hover{filter:brightness(1.1)}
+.btn-danger{background:#fee2e2;color:var(--red);border:1px solid #fca5a5}
+.btn-row{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+
+/* POLICY SECTION */
+.policy-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.policy-section{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px}
+.policy-section h3{font-size:14px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.switch-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #f9fafb}
+.switch-row:last-child{border-bottom:none}
+.switch-label{font-size:13px;font-weight:500}
+.switch-sub{font-size:11px;color:var(--muted)}
+.toggle{position:relative;width:40px;height:22px;flex-shrink:0}
+.toggle input{opacity:0;width:0;height:0}
+.toggle-slider{position:absolute;inset:0;background:var(--border2);border-radius:100px;cursor:pointer;transition:.2s}
+.toggle input:checked + .toggle-slider{background:var(--accent)}
+.toggle-slider::after{content:'';position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;left:3px;top:3px;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.toggle input:checked + .toggle-slider::after{transform:translateX(18px)}
+.toggle-green input:checked + .toggle-slider{background:var(--green)}
+.toggle-amber input:checked + .toggle-slider{background:var(--amber)}
+.toggle-red .toggle-slider{background:#fee2e2}
+.toggle-red input:checked + .toggle-slider{background:var(--red)}
+
+/* VALIDATION SECTION */
+.validation-list{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.vl-row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #f9fafb}
+.vl-row:last-child{border-bottom:none}
+.vl-icon{font-size:16px;width:28px;text-align:center}
+.vl-info{flex:1}
+.vl-title{font-size:13px;font-weight:600}
+.vl-sub{font-size:11px;color:var(--muted)}
+.vl-time{font-size:11px;color:var(--muted);white-space:nowrap}
+
+/* CHANGE HISTORY */
+.history-list{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{padding:10px 14px;text-align:left;font-size:11px;font-weight:700;color:var(--muted);background:var(--light);border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.5px}
+td{padding:12px 14px;border-bottom:1px solid #f9fafb;font-size:13px;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fafafa}
+
+/* SECURITY WARNING */
+.sec-banner{background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:12px 14px;margin-top:12px;font-size:12px;color:#92400e;display:flex;gap:8px;align-items:flex-start;line-height:1.5}
+
+/* OVERVIEW TAB */
+.overview-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px}
+.ov-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px}
+.ov-icon{font-size:24px;margin-bottom:10px}
+.ov-title{font-size:13px;font-weight:700;margin-bottom:4px}
+.ov-value{font-size:20px;font-weight:800;margin-bottom:4px}
+.ov-sub{font-size:11px;color:var(--muted)}
+.priority-badge{display:inline-flex;align-items:center;gap:4px;background:#eef2ff;color:var(--accent);padding:3px 8px;border-radius:100px;font-size:10px;font-weight:700;margin-top:8px}
+
+/* ONBOARDING PANEL */
+.onboarding-section{background:linear-gradient(135deg,#f5f3ff 0%,#ede9fe 100%);border:1px solid #c4b5fd;border-radius:14px;padding:24px;margin-bottom:24px}
+.ob-title{font-size:16px;font-weight:800;margin-bottom:6px}
+.ob-desc{font-size:13px;color:#5b21b6;margin-bottom:20px;line-height:1.6}
+.ob-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.ob-option{background:#fff;border:2px solid #e9d5ff;border-radius:10px;padding:12px;cursor:pointer;text-align:center;transition:all .15s}
+.ob-option:hover,.ob-option.selected{border-color:var(--accent);background:#eef2ff}
+.ob-option .ob-icon{font-size:24px;margin-bottom:6px}
+.ob-option .ob-name{font-size:11px;font-weight:700;color:var(--text)}
+.ob-option .ob-desc-sm{font-size:10px;color:var(--muted);margin-top:2px}
+
+/* COPY INPUT */
+.copy-input{display:flex;gap:6px}
+.copy-input input{flex:1;background:var(--light);border:1px solid var(--border2);border-radius:7px;padding:7px 12px;font-family:'DM Mono',monospace;font-size:12px;color:var(--text);outline:none}
+.copy-input button{padding:7px 12px;background:var(--light);border:1px solid var(--border2);border-radius:7px;cursor:pointer;font-size:12px;transition:all .15s}
+.copy-input button:hover{background:var(--border)}
+
+/* TAG PATHS */
+.path-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.path-tag{background:var(--light);border:1px solid var(--border2);border-radius:5px;padding:3px 10px;font-size:12px;font-family:'DM Mono',monospace;display:flex;align-items:center;gap:5px}
+.path-rm{cursor:pointer;color:var(--muted)}
+.path-rm:hover{color:var(--red)}
+
+/* SPINNER */
+.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
+.spin-dark{border:2px solid rgba(0,0,0,.15);border-top-color:var(--accent)}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* EMPTY STATE */
+.empty{text-align:center;padding:40px;color:var(--muted)}
+.empty .em-icon{font-size:32px;margin-bottom:12px}
+
+/* TOAST */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--dark);color:#fff;padding:10px 20px;border-radius:100px;font-size:13px;font-weight:600;opacity:0;transition:opacity .25s;z-index:9999;pointer-events:none}
+.toast.show{opacity:1}
+
+@media(max-width:768px){.status-grid,.access-grid,.policy-grid,.overview-grid,.ob-grid{grid-template-columns:1fr}.field-row,.field-row3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <!-- PAGE HEADER -->
+  <div class="page-header">
+    <div>
+      <h1>🌐 Website Access & Deployment</h1>
+      <p>Configure how agents analyze, edit, and deploy your client's website. Start with read-only and upgrade access when needed.</p>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-secondary" onclick="validateAll()">🔍 Validate All</button>
+      <button class="btn btn-primary" onclick="saveAll()">💾 Save Changes</button>
+    </div>
+  </div>
+
+  <!-- SUB-TABS -->
+  <div class="subtabs">
+    <button class="stab active" onclick="showTab('overview', this)">Overview</button>
+    <button class="stab" onclick="showTab('access', this)">Access Methods</button>
+    <button class="stab" onclick="showTab('git', this)">Git</button>
+    <button class="stab" onclick="showTab('cms', this)">CMS</button>
+    <button class="stab" onclick="showTab('server', this)">Server</button>
+    <button class="stab" onclick="showTab('policy', this)">Safety Rules</button>
+    <button class="stab" onclick="showTab('validation', this)">Validation</button>
+    <button class="stab" onclick="showTab('history', this)">Change History</button>
+  </div>
+
+  <!-- TAB: OVERVIEW -->
+  <div id="tab-overview">
+    <!-- Status grid -->
+    <div class="status-grid">
+      <div class="status-card">
+        <div class="sc-label">Website</div>
+        <div class="sc-value" id="ov-domain">yanivgil.co.il</div>
+        <div class="sc-sub" id="ov-platform">Next.js · Vercel</div>
+      </div>
+      <div class="status-card">
+        <div class="sc-label">Access Level</div>
+        <div class="sc-value"><span class="status-pill sp-readonly" id="ov-level">Read Only</span></div>
+        <div class="sc-sub" id="ov-level-sub">Agents can analyze</div>
+      </div>
+      <div class="status-card">
+        <div class="sc-label">Last Validation</div>
+        <div class="sc-value" id="ov-validated">Never</div>
+        <div class="sc-sub" id="ov-val-status">Not validated</div>
+      </div>
+      <div class="status-card">
+        <div class="sc-label">Publish Policy</div>
+        <div class="sc-value"><span class="status-pill sp-limited" id="ov-policy">Approval Required</span></div>
+        <div class="sc-sub">Manual approval before publish</div>
+      </div>
+    </div>
+
+    <div class="overview-grid">
+      <div class="ov-card">
+        <div class="ov-icon">📁</div>
+        <div class="ov-title">Git Repository</div>
+        <div class="ov-value" id="ov-git-status">Not connected</div>
+        <div class="ov-sub" id="ov-git-sub">Connect to enable code changes</div>
+        <div class="priority-badge">⭐ Recommended</div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon">🖥</div>
+        <div class="ov-title">CMS Access</div>
+        <div class="ov-value" id="ov-cms-status">Not connected</div>
+        <div class="ov-sub" id="ov-cms-sub">Connect for content management</div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon">🔒</div>
+        <div class="ov-title">Server Access</div>
+        <div class="ov-value" id="ov-server-status">Not connected</div>
+        <div class="ov-sub">Use only if no Git/CMS available</div>
+      </div>
+    </div>
+
+    <!-- Agent capabilities summary -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:20px">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:16px">🤖 What Agents Can Do Right Now</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px" id="capabilities-grid">
+        <div style="padding:8px 12px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;font-size:12px">✓ Crawl and analyze website</div>
+        <div style="padding:8px 12px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;font-size:12px">✓ Detect schema, speed, SEO issues</div>
+        <div style="padding:8px 12px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;font-size:12px">✓ Propose improvements with implementation plan</div>
+        <div style="padding:8px 12px;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;font-size:12px">✗ Cannot edit files (no git/cms/server access)</div>
+        <div style="padding:8px 12px;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px;font-size:12px">✗ Cannot publish changes (no access)</div>
+        <div style="padding:8px 12px;background:#fef3c7;border:1px solid #fde68a;border-radius:8px;font-size:12px">⚠ All changes require manual implementation</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: ACCESS METHODS -->
+  <div id="tab-access" style="display:none">
+    <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:10px;padding:14px 16px;margin-bottom:20px;font-size:13px;color:#065f46">
+      💡 <strong>Access priority:</strong> We recommend Git → CMS → Server → Read-only. If Git access is available, agents will prefer it over other methods.
+    </div>
+
+    <div class="access-grid">
+      <!-- READ ONLY -->
+      <div class="access-card has-connection" id="card-readonly">
+        <div class="ac-head" onclick="toggleAccess('readonly')">
+          <div class="ac-icon readonly">🔍</div>
+          <div class="ac-info">
+            <div class="ac-title">A. Read-Only Analysis</div>
+            <div class="ac-desc">Crawl, audit, detect issues. No editing.</div>
+          </div>
+          <span class="status-pill sp-connected">Active</span>
+        </div>
+        <div class="ac-form" id="form-readonly">
+          <div class="field"><label>Production URL *</label><input type="url" id="ro-prod-url" placeholder="https://yanivgil.co.il" value="https://yanivgil.co.il"></div>
+          <div class="field-row">
+            <div class="field"><label>Sitemap URL</label><input type="url" id="ro-sitemap" placeholder="https://yanivgil.co.il/sitemap.xml"></div>
+            <div class="field"><label>Staging URL</label><input type="url" id="ro-staging" placeholder="https://staging.yanivgil.co.il"></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>robots.txt URL</label><input type="url" id="ro-robots" placeholder="https://yanivgil.co.il/robots.txt"></div>
+            <div class="field"><label>Canonical Domain</label><input type="text" id="ro-canonical" placeholder="yanivgil.co.il"></div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-green" onclick="runAnalysis()">🔍 Analyze Now</button>
+          </div>
+          <div id="analysis-result" style="margin-top:12px;display:none"></div>
+        </div>
+      </div>
+
+      <!-- GIT -->
+      <div class="access-card" id="card-git">
+        <div class="ac-head" onclick="toggleAccess('git')">
+          <div class="ac-icon git">📁</div>
+          <div class="ac-info">
+            <div class="ac-title">B. Git Repository Access</div>
+            <div class="ac-desc">Clone, branch, PR, deploy. Recommended.</div>
+          </div>
+          <span class="status-pill sp-untested" id="git-pill">Not connected</span>
+        </div>
+        <div class="ac-form" id="form-git">
+          <div class="field-row">
+            <div class="field"><label>Git Provider</label>
+              <select id="git-provider"><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="bitbucket">Bitbucket</option><option value="azure_devops">Azure DevOps</option><option value="other">Other</option></select>
+            </div>
+            <div class="field"><label>Access Mode</label>
+              <select id="git-access-mode">
+                <option value="clone_only">Clone Only (read)</option>
+                <option value="branch_and_pr">Branch + PR</option>
+                <option value="branch_pr_and_merge" selected>Branch, PR + Merge</option>
+                <option value="direct_push">Direct Push</option>
+              </select>
+            </div>
+          </div>
+          <div class="field"><label>Repository URL *</label><input type="url" id="git-repo-url" placeholder="https://github.com/owner/repo"></div>
+          <div class="field-row3">
+            <div class="field"><label>Default Branch</label><input type="text" id="git-default-branch" value="main" placeholder="main"></div>
+            <div class="field"><label>Production Branch</label><input type="text" id="git-prod-branch" value="main" placeholder="main"></div>
+            <div class="field"><label>Staging Branch</label><input type="text" id="git-staging-branch" placeholder="dev or staging"></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Deployment Platform</label>
+              <select id="git-deploy-platform"><option value="vercel">Vercel</option><option value="netlify">Netlify</option><option value="cloudflare">Cloudflare Pages</option><option value="render">Render</option><option value="railway">Railway</option><option value="custom">Custom</option><option value="none">None</option></select>
+            </div>
+            <div class="field"><label>Deployment Project ID</label><input type="text" id="git-deploy-project" placeholder="prj_xxxxxxx"></div>
+          </div>
+          <div class="field">
+            <label>Personal Access Token (PAT)</label>
+            <div class="pw-wrap">
+              <input type="password" id="git-token" placeholder="ghp_xxxxxxxxxxxx">
+              <button class="pw-eye" onclick="togglePw('git-token')">👁</button>
+            </div>
+            <div class="help">Stored AES-256 encrypted. Only last 4 chars shown in UI after saving.</div>
+          </div>
+          <div class="sec-banner">⚠ <div>We strongly recommend using a <strong>Fine-grained PAT</strong> with minimum required scopes (contents: read, pull_requests: write). Never use your main account token.</div></div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btn-save-git" onclick="saveGit()">💾 Save & Test Connection</button>
+          </div>
+          <div id="git-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <!-- CMS -->
+      <div class="access-card" id="card-cms">
+        <div class="ac-head" onclick="toggleAccess('cms')">
+          <div class="ac-icon cms">🖥</div>
+          <div class="ac-info">
+            <div class="ac-title">C. CMS Access</div>
+            <div class="ac-desc">Edit pages, metadata, content via API or admin.</div>
+          </div>
+          <span class="status-pill sp-untested" id="cms-pill">Not connected</span>
+        </div>
+        <div class="ac-form" id="form-cms">
+          <div class="field-row">
+            <div class="field"><label>CMS Type *</label>
+              <select id="cms-type" onchange="onCmsTypeChange()">
+                <option value="wordpress">WordPress</option><option value="wix">Wix</option>
+                <option value="webflow">Webflow</option><option value="shopify">Shopify</option>
+                <option value="squarespace">Squarespace</option><option value="contentful">Contentful</option>
+                <option value="sanity">Sanity</option><option value="other">Other</option>
+              </select>
+            </div>
+            <div class="field"><label>Environment</label>
+              <select id="cms-env"><option value="production">Production</option><option value="staging">Staging</option><option value="both">Both</option></select>
+            </div>
+          </div>
+          <div class="field"><label>Admin URL</label><input type="url" id="cms-admin-url" placeholder="https://yanivgil.co.il/wp-admin"></div>
+          <div class="field-row">
+            <div class="field"><label>Username / Login</label><input type="text" id="cms-username" placeholder="admin"></div>
+            <div class="field"><label>Or Invited Email (no password)</label><input type="email" id="cms-email" placeholder="agent@elad.digital"></div>
+          </div>
+          <div id="cms-api-section">
+            <div style="display:flex;align-items:center;gap:8px;margin-top:14px;margin-bottom:6px">
+              <label style="font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="cms-api-enabled" onchange="toggleCmsApi()"> API Access Available
+              </label>
+            </div>
+            <div id="cms-api-fields" style="display:none">
+              <div class="field"><label>API Base URL</label><input type="url" id="cms-api-url" placeholder="https://yanivgil.co.il/wp-json/wp/v2"></div>
+              <div class="field">
+                <label>API Token</label>
+                <div class="pw-wrap">
+                  <input type="password" id="cms-api-token" placeholder="Application password or API key">
+                  <button class="pw-eye" onclick="togglePw('cms-api-token')">👁</button>
+                </div>
+                <div class="help">WordPress: use Application Passwords (Users → Profile → Application Passwords)</div>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <label>Admin Password (if not using API token)</label>
+            <div class="pw-wrap">
+              <input type="password" id="cms-password" placeholder="Only if invited access not available">
+              <button class="pw-eye" onclick="togglePw('cms-password')">👁</button>
+            </div>
+          </div>
+          <div class="sec-banner">⚠ <div>Prefer <strong>invited access</strong> or <strong>API tokens</strong> over passwords. Create a dedicated editor account with limited permissions.</div></div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btn-save-cms" onclick="saveCms()">💾 Save & Test Connection</button>
+          </div>
+          <div id="cms-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <!-- SERVER -->
+      <div class="access-card" id="card-server">
+        <div class="ac-head" onclick="toggleAccess('server')">
+          <div class="ac-icon server">🖥</div>
+          <div class="ac-info">
+            <div class="ac-title">D. Server / Hosting Access</div>
+            <div class="ac-desc">SSH, SFTP, cPanel. Use only if no Git/CMS.</div>
+          </div>
+          <span class="status-pill sp-untested" id="server-pill">Not connected</span>
+        </div>
+        <div class="ac-form" id="form-server">
+          <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:10px 14px;font-size:12px;color:#92400e;margin-top:14px">
+            ⚠ Direct server access is the least preferred method. Use Git or CMS access whenever possible.
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Access Type *</label>
+              <select id="server-type" onchange="onServerTypeChange()">
+                <option value="ssh">SSH</option><option value="sftp">SFTP</option>
+                <option value="ftp">FTP (not recommended)</option>
+                <option value="cpanel">cPanel</option><option value="plesk">Plesk</option>
+              </select>
+            </div>
+            <div class="field"><label>Authentication</label>
+              <select id="server-auth" onchange="onServerAuthChange()">
+                <option value="password">Password</option>
+                <option value="ssh_key">SSH Key (recommended)</option>
+                <option value="api_token">API Token (cPanel/Plesk)</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Host *</label><input type="text" id="server-host" placeholder="server.example.com or 192.168.1.1"></div>
+            <div class="field"><label>Port</label><input type="number" id="server-port" value="22" placeholder="22"></div>
+          </div>
+          <div class="field"><label>Username *</label><input type="text" id="server-username" placeholder="ubuntu or root (avoid root)"></div>
+          <div id="server-password-field">
+            <div class="field">
+              <label>Password</label>
+              <div class="pw-wrap">
+                <input type="password" id="server-password" placeholder="SSH/SFTP password">
+                <button class="pw-eye" onclick="togglePw('server-password')">👁</button>
+              </div>
+            </div>
+          </div>
+          <div id="server-key-field" style="display:none">
+            <div class="field">
+              <label>SSH Private Key</label>
+              <textarea id="server-ssh-key" rows="5" style="font-family:'DM Mono',monospace;font-size:11px;resize:vertical" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"></textarea>
+              <div class="help">Paste the full private key. Stored encrypted. Recommend an Ed25519 key pair.</div>
+            </div>
+          </div>
+          <div class="field"><label>Site Root Path</label><input type="text" id="server-root" placeholder="/var/www/html or /home/user/public_html"></div>
+          <div class="field-row">
+            <div class="field"><label>Backup Path (optional)</label><input type="text" id="server-backup" placeholder="/home/user/backups"></div>
+            <div class="field"><label>Deploy Command (optional)</label><input type="text" id="server-deploy" placeholder="npm run build && pm2 restart app"></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Build Command (optional)</label><input type="text" id="server-build" placeholder="npm ci && npm run build"></div>
+            <div class="field"><label>Restart Command (optional)</label><input type="text" id="server-restart" placeholder="pm2 restart all"></div>
+          </div>
+          <div class="sec-banner">🔒 <div>All credentials encrypted with AES-256-CBC before storage. Raw values never logged or exposed. Recommend creating a dedicated deployment user with minimum required permissions.</div></div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btn-save-server" onclick="saveServer()">💾 Save & Test Connection</button>
+          </div>
+          <div id="server-result" style="margin-top:12px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hosting Metadata -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:16px">E. Hosting & Infrastructure Metadata</h3>
+      <div class="field-row3">
+        <div class="field"><label>Hosting Provider</label><input type="text" id="meta-hosting" placeholder="Vercel, AWS, SiteGround..."></div>
+        <div class="field"><label>DNS Provider</label><input type="text" id="meta-dns" placeholder="Cloudflare, GoDaddy..."></div>
+        <div class="field"><label>CDN Provider</label><input type="text" id="meta-cdn" placeholder="Cloudflare, Fastly..."></div>
+      </div>
+      <div class="field-row3">
+        <div class="field"><label>Framework / Stack</label>
+          <select id="meta-framework">
+            <option value="">Unknown</option><option value="nextjs">Next.js</option><option value="react">React</option>
+            <option value="gatsby">Gatsby</option><option value="nuxt">Nuxt.js</option><option value="wordpress">WordPress</option>
+            <option value="static">Static HTML</option><option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="field"><label>Build Command</label><input type="text" id="meta-build" placeholder="npm run build"></div>
+        <div class="field"><label>Start Command</label><input type="text" id="meta-start" placeholder="npm start"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: GIT -->
+  <div id="tab-git" style="display:none">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px">
+      <h3 style="font-size:16px;font-weight:700;margin-bottom:4px">Git Repository Configuration</h3>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:20px">How agents create branches, commit changes, open PRs, and trigger deployments.</p>
+      <div id="git-detail-status" style="margin-bottom:20px"></div>
+      <div class="field-row">
+        <div class="field"><label>Repository URL</label><div class="copy-input"><input type="text" id="git-detail-repo" readonly placeholder="Not configured"><button onclick="copyField('git-detail-repo')">📋</button></div></div>
+        <div class="field"><label>Connection Status</label><div id="git-detail-conn" style="padding:8px 0"><span class="status-pill sp-untested">Not tested</span></div></div>
+      </div>
+      <div class="field-row3">
+        <div class="field"><label>Access Mode</label><input type="text" id="git-detail-mode" readonly placeholder="—"></div>
+        <div class="field"><label>Production Branch</label><input type="text" id="git-detail-prod-branch" readonly placeholder="—"></div>
+        <div class="field"><label>Staging Branch</label><input type="text" id="git-detail-staging-branch" readonly placeholder="—"></div>
+      </div>
+      <div class="field-row3">
+        <div class="field"><label>Read Access</label><div id="git-read" style="padding:8px 0">—</div></div>
+        <div class="field"><label>Write Access</label><div id="git-write" style="padding:8px 0">—</div></div>
+        <div class="field"><label>Deploy Access</label><div id="git-deploy" style="padding:8px 0">—</div></div>
+      </div>
+      <div class="btn-row"><button class="btn btn-secondary" onclick="validateGit()">🔍 Test Connection</button><button class="btn btn-secondary" onclick="showTab('access', document.querySelector('.stab:nth-child(2)'))">✏️ Edit Configuration</button></div>
+    </div>
+  </div>
+
+  <!-- TAB: CMS -->
+  <div id="tab-cms" style="display:none">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px">
+      <h3 style="font-size:16px;font-weight:700;margin-bottom:4px">CMS Configuration</h3>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:20px">How agents edit pages, metadata, and content.</p>
+      <div class="field-row">
+        <div class="field"><label>CMS Type</label><input type="text" id="cms-detail-type" readonly placeholder="Not configured"></div>
+        <div class="field"><label>Connection Status</label><div id="cms-detail-conn"><span class="status-pill sp-untested">Not tested</span></div></div>
+      </div>
+      <div class="field-row3">
+        <div class="field"><label>Can Read Pages</label><div id="cms-can-read" style="padding:8px 0">—</div></div>
+        <div class="field"><label>Can Edit Pages</label><div id="cms-can-edit" style="padding:8px 0">—</div></div>
+        <div class="field"><label>Can Publish</label><div id="cms-can-publish" style="padding:8px 0">—</div></div>
+      </div>
+      <div class="btn-row"><button class="btn btn-secondary" onclick="validateCms()">🔍 Test Connection</button></div>
+    </div>
+  </div>
+
+  <!-- TAB: SERVER -->
+  <div id="tab-server" style="display:none">
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px">
+      <h3 style="font-size:16px;font-weight:700;margin-bottom:4px">Server / Hosting Access</h3>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:20px">Direct filesystem access. Use only when Git and CMS are not available.</p>
+      <div class="field-row">
+        <div class="field"><label>Access Type</label><input type="text" id="srv-detail-type" readonly placeholder="Not configured"></div>
+        <div class="field"><label>Connection Status</label><div id="srv-detail-conn"><span class="status-pill sp-untested">Not tested</span></div></div>
+      </div>
+      <div class="field-row3">
+        <div class="field"><label>Host</label><input type="text" id="srv-detail-host" readonly placeholder="—"></div>
+        <div class="field"><label>Port</label><input type="text" id="srv-detail-port" readonly placeholder="—"></div>
+        <div class="field"><label>Site Root</label><input type="text" id="srv-detail-root" readonly placeholder="—"></div>
+      </div>
+      <div class="btn-row"><button class="btn btn-secondary" onclick="validateServer()">🔍 Test Connection</button></div>
+    </div>
+  </div>
+
+  <!-- TAB: SAFETY RULES -->
+  <div id="tab-policy" style="display:none">
+    <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:10px;padding:14px 16px;margin-bottom:20px;font-size:13px;color:#92400e">
+      ⚠ These rules govern what agents are allowed to do on this website. Be careful. Default is conservative (read-only). Enable capabilities incrementally.
+    </div>
+    <div class="policy-grid">
+      <div class="policy-section">
+        <h3>🔍 Analysis & Reading</h3>
+        <div class="switch-row"><div><div class="switch-label">Allow website crawling</div><div class="switch-sub">Agents can fetch and analyze pages</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-crawl" checked><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Allow deep analysis</div><div class="switch-sub">Schema, performance, technical SEO</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-analysis" checked><span class="toggle-slider"></span></label></div>
+      </div>
+      <div class="policy-section">
+        <h3>✏️ Content Editing</h3>
+        <div class="switch-row"><div><div class="switch-label">Allow content edits</div><div class="switch-sub">Agents can modify page text/content</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-content"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Allow meta tag edits</div><div class="switch-sub">Title, description, Open Graph</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-meta"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Allow schema markup edits</div><div class="switch-sub">JSON-LD structured data</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-schema"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Allow technical SEO changes</div><div class="switch-sub">robots.txt, sitemap, redirects</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-tech-seo"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Allow code changes</div><div class="switch-sub">Components, templates, styles</div></div><label class="toggle toggle-amber"><input type="checkbox" id="p-allow-code"><span class="toggle-slider"></span></label></div>
+      </div>
+      <div class="policy-section">
+        <h3>🚀 Publishing & Deployment</h3>
+        <div class="switch-row"><div><div class="switch-label">Allow staging changes</div><div class="switch-sub">Deploy to staging environment</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-allow-staging"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Allow direct production changes</div><div class="switch-sub" style="color:var(--red)">⚠ High risk — bypasses review</div></div><label class="toggle toggle-red"><input type="checkbox" id="p-allow-prod"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Require PR before merge</div><div class="switch-sub">All changes go through pull request</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-require-pr" checked><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Require staging first</div><div class="switch-sub">Test on staging before production</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-require-staging" checked><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Require manual approval before publish</div><div class="switch-sub">You approve every change before it goes live</div></div><label class="toggle toggle-amber"><input type="checkbox" id="p-require-approval" checked><span class="toggle-slider"></span></label></div>
+      </div>
+      <div class="policy-section">
+        <h3>🤖 Autonomous Permissions</h3>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:12px">Agents can execute these without approval</p>
+        <div class="switch-row"><div><div class="switch-label">Autonomous safe changes</div><div class="switch-sub">Alt texts, minor copy fixes, typos</div></div><label class="toggle toggle-green"><input type="checkbox" id="p-auto-safe"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Autonomous content expansion</div><div class="switch-sub">Add FAQ sections, expand thin content</div></div><label class="toggle toggle-amber"><input type="checkbox" id="p-auto-content"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Autonomous meta updates</div><div class="switch-sub">SEO titles and descriptions</div></div><label class="toggle toggle-amber"><input type="checkbox" id="p-auto-meta"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Autonomous internal linking</div><div class="switch-sub">Add relevant internal links</div></div><label class="toggle toggle-amber"><input type="checkbox" id="p-auto-linking"><span class="toggle-slider"></span></label></div>
+        <div class="switch-row"><div><div class="switch-label">Autonomous schema markup</div><div class="switch-sub">Add/fix JSON-LD structured data</div></div><label class="toggle toggle-amber"><input type="checkbox" id="p-auto-schema"><span class="toggle-slider"></span></label></div>
+      </div>
+    </div>
+
+    <!-- Protected paths -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin-top:16px">
+      <h3 style="font-size:14px;font-weight:700;margin-bottom:4px">🛡 Path Protections</h3>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Agents will NEVER touch forbidden paths. Protected paths require extra approval.</p>
+      <div class="field-row">
+        <div class="field"><label>Forbidden Paths (never touch)</label>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <input type="text" id="forbidden-path-input" placeholder="/wp-admin/, /checkout, /api/" style="border:1px solid var(--border2);border-radius:7px;padding:7px 12px;font-family:'DM Mono',monospace;font-size:12px;flex:1;outline:none" onkeydown="if(event.key==='Enter'){addPath('forbidden')}">
+            <button class="btn btn-secondary" onclick="addPath('forbidden')">Add</button>
+          </div>
+          <div class="path-tags" id="forbidden-tags">
+            <span class="path-tag">/wp-admin/<span class="path-rm" onclick="removeTag('forbidden-tags', this)">×</span></span>
+            <span class="path-tag">/checkout/<span class="path-rm" onclick="removeTag('forbidden-tags', this)">×</span></span>
+          </div>
+        </div>
+        <div class="field"><label>Protected Paths (require extra approval)</label>
+          <div style="display:flex;gap:6px;margin-bottom:8px">
+            <input type="text" id="protected-path-input" placeholder="/homepage, /contact, /landing-" style="border:1px solid var(--border2);border-radius:7px;padding:7px 12px;font-family:'DM Mono',monospace;font-size:12px;flex:1;outline:none" onkeydown="if(event.key==='Enter'){addPath('protected')}">
+            <button class="btn btn-secondary" onclick="addPath('protected')">Add</button>
+          </div>
+          <div class="path-tags" id="protected-tags">
+            <span class="path-tag">/homepage<span class="path-rm" onclick="removeTag('protected-tags', this)">×</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row" style="margin-top:20px">
+      <button class="btn btn-primary" onclick="savePolicy()">💾 Save Safety Rules</button>
+    </div>
+  </div>
+
+  <!-- TAB: VALIDATION -->
+  <div id="tab-validation" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h3 style="font-size:16px;font-weight:700">Validation History</h3>
+      <button class="btn btn-primary" onclick="validateAll()">🔍 Run All Validations</button>
+    </div>
+    <div class="validation-list" id="validation-list">
+      <div class="vl-row"><div class="vl-icon">—</div><div class="vl-info"><div class="vl-title" style="color:var(--muted)">No validations run yet</div><div class="vl-sub">Click "Run All Validations" to check connections</div></div></div>
+    </div>
+  </div>
+
+  <!-- TAB: HISTORY -->
+  <div id="tab-history" style="display:none">
+    <div class="history-list">
+      <table>
+        <thead><tr><th>Change</th><th>Path / URL</th><th>Environment</th><th>Published</th><th>Approved By</th><th>Date</th></tr></thead>
+        <tbody id="history-tbody">
+          <tr><td colspan="6"><div class="empty"><div class="em-icon">📝</div><div>No changes recorded yet</div></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = 'http://localhost:3001/api';
+let websiteId = null;
+let currentData = {};
+
+async function api(path, opts={}) {
+  const res = await fetch(`${API}${path}`, { headers: {'Content-Type':'application/json'}, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const d = await res.json();
+  if (!res.ok) throw new Error(d.error || 'Request failed');
+  return d;
+}
+
+// Get clientId from URL or parent app
+const clientId = new URLSearchParams(window.location.search).get('clientId') || '00000000-0000-0000-0000-000000000001';
+
+async function init() {
+  try {
+    const data = await api(`/clients/${clientId}/website`);
+    if (data?.website) {
+      currentData = data;
+      websiteId = data.website.id;
+      populateUI(data);
+    }
+    await loadValidations();
+    await loadHistory();
+  } catch (e) { console.error('Init error:', e.message); }
+}
+
+function populateUI(data) {
+  const { website: w, git, cms, server, access_profile: ap, policy } = data;
+  if (!w) return;
+  // Overview
+  setText('ov-domain', w.primary_domain || '—');
+  setText('ov-platform', [w.website_platform_type, w.deployment_provider].filter(Boolean).join(' · ') || '—');
+  if (ap) {
+    const levelMap = { read_only: 'Read Only', cms_edit: 'CMS Edit', git_edit: 'Git Edit', server_edit: 'Server Edit', full_control: 'Full Control' };
+    setText('ov-level', levelMap[ap.current_access_level] || ap.current_access_level);
+    document.getElementById('ov-level').className = `status-pill sp-${ap.current_access_level === 'read_only' ? 'readonly' : 'connected'}`;
+  }
+  if (ap?.last_validated_at) setText('ov-validated', new Date(ap.last_validated_at).toLocaleString());
+  // Git
+  if (git) {
+    setText('ov-git-status', git.connection_status);
+    setText('git-detail-repo', git.repo_url || '—');
+    setText('git-detail-mode', git.access_mode || '—');
+    setText('git-detail-prod-branch', git.production_branch || '—');
+    setText('git-detail-staging-branch', git.staging_branch || '—');
+    setConn('git-pill', git.connection_status);
+    setConn('git-detail-conn', git.connection_status);
+    if (git.read_access_works !== null) document.getElementById('git-read').innerHTML = git.read_access_works ? '<span class="status-pill sp-connected">✓ Yes</span>' : '<span class="status-pill sp-failed">✗ No</span>';
+    if (git.write_access_works !== null) document.getElementById('git-write').innerHTML = git.write_access_works ? '<span class="status-pill sp-connected">✓ Yes</span>' : '<span class="status-pill sp-failed">✗ No</span>';
+  }
+  // CMS
+  if (cms) {
+    setText('cms-detail-type', cms.cms_type || '—');
+    setConn('cms-pill', cms.connection_status);
+    setConn('cms-detail-conn', cms.connection_status);
+    if (cms.can_read_pages !== null) document.getElementById('cms-can-read').innerHTML = cms.can_read_pages ? '<span class="status-pill sp-connected">✓ Yes</span>' : '<span class="status-pill sp-failed">✗ No</span>';
+    if (cms.can_edit_pages !== null) document.getElementById('cms-can-edit').innerHTML = cms.can_edit_pages ? '<span class="status-pill sp-connected">✓ Yes</span>' : '<span class="status-pill sp-failed">✗ No</span>';
+    if (cms.can_publish !== null) document.getElementById('cms-can-publish').innerHTML = cms.can_publish ? '<span class="status-pill sp-connected">✓ Yes</span>' : '<span class="status-pill sp-failed">✗ No</span>';
+  }
+  // Server
+  if (server) {
+    setText('srv-detail-type', server.access_type || '—');
+    setText('srv-detail-host', server.host || '—');
+    setText('srv-detail-port', server.port || '—');
+    setText('srv-detail-root', server.site_root_path || '—');
+    setConn('server-pill', server.connection_status);
+    setConn('srv-detail-conn', server.connection_status);
+  }
+  // Policy
+  if (policy) {
+    setCheck('p-allow-crawl', policy.allow_crawl);
+    setCheck('p-allow-analysis', policy.allow_analysis);
+    setCheck('p-allow-content', policy.allow_content_edits);
+    setCheck('p-allow-meta', policy.allow_autonomous_meta_updates);
+    setCheck('p-allow-schema', policy.allow_schema_edits);
+    setCheck('p-allow-tech-seo', policy.allow_technical_seo_edits);
+    setCheck('p-allow-code', policy.allow_code_changes);
+    setCheck('p-allow-staging', policy.allow_staging_changes);
+    setCheck('p-allow-prod', policy.allow_direct_production_changes);
+    setCheck('p-require-pr', policy.require_pr);
+    setCheck('p-require-staging', policy.require_staging_first);
+    setCheck('p-require-approval', policy.require_manual_approval_before_publish);
+    setCheck('p-auto-safe', policy.allow_autonomous_safe_changes);
+    setCheck('p-auto-content', policy.allow_autonomous_content_expansion);
+    setCheck('p-auto-meta', policy.allow_autonomous_meta_updates);
+    setCheck('p-auto-linking', policy.allow_autonomous_internal_linking);
+    setCheck('p-auto-schema', policy.allow_autonomous_schema_markup);
+  }
+}
+
+function setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+function setCheck(id, val) { const el = document.getElementById(id); if (el) el.checked = !!val; }
+function setInputVal(id, val) { const el = document.getElementById(id); if (el) el.value = val || ''; }
+function setConn(id, status) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const map = { connected: ['sp-connected','Connected'], limited: ['sp-limited','Limited'], failed: ['sp-failed','Failed'], untested: ['sp-untested','Not tested'] };
+  const [cls, label] = map[status] || ['sp-untested', status || 'Unknown'];
+  el.innerHTML = `<span class="status-pill ${cls}">${label}</span>`;
+}
+
+function showTab(name, btn) {
+  document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
+  document.getElementById(`tab-${name}`).style.display = '';
+  document.querySelectorAll('.stab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}
+
+function toggleAccess(type) {
+  const form = document.getElementById(`form-${type}`);
+  document.querySelectorAll('.ac-form').forEach(f => f !== form && f.classList.remove('open'));
+  form.classList.toggle('open');
+}
+
+function togglePw(id) {
+  const el = document.getElementById(id);
+  if (el) el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+function toggleCmsApi() {
+  const enabled = document.getElementById('cms-api-enabled').checked;
+  document.getElementById('cms-api-fields').style.display = enabled ? 'block' : 'none';
+}
+
+function onServerAuthChange() {
+  const auth = document.getElementById('server-auth').value;
+  document.getElementById('server-password-field').style.display = auth === 'password' || auth === 'api_token' ? '' : 'none';
+  document.getElementById('server-key-field').style.display = auth === 'ssh_key' ? '' : 'none';
+}
+
+function onServerTypeChange() {
+  const type = document.getElementById('server-type').value;
+  const portEl = document.getElementById('server-port');
+  if (portEl) { const ports = { ssh: 22, sftp: 22, ftp: 21, cpanel: 2083, plesk: 8443 }; portEl.value = ports[type] || 22; }
+}
+
+function onCmsTypeChange() {
+  const type = document.getElementById('cms-type').value;
+  const apiUrlEl = document.getElementById('cms-api-url');
+  const adminEl = document.getElementById('cms-admin-url');
+  const urls = { wordpress: '/wp-json/wp/v2', webflow: 'https://api.webflow.com/v2', shopify: '/admin/api/2024-01', contentful: 'https://api.contentful.com', sanity: 'https://api.sanity.io/v2024-01-01' };
+  if (apiUrlEl && urls[type]) { document.getElementById('cms-api-enabled').checked = true; toggleCmsApi(); apiUrlEl.placeholder = `https://yourdomain.com${urls[type]}`; }
+}
+
+async function runAnalysis() {
+  const url = document.getElementById('ro-prod-url')?.value?.trim();
+  if (!url) { toast('Enter a URL first'); return; }
+  document.getElementById('analysis-result').style.display = '';
+  document.getElementById('analysis-result').innerHTML = '<div style="font-size:13px;color:var(--muted)"><span class="spin spin-dark"></span> Analyzing...</div>';
+  try {
+    const result = await api(`/clients/${clientId}/website/analyze`, { method: 'POST', body: { url } });
+    const d = result.discovery || {};
+    const items = [];
+    if (d.reachable) items.push({ ok: true, text: `✓ Website reachable (HTTP ${d.statusCode})` });
+    else items.push({ ok: false, text: `✗ Website not reachable` });
+    if (d.platform) items.push({ ok: true, text: `✓ Platform detected: ${d.platform}` });
+    if (d.hasSitemap) items.push({ ok: true, text: `✓ Sitemap found (${d.pagesInSitemap} pages)` });
+    else items.push({ ok: false, text: `✗ No sitemap found` });
+    if (d.hasLocalBusinessSchema) items.push({ ok: true, text: `✓ LocalBusiness schema detected` });
+    else if (d.reachable) items.push({ ok: false, text: `✗ Missing LocalBusiness schema` });
+    if (d.hasGa4) items.push({ ok: true, text: `✓ Google Analytics 4 detected` });
+    if (d.hasGtm) items.push({ ok: true, text: `✓ Google Tag Manager detected` });
+    if (d.hasSSL) items.push({ ok: true, text: `✓ HTTPS / SSL active` });
+    if (d.hasMobileViewport) items.push({ ok: true, text: `✓ Mobile viewport configured` });
+    websiteId = result.website_id;
+    document.getElementById('analysis-result').innerHTML = `<div style="display:grid;gap:4px;margin-top:4px">${items.map(i => `<div style="font-size:12px;padding:4px 8px;border-radius:5px;background:${i.ok ? '#f0fdf4' : '#fef2f2'};color:${i.ok ? '#065f46' : '#991b1b'}">${i.text}</div>`).join('')}</div>`;
+    await init();
+    toast('✓ Analysis complete');
+  } catch (e) { document.getElementById('analysis-result').innerHTML = `<div style="font-size:12px;color:var(--red)">Error: ${e.message}</div>`; }
+}
+
+async function saveGit() {
+  const btn = document.getElementById('btn-save-git');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Testing...';
+  try {
+    const result = await api(`/website/${websiteId}/git`, { method: 'POST', body: {
+      provider: document.getElementById('git-provider').value,
+      repoUrl: document.getElementById('git-repo-url').value,
+      defaultBranch: document.getElementById('git-default-branch').value,
+      productionBranch: document.getElementById('git-prod-branch').value,
+      stagingBranch: document.getElementById('git-staging-branch').value,
+      accessMode: document.getElementById('git-access-mode').value,
+      deploymentPlatform: document.getElementById('git-deploy-platform').value,
+      deploymentProjectId: document.getElementById('git-deploy-project').value,
+      gitToken: document.getElementById('git-token').value || null
+    }});
+    document.getElementById('git-token').value = '';
+    document.getElementById('git-result').innerHTML = renderValidationResult(result);
+    setConn('git-pill', result.status);
+    toast('✓ Git connection saved');
+    await init();
+  } catch (e) { document.getElementById('git-result').innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`; }
+  btn.disabled = false; btn.innerHTML = '💾 Save & Test Connection';
+}
+
+async function saveCms() {
+  const btn = document.getElementById('btn-save-cms');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Testing...';
+  try {
+    const result = await api(`/website/${websiteId}/cms`, { method: 'POST', body: {
+      cmsType: document.getElementById('cms-type').value,
+      adminUrl: document.getElementById('cms-admin-url').value,
+      username: document.getElementById('cms-username').value,
+      accessEmail: document.getElementById('cms-email').value,
+      apiEnabled: document.getElementById('cms-api-enabled').checked,
+      apiBaseUrl: document.getElementById('cms-api-url').value,
+      cmsApiToken: document.getElementById('cms-api-token').value || null,
+      cmsPassword: document.getElementById('cms-password').value || null,
+      environmentScope: document.getElementById('cms-env').value
+    }});
+    document.getElementById('cms-api-token').value = '';
+    document.getElementById('cms-password').value = '';
+    document.getElementById('cms-result').innerHTML = renderValidationResult(result);
+    setConn('cms-pill', result.status);
+    toast('✓ CMS connection saved');
+    await init();
+  } catch (e) { document.getElementById('cms-result').innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`; }
+  btn.disabled = false; btn.innerHTML = '💾 Save & Test Connection';
+}
+
+async function saveServer() {
+  const btn = document.getElementById('btn-save-server');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Testing...';
+  try {
+    const result = await api(`/website/${websiteId}/server`, { method: 'POST', body: {
+      accessType: document.getElementById('server-type').value,
+      host: document.getElementById('server-host').value,
+      port: parseInt(document.getElementById('server-port').value) || 22,
+      username: document.getElementById('server-username').value,
+      authType: document.getElementById('server-auth').value,
+      siteRootPath: document.getElementById('server-root').value,
+      backupPath: document.getElementById('server-backup').value,
+      deployCommand: document.getElementById('server-deploy').value,
+      buildCommand: document.getElementById('server-build').value,
+      restartCommand: document.getElementById('server-restart').value,
+      serverPassword: document.getElementById('server-password').value || null,
+      sshPrivateKey: document.getElementById('server-ssh-key').value || null
+    }});
+    document.getElementById('server-password').value = '';
+    document.getElementById('server-ssh-key').value = '';
+    document.getElementById('server-result').innerHTML = renderValidationResult(result);
+    setConn('server-pill', result.status);
+    toast('✓ Server connection saved');
+    await init();
+  } catch (e) { document.getElementById('server-result').innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${e.message}</div>`; }
+  btn.disabled = false; btn.innerHTML = '💾 Save & Test Connection';
+}
+
+async function savePolicy() {
+  if (!websiteId) { toast('Save website identity first'); return; }
+  try {
+    const forbidden = Array.from(document.querySelectorAll('#forbidden-tags .path-tag')).map(t => t.textContent.replace('×','').trim()).filter(Boolean);
+    const protected_ = Array.from(document.querySelectorAll('#protected-tags .path-tag')).map(t => t.textContent.replace('×','').trim()).filter(Boolean);
+    await api(`/website/${websiteId}/policy`, { method: 'POST', body: {
+      allow_crawl: document.getElementById('p-allow-crawl').checked,
+      allow_analysis: document.getElementById('p-allow-analysis').checked,
+      allow_content_edits: document.getElementById('p-allow-content').checked,
+      allow_schema_edits: document.getElementById('p-allow-schema').checked,
+      allow_technical_seo_edits: document.getElementById('p-allow-tech-seo').checked,
+      allow_code_changes: document.getElementById('p-allow-code').checked,
+      allow_staging_changes: document.getElementById('p-allow-staging').checked,
+      allow_direct_production_changes: document.getElementById('p-allow-prod').checked,
+      require_pr: document.getElementById('p-require-pr').checked,
+      require_staging_first: document.getElementById('p-require-staging').checked,
+      require_manual_approval_before_publish: document.getElementById('p-require-approval').checked,
+      allow_autonomous_safe_changes: document.getElementById('p-auto-safe').checked,
+      allow_autonomous_content_expansion: document.getElementById('p-auto-content').checked,
+      allow_autonomous_meta_updates: document.getElementById('p-auto-meta').checked,
+      allow_autonomous_internal_linking: document.getElementById('p-auto-linking').checked,
+      allow_autonomous_schema_markup: document.getElementById('p-auto-schema').checked,
+      forbidden_paths: forbidden, protected_paths: protected_
+    }});
+    toast('✓ Safety rules saved');
+  } catch (e) { toast('Error: ' + e.message, true); }
+}
+
+async function saveAll() {
+  // Save website identity from read-only fields
+  if (!websiteId) {
+    const url = document.getElementById('ro-prod-url')?.value?.trim();
+    if (url) await runAnalysis();
+  }
+  await savePolicy();
+  toast('✓ All changes saved');
+}
+
+async function validateGit() { if (!websiteId) return; const r = await api(`/website/${websiteId}/git/validate`, { method: 'POST' }); setConn('git-pill', r.status); setConn('git-detail-conn', r.status); await loadValidations(); toast(`Git: ${r.status}`); }
+async function validateCms() { if (!websiteId) return; const r = await api(`/website/${websiteId}/cms/validate`, { method: 'POST' }); setConn('cms-pill', r.status); await loadValidations(); toast(`CMS: ${r.status}`); }
+async function validateServer() { if (!websiteId) return; const r = await api(`/website/${websiteId}/server/validate`, { method: 'POST' }); setConn('server-pill', r.status); await loadValidations(); toast(`Server: ${r.status}`); }
+async function validateAll() { if (!websiteId) { toast('Configure website first'); return; } toast('Running validations...'); const r = await api(`/website/${websiteId}/validate-all`, { method: 'POST' }); await init(); await loadValidations(); toast('✓ Validations complete'); }
+
+async function loadValidations() {
+  if (!websiteId) return;
+  try {
+    const logs = await api(`/website/${websiteId}/validations`);
+    const tbody = document.getElementById('validation-list');
+    if (!logs.length) return;
+    const icons = { git: '📁', cms: '🖥', server: '🔒', crawl: '🔍', deploy: '🚀', full: '✅' };
+    tbody.innerHTML = logs.map(l => `<div class="vl-row">
+      <div class="vl-icon">${icons[l.validation_type] || '🔍'}</div>
+      <div class="vl-info"><div class="vl-title">${l.validation_type} validation</div><div class="vl-sub">${l.error || JSON.stringify(l.details).slice(0,100)}</div></div>
+      <div style="margin:0 12px"><span class="status-pill ${l.status === 'passed' ? 'sp-connected' : l.status === 'partial' ? 'sp-limited' : 'sp-failed'}">${l.status}</span></div>
+      <div class="vl-time">${new Date(l.created_at).toLocaleString()}</div>
+    </div>`).join('');
+  } catch (e) {}
+}
+
+async function loadHistory() {
+  if (!websiteId) return;
+  try {
+    const changes = await api(`/website/${websiteId}/changes`);
+    const tbody = document.getElementById('history-tbody');
+    if (!changes.length) return;
+    tbody.innerHTML = changes.map(c => `<tr>
+      <td><span style="font-size:12px;font-weight:600">${c.change_type?.replace(/_/g,' ')}</span></td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${c.target_path || c.target_url || '—'}</td>
+      <td><span class="status-pill ${c.environment === 'production' ? 'sp-failed' : 'sp-readonly'}">${c.environment}</span></td>
+      <td>${c.published ? '✓' : '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${c.approved_by || '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${new Date(c.created_at).toLocaleDateString()}</td>
+    </tr>`).join('');
+  } catch (e) {}
+}
+
+function renderValidationResult(r) {
+  if (!r) return '';
+  const color = r.status === 'connected' ? '#065f46' : r.status === 'limited' ? '#92400e' : '#991b1b';
+  const bg = r.status === 'connected' ? '#f0fdf4' : r.status === 'limited' ? '#fef3c7' : '#fef2f2';
+  const checks = Object.entries(r.results || {}).filter(([k, v]) => typeof v === 'boolean').map(([k, v]) => `<div style="font-size:11px">${v ? '✓' : '✗'} ${k.replace(/_/g,' ')}</div>`).join('');
+  return `<div style="background:${bg};border-radius:8px;padding:12px;font-size:13px;font-weight:600;color:${color}">
+    Status: ${r.status}${r.error ? ` — ${r.error}` : ''}
+    ${checks ? `<div style="margin-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:2px">${checks}</div>` : ''}
+  </div>`;
+}
+
+function addPath(type) {
+  const input = document.getElementById(`${type}-path-input`);
+  const val = input?.value?.trim();
+  if (!val) return;
+  const container = document.getElementById(`${type}-tags`);
+  const span = document.createElement('span');
+  span.className = 'path-tag';
+  span.innerHTML = `${val}<span class="path-rm" onclick="removeTag('${type}-tags', this)">×</span>`;
+  container.appendChild(span);
+  input.value = '';
+}
+
+function removeTag(containerId, el) { el.closest('.path-tag').remove(); }
+
+function copyField(id) {
+  const el = document.getElementById(id);
+  if (el) { navigator.clipboard.writeText(el.value); toast('✓ Copied'); }
+}
+
+let toastT;
+function toast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+init();
+</script>
+</body>
+</html>

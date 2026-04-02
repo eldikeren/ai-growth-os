@@ -573,6 +573,9 @@ export async function runPostChangePipeline(clientId, triggeringRunId, originalP
     .update({ post_change_validation_status: 'running' })
     .eq('id', triggeringRunId);
 
+  // Fire-and-forget: process queue immediately
+  processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
+
   return { queued: queueItems.length, validation_chain: queueItems.map(q => q.id) };
 }
 
@@ -613,6 +616,9 @@ export async function runLane(clientId, laneName) {
     actor: 'admin',
     details: { lane: laneName, agents_queued: laneAgents.length }
   });
+
+  // Fire-and-forget: process queue immediately
+  processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
 
   return { queued: inserted?.length || 0, lane: laneName, agents: laneAgents.map(a => a.agent_templates.name) };
 }
@@ -658,6 +664,9 @@ export async function runAllAgentsForClient(clientId) {
     details: { agents_queued: queueItems.length }
   });
 
+  // Fire-and-forget: process queue immediately
+  processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
+
   return { queued: inserted?.length || 0, total_agents: assignments.length };
 }
 
@@ -692,6 +701,9 @@ export async function retryRun(runId) {
     actor: 'admin',
     details: { original_run_id: runId, new_queue_item_id: queueItem?.id }
   });
+
+  // Fire-and-forget: process queue immediately
+  processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
 
   return { success: true, queueItemId: queueItem?.id };
 }
@@ -1421,6 +1433,11 @@ export async function enqueueDueRuns() {
     }).eq('id', schedule.id);
 
     queued++;
+  }
+
+  // Fire-and-forget: process queue immediately after enqueuing scheduled runs
+  if (queued > 0) {
+    processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
   }
 
   return { queued };

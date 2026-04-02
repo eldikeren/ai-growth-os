@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "installCommand": "cd backend && npm install",
+  "outputDirectory": "frontend/dist",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index.js" },
+    { "source": "/:path*", "destination": "/index.html" }
+  ],
+  "crons": [
+    { "path": "/api/cron/enqueue-scheduled", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/process-queue", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/health-check", "schedule": "0 */6 * * *" }
+  ],
+  "functions": {
+    "api/index.js": { "maxDuration": 60 }
+  }
+}

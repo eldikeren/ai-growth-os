@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { LayoutDashboard, FileText, Users, Bot, Play, ListOrdered, CheckSquare, Brain, Link, BarChart3, Shield, Clock, Key, AlertTriangle, BookOpen, RefreshCw, X, Check, Zap, Loader, Eye, Trash2, Database, Activity, Globe } from "lucide-react";
 
-const API = "http://localhost:3001/api";
+const API = window.location.hostname === 'localhost' ? 'http://localhost:3001/api' : '/api';
 async function api(path, opts = {}) {
   const res = await fetch(`${API}${path}`, { headers: {"Content-Type":"application/json"}, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
   const d = await res.json();

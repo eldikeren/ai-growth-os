@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Growth OS — Client Setup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a12;
+    --surface: #12121e;
+    --surface2: #1a1a2e;
+    --border: #2a2a42;
+    --accent: #6366f1;
+    --accent2: #818cf8;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --card-bg: rgba(26,26,46,0.9);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Heebo', sans-serif;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99,102,241,0.15) 0%, transparent 70%),
+      radial-gradient(ellipse 40% 40% at 80% 80%, rgba(16,185,129,0.08) 0%, transparent 60%);
+  }
+  .shell { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
+
+  /* HEADER */
+  .header { text-align: center; margin-bottom: 48px; animation: fadeDown 0.6s ease; }
+  .header .brand { font-family: 'DM Sans', sans-serif; font-size: 11px; letter-spacing: 3px; color: var(--accent2); margin-bottom: 20px; }
+  .header h1 { font-size: 28px; font-weight: 800; margin-bottom: 8px; }
+  .header p { font-size: 15px; color: var(--muted); line-height: 1.6; }
+  .client-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 100px; padding: 6px 16px; font-size: 13px;
+    color: var(--accent2); margin-bottom: 20px;
+  }
+
+  /* PROGRESS */
+  .progress-bar {
+    background: var(--surface2); border-radius: 100px;
+    height: 6px; margin: 24px 0; overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .progress-fill {
+    height: 100%; background: linear-gradient(90deg, var(--accent), var(--green));
+    border-radius: 100px; transition: width 0.5s ease;
+  }
+  .progress-text { font-size: 13px; color: var(--muted); margin-bottom: 32px; text-align: center; }
+
+  /* CONNECTOR CARD */
+  .connector-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px; margin-bottom: 16px;
+    overflow: hidden;
+    backdrop-filter: blur(8px);
+    transition: border-color 0.2s, transform 0.2s;
+    animation: fadeUp 0.4s ease both;
+  }
+  .connector-card:hover { border-color: rgba(99,102,241,0.4); }
+  .connector-card.completed { border-color: rgba(16,185,129,0.4); }
+  .connector-card.skipped { opacity: 0.5; }
+
+  .connector-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 20px 24px; cursor: pointer;
+  }
+  .connector-icon {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: var(--surface2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; flex-shrink: 0;
+  }
+  .connector-info { flex: 1; }
+  .connector-name { font-size: 16px; font-weight: 700; margin-bottom: 2px; }
+  .connector-desc { font-size: 13px; color: var(--muted); line-height: 1.4; }
+  .connector-status {
+    flex-shrink: 0; width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+  }
+  .status-pending { background: var(--surface2); border: 2px solid var(--border); color: var(--muted); }
+  .status-connected { background: rgba(16,185,129,0.15); border: 2px solid var(--green); color: var(--green); }
+  .status-skipped { background: var(--surface2); border: 2px dashed var(--border); color: var(--muted); font-size: 11px; }
+
+  /* CONNECTOR FORM */
+  .connector-form { padding: 0 24px 24px; border-top: 1px solid var(--border); margin-top: 0; }
+  .connector-form.hidden { display: none; }
+  .form-group { margin-top: 16px; }
+  .form-label { font-size: 12px; font-weight: 600; color: var(--accent2); display: block; margin-bottom: 6px; }
+  .form-help { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .form-input {
+    width: 100%; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; color: var(--text); font-family: 'Heebo', sans-serif;
+    font-size: 14px; outline: none; transition: border-color 0.2s;
+    direction: ltr; text-align: left;
+  }
+  .form-input:focus { border-color: var(--accent); }
+  .form-select { appearance: none; cursor: pointer; }
+
+  /* OAUTH BUTTON */
+  .oauth-btn {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; border-radius: 12px; cursor: pointer;
+    font-family: 'Heebo', sans-serif; font-size: 14px; font-weight: 600;
+    width: 100%; margin-top: 16px; border: 1px solid var(--border);
+    transition: all 0.2s;
+  }
+  .oauth-google {
+    background: #fff; color: #1f2937; border-color: #e5e7eb;
+  }
+  .oauth-google:hover { background: #f9fafb; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  .oauth-meta {
+    background: #1877f2; color: #fff; border-color: #1877f2;
+  }
+  .oauth-meta:hover { background: #166fe5; transform: translateY(-1px); }
+  .oauth-logo { width: 20px; height: 20px; }
+
+  /* ACTION BUTTONS */
+  .form-actions { display: flex; gap: 10px; margin-top: 20px; }
+  .btn-connect {
+    flex: 1; padding: 12px; border-radius: 10px; cursor: pointer;
+    font-family: 'Heebo', sans-serif; font-size: 14px; font-weight: 700;
+    background: var(--accent); color: #fff; border: none;
+    transition: all 0.2s;
+  }
+  .btn-connect:hover { background: #4f46e5; transform: translateY(-1px); }
+  .btn-connect:disabled { background: var(--surface2); color: var(--muted); cursor: not-allowed; transform: none; }
+  .btn-skip {
+    padding: 12px 20px; border-radius: 10px; cursor: pointer;
+    font-family: 'Heebo', sans-serif; font-size: 14px; font-weight: 600;
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    transition: all 0.2s;
+  }
+  .btn-skip:hover { color: var(--text); border-color: var(--text); }
+
+  /* CONNECTED STATE */
+  .connected-badge {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3);
+    border-radius: 8px; padding: 10px 14px; margin-top: 16px;
+    color: var(--green); font-size: 13px; font-weight: 600;
+  }
+
+  /* COMPLETED SCREEN */
+  .completed-screen {
+    text-align: center; padding: 60px 20px;
+    animation: scaleIn 0.5s ease;
+  }
+  .completed-icon {
+    width: 80px; height: 80px; border-radius: 50%;
+    background: rgba(16,185,129,0.15); border: 2px solid var(--green);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px; margin: 0 auto 24px;
+  }
+  .completed-screen h2 { font-size: 24px; font-weight: 800; margin-bottom: 12px; }
+  .completed-screen p { font-size: 15px; color: var(--muted); line-height: 1.6; }
+
+  /* PASSWORD TOGGLE */
+  .password-wrapper { position: relative; }
+  .password-toggle {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    font-size: 16px;
+  }
+
+  /* DIVIDER */
+  .divider { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--muted); font-size: 12px; }
+  .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* SECURITY NOTE */
+  .security-note {
+    background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2);
+    border-radius: 10px; padding: 14px 16px; margin-top: 16px;
+    font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: flex-start;
+  }
+  .security-note .lock { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+
+  /* ANIMATIONS */
+  @keyframes fadeDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes scaleIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+
+  /* DELAY STAGGER */
+  .connector-card:nth-child(1) { animation-delay: 0.1s; }
+  .connector-card:nth-child(2) { animation-delay: 0.15s; }
+  .connector-card:nth-child(3) { animation-delay: 0.2s; }
+  .connector-card:nth-child(4) { animation-delay: 0.25s; }
+  .connector-card:nth-child(5) { animation-delay: 0.3s; }
+  .connector-card:nth-child(6) { animation-delay: 0.35s; }
+  .connector-card:nth-child(7) { animation-delay: 0.4s; }
+</style>
+</head>
+<body>
+
+<div class="shell" id="app">
+  <div id="loading" style="text-align:center;padding:100px 20px;color:#64748b;">
+    <div class="spinner" style="width:32px;height:32px;margin:0 auto 16px;"></div>
+    <div>טוען...</div>
+  </div>
+</div>
+
+<script>
+const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:3001/api' : '/api';
+const token = window.location.pathname.split('/setup/')[1]?.split('/')[0];
+
+let linkData = null;
+let openCard = null;
+
+async function init() {
+  if (!token) { showError('קישור לא תקין'); return; }
+  try {
+    const res = await fetch(`${API_BASE}/setup/${token}`);
+    const data = await res.json();
+    if (data.error) { showError(data.error); return; }
+    if (data.completed) { showCompleted(data); return; }
+    linkData = data;
+    render();
+  } catch (e) { showError('שגיאה בטעינת הדף. אנא נסו שוב.'); }
+}
+
+function showError(msg) {
+  document.getElementById('app').innerHTML = `
+    <div style="text-align:center;padding:80px 20px;">
+      <div style="font-size:48px;margin-bottom:20px;">⚠️</div>
+      <h2 style="font-size:20px;margin-bottom:12px;color:#ef4444;">קישור לא זמין</h2>
+      <p style="color:#64748b;font-size:14px;">${msg}</p>
+      <p style="color:#64748b;font-size:14px;margin-top:12px;">לבירורים, פנו למנהל החשבון שלכם.</p>
+    </div>`;
+}
+
+function showCompleted(data) {
+  const isHe = (data.language || 'he') === 'he';
+  document.getElementById('app').innerHTML = `
+    <div class="completed-screen">
+      <div class="completed-icon">✓</div>
+      <h2>${isHe ? 'ההגדרה הושלמה!' : 'Setup Complete!'}</h2>
+      <p>${isHe ? 'כל החיבורים הוגדרו בהצלחה. נציג החשבון שלכם יקבל עדכון ויתחיל לעבוד על הפרויקט שלכם.' : 'All connections have been configured. Your account manager has been notified and will begin working on your project.'}</p>
+    </div>`;
+}
+
+function render() {
+  const d = linkData;
+  const isHe = d.language === 'he';
+  const completed = d.completed_connectors || [];
+  const skipped = d.skipped_connectors || [];
+  const total = d.connectors?.length || 0;
+  const done = completed.length + skipped.length;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  let html = `
+    <div class="header">
+      <div class="brand">ELAD DIGITAL · ${isHe ? 'הגדרת מערכת' : 'SYSTEM SETUP'}</div>
+      <div class="client-badge">👋 ${isHe ? 'שלום' : 'Hello'}, ${d.client_name || ''}</div>
+      <h1>${isHe ? 'חיבור הכלים הדיגיטליים' : 'Connect Your Digital Tools'}</h1>
+      <p>${d.custom_message || (isHe ? 'כדי שנוכל להתחיל לעבוד עבורכם, יש לחבר את הכלים הבאים. כל חיבור לוקח כ-30 שניות.' : 'To start working on your behalf, please connect the following tools. Each takes about 30 seconds.')}</p>
+    </div>
+
+    <div class="progress-bar">
+      <div class="progress-fill" style="width:${pct}%"></div>
+    </div>
+    <div class="progress-text">${done} / ${total} ${isHe ? 'חיבורים הושלמו' : 'connections completed'}</div>
+  `;
+
+  for (const connector of (d.connectors || [])) {
+    const isDone = completed.includes(connector.slug);
+    const isSkipped = skipped.includes(connector.slug);
+    const sub = connector.submission;
+
+    html += `
+      <div class="connector-card ${isDone ? 'completed' : ''} ${isSkipped ? 'skipped' : ''}" id="card-${connector.slug}">
+        <div class="connector-header" onclick="toggleCard('${connector.slug}')">
+          <div class="connector-icon">${connector.icon || '🔌'}</div>
+          <div class="connector-info">
+            <div class="connector-name">${isHe && connector.name_he ? connector.name_he : connector.name}</div>
+            <div class="connector-desc">${isHe && connector.description_he ? connector.description_he : connector.description}</div>
+            ${isDone && sub?.oauth_account_email ? `<div style="font-size:11px;color:#10b981;margin-top:4px;">✓ ${sub.oauth_account_email}</div>` : ''}
+            ${isSkipped ? `<div style="font-size:11px;color:#64748b;margin-top:4px;">${isHe ? 'דולג' : 'Skipped'}</div>` : ''}
+          </div>
+          <div class="connector-status ${isDone ? 'status-connected' : isSkipped ? 'status-skipped' : 'status-pending'}">
+            ${isDone ? '✓' : isSkipped ? '—' : '›'}
+          </div>
+        </div>
+        <div class="connector-form hidden" id="form-${connector.slug}">
+          ${renderConnectorForm(connector, isHe)}
+        </div>
+      </div>`;
+  }
+
+  if (done === total && total > 0) {
+    html += `
+      <div style="text-align:center;margin-top:32px;padding:24px;background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:16px;">
+        <div style="font-size:32px;margin-bottom:12px;">🎉</div>
+        <div style="font-size:18px;font-weight:700;color:#10b981;margin-bottom:8px;">${isHe ? 'הכל מוכן!' : 'All Done!'}</div>
+        <div style="font-size:14px;color:#64748b;">${isHe ? 'נציג החשבון שלכם קיבל עדכון ויצור קשר בקרוב.' : 'Your account manager has been notified and will be in touch soon.'}</div>
+      </div>`;
+  }
+
+  document.getElementById('app').innerHTML = html;
+}
+
+function renderConnectorForm(c, isHe) {
+  const fields = Array.isArray(c.fields) ? c.fields : (typeof c.fields === 'string' ? JSON.parse(c.fields) : []);
+
+  let html = '';
+
+  // OAuth buttons
+  if (c.auth_type === 'oauth_google') {
+    html += `
+      <button class="oauth-btn oauth-google" onclick="handleGoogleOAuth('${c.slug}')">
+        <svg class="oauth-logo" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        ${isHe ? 'התחברו עם Google' : 'Continue with Google'}
+      </button>
+      <div class="security-note">
+        <span class="lock">🔒</span>
+        <span>${isHe ? 'גישה לקריאה בלבד. איננו מבצעים שינויים ללא אישורכם.' : 'Read-only access. We never make changes without your approval.'}</span>
+      </div>`;
+  } else if (c.auth_type === 'oauth_meta') {
+    html += `
+      <button class="oauth-btn oauth-meta" onclick="handleMetaOAuth('${c.slug}')">
+        <svg class="oauth-logo" viewBox="0 0 24 24" fill="white"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
+        ${isHe ? 'התחברו עם Facebook' : 'Continue with Facebook'}
+      </button>
+      <div class="security-note">
+        <span class="lock">🔒</span>
+        <span>${isHe ? 'גישה לדף העסקי בלבד. לא לפרופיל האישי.' : 'Business Page access only. Not your personal profile.'}</span>
+      </div>`;
+  } else if (c.auth_type === 'username_password' || c.auth_type === 'api_key' || c.auth_type === 'manual') {
+    for (const field of fields) {
+      const label = isHe && field.label_he ? field.label_he : field.label;
+      const help = isHe && field.help_text_he ? field.help_text_he : field.help_text;
+      const placeholder = field.placeholder || '';
+
+      html += `<div class="form-group">
+        <label class="form-label" for="f-${c.slug}-${field.key}">${label}${field.required ? ' *' : ''}</label>`;
+
+      if (field.type === 'select') {
+        html += `<select class="form-input form-select" id="f-${c.slug}-${field.key}" style="direction:rtl;text-align:right;">
+          <option value="">${isHe ? 'בחרו...' : 'Select...'}</option>
+          ${(field.options || []).map(o => `<option value="${o}">${o}</option>`).join('')}
+        </select>`;
+      } else if (field.type === 'textarea') {
+        html += `<textarea class="form-input" id="f-${c.slug}-${field.key}" rows="3" placeholder="${placeholder}" style="resize:vertical;direction:ltr;text-align:left;"></textarea>`;
+      } else if (field.type === 'password') {
+        html += `<div class="password-wrapper">
+          <input class="form-input" type="password" id="f-${c.slug}-${field.key}" placeholder="${placeholder}" style="padding-left:40px;">
+          <button class="password-toggle" type="button" onclick="togglePassword('f-${c.slug}-${field.key}')">👁</button>
+        </div>`;
+      } else if (field.type === 'boolean') {
+        html += `<select class="form-input form-select" id="f-${c.slug}-${field.key}" style="direction:rtl;text-align:right;">
+          <option value="false">${isHe ? 'לא' : 'No'}</option>
+          <option value="true">${isHe ? 'כן' : 'Yes'}</option>
+        </select>`;
+      } else {
+        html += `<input class="form-input" type="${field.type === 'url' ? 'url' : field.type === 'email' ? 'email' : 'text'}" id="f-${c.slug}-${field.key}" placeholder="${placeholder}" style="direction:ltr;text-align:left;">`;
+      }
+
+      if (help) html += `<div class="form-help">${help}</div>`;
+      html += `</div>`;
+    }
+
+    html += `
+      <div class="security-note">
+        <span class="lock">🔒</span>
+        <span>${isHe ? 'כל הפרטים מוצפנים ומאוחסנים בבטחה. לעולם לא נשתף אותם עם צד שלישי.' : 'All credentials are encrypted and stored securely. We never share them with third parties.'}</span>
+      </div>`;
+  }
+
+  html += `
+    <div class="form-actions" style="margin-top:20px;">
+      <button class="btn-connect" id="btn-${c.slug}" onclick="submitConnector('${c.slug}')">
+        ${isHe ? 'חברו ✓' : 'Connect ✓'}
+      </button>
+      <button class="btn-skip" onclick="skipConnector('${c.slug}')">
+        ${isHe ? 'דלגו' : 'Skip'}
+      </button>
+    </div>`;
+
+  return html;
+}
+
+function toggleCard(slug) {
+  const form = document.getElementById(`form-${slug}`);
+  const isOpen = !form.classList.contains('hidden');
+  // Close all
+  document.querySelectorAll('.connector-form').forEach(f => f.classList.add('hidden'));
+  if (!isOpen) form.classList.remove('hidden');
+  openCard = isOpen ? null : slug;
+}
+
+function togglePassword(id) {
+  const input = document.getElementById(id);
+  input.type = input.type === 'password' ? 'text' : 'password';
+}
+
+async function handleGoogleOAuth(slug) {
+  // In production: redirect to Google OAuth flow
+  // For demo: simulate connection
+  const email = prompt('Enter the Google account email (demo mode):');
+  if (!email) return;
+  await submitConnectorData(slug, 'oauth_token', {}, { account_email: email, scopes: ['granted'] });
+}
+
+async function handleMetaOAuth(slug) {
+  const email = prompt('Enter the Facebook account email (demo mode):');
+  if (!email) return;
+  await submitConnectorData(slug, 'oauth_token', {}, { account_email: email, page_type: 'business' });
+}
+
+async function submitConnector(slug) {
+  const connector = linkData.connectors.find(c => c.slug === slug);
+  if (!connector) return;
+  const fields = Array.isArray(connector.fields) ? connector.fields : JSON.parse(connector.fields || '[]');
+
+  const credData = {};
+  let valid = true;
+
+  for (const field of fields) {
+    const el = document.getElementById(`f-${slug}-${field.key}`);
+    if (!el) continue;
+    const val = el.value.trim();
+    if (field.required && !val) {
+      el.style.borderColor = 'var(--red)';
+      valid = false;
+    } else {
+      el.style.borderColor = 'var(--border)';
+      credData[field.key] = val;
+    }
+  }
+
+  if (!valid) { alert(linkData.language === 'he' ? 'אנא מלאו את כל השדות הנדרשים' : 'Please fill in all required fields'); return; }
+
+  await submitConnectorData(slug, 'credentials', credData, {});
+}
+
+async function skipConnector(slug) {
+  const isHe = linkData.language === 'he';
+  const confirmed = confirm(isHe ? 'בטוחים שברצונכם לדלג? ניתן לחבר מאוחר יותר.' : 'Sure you want to skip? You can connect later.');
+  if (!confirmed) return;
+  await submitConnectorData(slug, 'skipped', {}, {});
+}
+
+async function submitConnectorData(slug, type, data, meta) {
+  const btn = document.getElementById(`btn-${slug}`);
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>'; }
+
+  try {
+    const res = await fetch(`${API_BASE}/setup/${token}/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connector_slug: slug, type, data, meta })
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error);
+
+    // Update local state
+    if (type === 'skipped') {
+      if (!linkData.skipped_connectors.includes(slug)) linkData.skipped_connectors.push(slug);
+    } else {
+      if (!linkData.completed_connectors.includes(slug)) linkData.completed_connectors.push(slug);
+      linkData.skipped_connectors = linkData.skipped_connectors.filter(s => s !== slug);
+    }
+    // Update connector submission
+    const c = linkData.connectors.find(c => c.slug === slug);
+    if (c) { c.submission = { status: type === 'skipped' ? 'skipped' : 'connected', oauth_account_email: meta?.account_email }; c.is_completed = type !== 'skipped'; c.is_skipped = type === 'skipped'; }
+
+    if (result.all_done) {
+      setTimeout(() => showCompleted({ language: linkData.language, client_name: linkData.client_name }), 800);
+    } else {
+      render();
+      // Auto-open next pending connector
+      setTimeout(() => {
+        const next = linkData.connectors.find(c =>
+          !linkData.completed_connectors.includes(c.slug) && !linkData.skipped_connectors.includes(c.slug)
+        );
+        if (next) toggleCard(next.slug);
+      }, 300);
+    }
+  } catch (e) {
+    alert(e.message);
+    if (btn) { btn.disabled = false; btn.innerHTML = linkData.language === 'he' ? 'חברו ✓' : 'Connect ✓'; }
+  }
+}
+
+init();
+</script>
+</body>
+</html>

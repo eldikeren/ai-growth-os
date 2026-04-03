@@ -807,7 +807,99 @@ function SeoActionPlansView({ clientId }) {
   </div>;
 }
 
-const NAV=[{id:"dashboard",label:"Dashboard",icon:LayoutDashboard},{id:"agents",label:"Agents",icon:Bot},{id:"runs",label:"Runs",icon:Play},{id:"queue",label:"Queue",icon:ListOrdered},{id:"approvals",label:"Approvals",icon:CheckSquare},{id:"memory",label:"Memory",icon:Brain},{id:"seo",label:"SEO & Links",icon:Link},{id:"reports",label:"Reports",icon:BarChart3},{id:"verification",label:"Verification",icon:Shield},{id:"credentials",label:"Credentials",icon:Key},{id:"incidents",label:"Incidents",icon:AlertTriangle},{id:"audit",label:"Audit Trail",icon:BookOpen},{id:"schedules",label:"Schedules",icon:Clock},{id:"onboarding",label:"New Client",icon:Users},{id:"connectors",label:"Connectors",icon:Globe},{id:"prompt-overrides",label:"Prompt Overrides",icon:FileText},{id:"link-intelligence",label:"Link Intelligence",icon:Link},{id:"seo-actions",label:"SEO Actions",icon:Activity}];
+// ── SETUP LINKS (Magic Link Admin) ───────────────────────────
+function SetupLinksView({clientId, clients}) {
+  const [links, setLinks] = useState([]); const [loading, setLoading] = useState(false); const [creating, setCreating] = useState(false);
+  const [connDefs, setConnDefs] = useState([]); const [selected, setSelected] = useState([]);
+  const [msg, setMsg] = useState(''); const [msgHe, setMsgHe] = useState(''); const [email, setEmail] = useState(''); const [notify, setNotify] = useState('');
+  const load = async () => { setLoading(true); try { const d = clientId ? await api(`/clients/${clientId}/setup-links`) : await api('/setup-links'); setLinks(d); } catch(e){} setLoading(false); };
+  const loadDefs = async () => { try { const d = await api('/connector-definitions'); setConnDefs(d); setSelected(d.map(c=>c.slug)); } catch(e){} };
+  useEffect(() => { load(); loadDefs(); }, [clientId]);
+  const create = async () => { if (!clientId) { alert('Select a client first'); return; } setCreating(true); try {
+    const result = await api(`/clients/${clientId}/setup-links`, { method: 'POST', body: { requestedConnectors: selected, customMessage: msg || undefined, customMessageHe: msgHe || undefined, clientEmail: email || undefined, notifyEmail: notify || undefined, language: 'he' } });
+    alert(`Magic link created!\n\n${result.setup_url}\n\nExpires: ${new Date(result.expires_at).toLocaleDateString()}`);
+    navigator.clipboard?.writeText(result.setup_url); load();
+  } catch(e) { alert(e.message); } setCreating(false); };
+  const revoke = async (id) => { if (!confirm('Revoke this link?')) return; try { await api(`/setup-links/${id}`, { method: 'DELETE' }); load(); } catch(e) { alert(e.message); } };
+  const regen = async (id) => { try { const r = await api(`/setup-links/${id}/regenerate`, { method: 'POST' }); alert(`New link:\n${r.setup_url}`); navigator.clipboard?.writeText(r.setup_url); load(); } catch(e) { alert(e.message); } };
+  const toggleConn = (slug) => setSelected(s => s.includes(slug) ? s.filter(x=>x!==slug) : [...s, slug]);
+  const client = clients?.find(c=>c.id===clientId);
+  return <div>
+    <SH title="Setup Links" sub="Create magic links for client onboarding. Client opens the link, connects their tools, and agents start working." action={<Btn small secondary onClick={load}><RefreshCw size={12}/></Btn>}/>
+    <Card style={{marginBottom:20}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>Create New Setup Link {client ? `for ${client.name}` : ''}</div>
+      {!clientId ? <div style={{color:'#9ca3af',fontSize:13}}>Select a client from the dropdown first</div> : <>
+        <div style={{fontSize:12,fontWeight:600,color:'#6b7280',marginBottom:8}}>Connectors to request:</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:14}}>
+          {connDefs.map(c => <button key={c.slug} onClick={()=>toggleConn(c.slug)} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${selected.includes(c.slug)?'#6366f1':'#e5e7eb'}`,background:selected.includes(c.slug)?'#eef2ff':'#fff',fontSize:11,fontWeight:600,cursor:'pointer',color:selected.includes(c.slug)?'#4f46e5':'#6b7280'}}>{c.icon} {c.name}</button>)}
+          <button key="git_repo" onClick={()=>toggleConn('git_repo')} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${selected.includes('git_repo')?'#6366f1':'#e5e7eb'}`,background:selected.includes('git_repo')?'#eef2ff':'#fff',fontSize:11,fontWeight:600,cursor:'pointer',color:selected.includes('git_repo')?'#4f46e5':'#6b7280'}}>📁 Git Repository</button>
+          <button key="cms_access" onClick={()=>toggleConn('cms_access')} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${selected.includes('cms_access')?'#6366f1':'#e5e7eb'}`,background:selected.includes('cms_access')?'#eef2ff':'#fff',fontSize:11,fontWeight:600,cursor:'pointer',color:selected.includes('cms_access')?'#4f46e5':'#6b7280'}}>🖥 CMS Access</button>
+          <button key="server_access" onClick={()=>toggleConn('server_access')} style={{padding:'4px 10px',borderRadius:6,border:`1px solid ${selected.includes('server_access')?'#6366f1':'#e5e7eb'}`,background:selected.includes('server_access')?'#eef2ff':'#fff',fontSize:11,fontWeight:600,cursor:'pointer',color:selected.includes('server_access')?'#4f46e5':'#6b7280'}}>🔒 Server Access</button>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
+          <div><div style={{fontSize:11,fontWeight:600,color:'#6b7280',marginBottom:4}}>Client Email</div><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="client@example.com" style={{width:'100%',padding:'6px 10px',borderRadius:6,border:'1px solid #e5e7eb',fontSize:12}}/></div>
+          <div><div style={{fontSize:11,fontWeight:600,color:'#6b7280',marginBottom:4}}>Notify Email (admin)</div><input value={notify} onChange={e=>setNotify(e.target.value)} placeholder="you@elad.digital" style={{width:'100%',padding:'6px 10px',borderRadius:6,border:'1px solid #e5e7eb',fontSize:12}}/></div>
+        </div>
+        <div style={{marginBottom:10}}><div style={{fontSize:11,fontWeight:600,color:'#6b7280',marginBottom:4}}>Custom Message (Hebrew)</div><textarea value={msgHe} onChange={e=>setMsgHe(e.target.value)} rows={2} placeholder="הודעה אישית ללקוח..." style={{width:'100%',padding:'6px 10px',borderRadius:6,border:'1px solid #e5e7eb',fontSize:12,direction:'rtl'}}/></div>
+        <Btn onClick={create} disabled={creating||selected.length===0}>{creating?<Spin/>:<Zap size={13}/>}Create Magic Link</Btn>
+      </>}
+    </Card>
+    {loading ? <div style={{textAlign:'center',padding:30}}><Spin/></div> : links.map(l => <Card key={l.id} style={{marginBottom:10,borderColor:l.status==='completed'?'#86efac':l.status==='in_progress'?'#93c5fd':l.status==='expired'||l.status==='cancelled'?'#fca5a5':'#e5e7eb'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+        <div>
+          <div style={{fontSize:14,fontWeight:700}}>{l.client_name || l.clients?.name || 'Client'}</div>
+          <div style={{fontSize:11,color:'#9ca3af',marginTop:2}}>Created {new Date(l.created_at).toLocaleDateString()} · Expires {new Date(l.expires_at).toLocaleDateString()}</div>
+          <div style={{display:'flex',gap:4,marginTop:6,flexWrap:'wrap'}}>{(l.requested_connectors||[]).map(s=><span key={s} style={{background:'#f3f4f6',padding:'2px 6px',borderRadius:4,fontSize:10}}>{s}</span>)}</div>
+          {l.completed_connectors?.length > 0 && <div style={{fontSize:11,color:'#10b981',marginTop:4}}>Completed: {l.completed_connectors.join(', ')}</div>}
+        </div>
+        <div style={{display:'flex',gap:4,alignItems:'center'}}>
+          <Badge text={l.status} color={SC[l.status==='in_progress'?'running':l.status]||'#6b7280'} bg={(SC[l.status==='in_progress'?'running':l.status]||'#6b7280')+'22'}/>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:6,marginTop:10}}>
+        {l.status !== 'cancelled' && l.status !== 'completed' && <Btn small secondary onClick={()=>{navigator.clipboard?.writeText(`${window.location.origin}/onboarding/${l.token}`);alert('Link copied!')}}>Copy Link</Btn>}
+        {l.status !== 'cancelled' && l.status !== 'completed' && <Btn small secondary onClick={()=>revoke(l.id)}>Revoke</Btn>}
+        {(l.status === 'expired' || l.status === 'cancelled') && <Btn small secondary onClick={()=>regen(l.id)}>Regenerate</Btn>}
+      </div>
+    </Card>)}
+    {links.length===0 && !loading && <Empty icon={Zap} msg="No setup links yet — create one above"/>}
+  </div>;
+}
+
+// ── WEBSITE ACCESS (Admin) ────────────────────────────────────
+function WebsiteAccessView({clientId}) {
+  const [data, setData] = useState(null); const [loading, setLoading] = useState(false);
+  const load = async () => { if (!clientId) return; setLoading(true); try { const d = await api(`/clients/${clientId}/website`); setData(d); } catch(e) { setData(null); } setLoading(false); };
+  useEffect(() => { load(); }, [clientId]);
+  if (!clientId) return <Empty icon={Globe} msg="Select a client to view website access"/>;
+  if (loading) return <div style={{textAlign:'center',padding:40}}><Spin/></div>;
+  if (!data || !data.website) return <div>
+    <SH title="Website Access" sub="No website configured for this client yet."/>
+    <Card><div style={{textAlign:'center',padding:20,color:'#9ca3af'}}>
+      <Globe size={32} style={{marginBottom:10,opacity:0.5}}/>
+      <div style={{fontSize:14}}>Send a setup link to the client to configure website access, or open the <a href="/website-access.html" target="_blank" style={{color:'#6366f1'}}>Website Access Manager</a> to configure manually.</div>
+    </div></Card>
+  </div>;
+  const w = data.website; const ap = data.access_profile; const g = data.git; const cm = data.cms; const srv = data.server; const pol = data.policy;
+  return <div>
+    <SH title="Website Access" sub={`${w.primary_domain} · ${w.website_platform_type || 'unknown'}`} action={<Btn small secondary onClick={load}><RefreshCw size={12}/></Btn>}/>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
+      <KpiCard label="Access Level" value={ap?.current_access_level?.replace('_',' ')||'read only'} color="#6366f1"/>
+      <KpiCard label="Git" value={g?.connection_status||'none'} color={g?.connection_status==='connected'?'#10b981':'#9ca3af'}/>
+      <KpiCard label="CMS" value={cm?.connection_status||'none'} color={cm?.connection_status==='connected'?'#10b981':'#9ca3af'}/>
+      <KpiCard label="Server" value={srv?.connection_status||'none'} color={srv?.connection_status==='connected'?'#10b981':'#9ca3af'}/>
+    </div>
+    {g && <Card style={{marginBottom:10}}><div style={{fontSize:13,fontWeight:700,marginBottom:6}}>📁 Git: {g.provider} — {g.repo_owner}/{g.repo_name}</div><div style={{fontSize:12,color:'#6b7280'}}>Branch: {g.production_branch} · Mode: {g.access_mode} · Status: <span style={{color:g.connection_status==='connected'?'#10b981':'#ef4444'}}>{g.connection_status}</span></div></Card>}
+    {cm && <Card style={{marginBottom:10}}><div style={{fontSize:13,fontWeight:700,marginBottom:6}}>🖥 CMS: {cm.cms_type}</div><div style={{fontSize:12,color:'#6b7280'}}>Admin: {cm.admin_url||'—'} · API: {cm.api_enabled?'enabled':'disabled'} · Status: <span style={{color:cm.connection_status==='connected'?'#10b981':'#ef4444'}}>{cm.connection_status}</span></div></Card>}
+    {srv && <Card style={{marginBottom:10}}><div style={{fontSize:13,fontWeight:700,marginBottom:6}}>🔒 Server: {srv.access_type}</div><div style={{fontSize:12,color:'#6b7280'}}>Host: {srv.host}:{srv.port} · Root: {srv.site_root_path||'—'} · Status: <span style={{color:srv.connection_status==='connected'?'#10b981':'#ef4444'}}>{srv.connection_status}</span></div></Card>}
+    {pol && <Card><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Safety Policy</div><div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,fontSize:12}}>
+      {[['Analysis',pol.allow_analysis],['Content Edits',pol.allow_content_edits],['Code Changes',pol.allow_code_changes],['Direct Publish',pol.allow_direct_production_changes],['Require PR',pol.require_pr],['Staging First',pol.require_staging_first],['Manual Approval',pol.require_manual_approval_before_publish],['Auto Safe Changes',pol.allow_autonomous_safe_changes]].map(([k,v])=><div key={k} style={{padding:'4px 8px',background:v?'#f0fdf4':'#fef2f2',borderRadius:4,color:v?'#065f46':'#991b1b'}}>{v?'✓':'✗'} {k}</div>)}
+    </div></Card>}
+    {data.validations?.length > 0 && <Card style={{marginTop:12}}><div style={{fontSize:13,fontWeight:700,marginBottom:8}}>Recent Validations</div>{data.validations.slice(0,5).map((v,i)=><div key={i} style={{fontSize:12,padding:'4px 0',borderBottom:'1px solid #f3f4f6',display:'flex',justifyContent:'space-between'}}><span><Dot s={v.status==='passed'?'success':v.status==='failed'?'failed':'pending'}/> {v.validation_type}</span><span style={{color:'#9ca3af'}}>{new Date(v.created_at).toLocaleString()}</span></div>)}</Card>}
+  </div>;
+}
+
+const NAV=[{id:"dashboard",label:"Dashboard",icon:LayoutDashboard},{id:"agents",label:"Agents",icon:Bot},{id:"runs",label:"Runs",icon:Play},{id:"queue",label:"Queue",icon:ListOrdered},{id:"approvals",label:"Approvals",icon:CheckSquare},{id:"memory",label:"Memory",icon:Brain},{id:"seo",label:"SEO & Links",icon:Link},{id:"reports",label:"Reports",icon:BarChart3},{id:"verification",label:"Verification",icon:Shield},{id:"credentials",label:"Credentials",icon:Key},{id:"incidents",label:"Incidents",icon:AlertTriangle},{id:"audit",label:"Audit Trail",icon:BookOpen},{id:"schedules",label:"Schedules",icon:Clock},{id:"setup-links",label:"Setup Links",icon:Zap},{id:"website-access",label:"Website Access",icon:Globe},{id:"onboarding",label:"New Client",icon:Users},{id:"connectors",label:"Connectors",icon:Globe},{id:"prompt-overrides",label:"Prompt Overrides",icon:FileText},{id:"link-intelligence",label:"Link Intelligence",icon:Link},{id:"seo-actions",label:"SEO Actions",icon:Activity}];
 
 export default function App(){
   const[view,sV]=useState("dashboard");const[clients,sC]=useState([]);const[clientId,sCid]=useState("00000000-0000-0000-0000-000000000001");const[loading,sL]=useState(true);
@@ -835,6 +927,8 @@ export default function App(){
         {view==="audit"&&<AuditView clientId={clientId}/>}
         {view==="schedules"&&<SchedulesView clientId={clientId}/>}
         {view==="onboarding"&&<OnboardingView clientId={clientId} clients={clients} onClientCreated={id=>{setClientId(id);setView("dashboard");}}/>}
+        {view==="setup-links"&&<SetupLinksView clientId={clientId} clients={clients}/>}
+        {view==="website-access"&&<WebsiteAccessView clientId={clientId}/>}
         {view==="connectors"&&<ConnectorsView clientId={clientId}/>}
         {view==="prompt-overrides"&&<PromptOverridesView clientId={clientId}/>}
         {view==="link-intelligence"&&<LinkIntelligenceView clientId={clientId}/>}

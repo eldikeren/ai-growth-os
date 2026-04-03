@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Growth OS — Setup Links Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f8f9fb;
+    --surface: #ffffff;
+    --border: #e5e7eb;
+    --accent: #6366f1;
+    --green: #10b981;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --dark: #0f0f1a;
+    --text: #111827;
+    --muted: #6b7280;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; }
+  .header { background: var(--dark); color: #fff; padding: 16px 28px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2a2a42; }
+  .header h1 { font-size: 16px; font-weight: 700; color: #818cf8; letter-spacing: 0.5px; }
+  .header .sub { font-size: 12px; color: #64748b; }
+  .shell { max-width: 1100px; margin: 0 auto; padding: 28px; }
+
+  /* CREATE LINK PANEL */
+  .create-panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; margin-bottom: 24px;
+  }
+  .create-panel h2 { font-size: 16px; font-weight: 700; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+  .form-group label { font-size: 11px; font-weight: 700; color: var(--muted); display: block; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .form-input {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; font-family: 'DM Sans', sans-serif; font-size: 13px;
+    background: #f9fafb; outline: none; transition: border-color 0.15s;
+  }
+  .form-input:focus { border-color: var(--accent); background: #fff; }
+
+  /* CONNECTOR SELECTOR */
+  .connector-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 8px;
+  }
+  .connector-chip {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+    font-size: 12px; font-weight: 500; transition: all 0.15s;
+    background: #f9fafb; user-select: none;
+  }
+  .connector-chip.selected {
+    background: #eef2ff; border-color: var(--accent); color: var(--accent); font-weight: 700;
+  }
+  .connector-chip:hover { border-color: #c7d2fe; }
+  .connector-chip .chip-icon { font-size: 16px; }
+
+  /* QUICK PRESETS */
+  .presets { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .preset-btn {
+    padding: 5px 12px; border-radius: 100px; border: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; cursor: pointer; background: #f9fafb;
+    transition: all 0.15s;
+  }
+  .preset-btn:hover { background: #eef2ff; border-color: var(--accent); color: var(--accent); }
+
+  /* GENERATE BUTTON */
+  .btn-generate {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-family: 'DM Sans', sans-serif; font-size: 14px;
+    font-weight: 700; cursor: pointer; transition: all 0.15s;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .btn-generate:hover { background: #4f46e5; }
+  .btn-generate:disabled { background: #e5e7eb; color: #9ca3af; cursor: not-allowed; }
+
+  /* RESULT PANEL */
+  .result-panel {
+    background: #f0fdf4; border: 1px solid #86efac; border-radius: 10px;
+    padding: 20px; margin-top: 20px; display: none;
+  }
+  .result-panel h3 { font-size: 14px; font-weight: 700; color: #065f46; margin-bottom: 14px; }
+  .link-display {
+    background: #fff; border: 1px solid #86efac; border-radius: 8px;
+    padding: 12px 14px; font-family: monospace; font-size: 13px;
+    color: #374151; word-break: break-all; margin-bottom: 12px;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .link-display:hover { background: #f9fafb; }
+  .link-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn-action {
+    padding: 7px 14px; border-radius: 7px; font-family: 'DM Sans', sans-serif;
+    font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid;
+    transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-copy { background: #fff; color: var(--text); border-color: var(--border); }
+  .btn-copy:hover { background: #f3f4f6; }
+  .btn-whatsapp { background: #25D366; color: #fff; border-color: #25D366; }
+  .btn-email { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-preview { background: #fff; color: var(--text); border-color: var(--border); }
+  .btn-preview:hover { background: #f3f4f6; }
+
+  /* LINKS TABLE */
+  .links-section h2 { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+  .links-table { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  th { padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 700; color: var(--muted); background: #f9fafb; border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 14px 16px; border-bottom: 1px solid #f3f4f6; font-size: 13px; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafafa; }
+
+  /* STATUS PILLS */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 100px; font-size: 11px; font-weight: 700;
+  }
+  .pill-pending { background: #fef3c7; color: #92400e; }
+  .pill-progress { background: #dbeafe; color: #1e40af; }
+  .pill-completed { background: #d1fae5; color: #065f46; }
+  .pill-expired { background: #f3f4f6; color: #6b7280; }
+  .pill-cancelled { background: #fee2e2; color: #991b1b; }
+
+  /* PROGRESS MINI */
+  .progress-mini { display: flex; align-items: center; gap: 8px; }
+  .progress-mini-bar { flex: 1; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden; }
+  .progress-mini-fill { height: 100%; background: var(--green); border-radius: 2px; }
+  .progress-mini span { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+  /* ACTIONS */
+  .td-actions { display: flex; gap: 6px; }
+  .btn-sm {
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600;
+    cursor: pointer; border: 1px solid var(--border); background: #fff;
+    font-family: 'DM Sans', sans-serif; transition: all 0.15s;
+  }
+  .btn-sm:hover { background: #f3f4f6; }
+  .btn-sm.danger { color: var(--red); }
+  .btn-sm.danger:hover { background: #fee2e2; border-color: #fca5a5; }
+
+  /* TABS */
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; background: #f3f4f6; padding: 4px; border-radius: 10px; width: fit-content; }
+  .tab { padding: 7px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; border: none; background: transparent; font-family: 'DM Sans', sans-serif; }
+  .tab.active { background: #fff; color: var(--accent); box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .empty-state { text-align: center; padding: 48px; color: var(--muted); }
+  .empty-state .emoji { font-size: 32px; margin-bottom: 12px; }
+  .copy-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #111; color: #fff; padding: 10px 20px; border-radius: 100px; font-size: 13px; font-weight: 600; opacity: 0; transition: opacity 0.3s; z-index: 9999; }
+  .copy-toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>AI GROWTH OS · Setup Links</h1>
+    <div class="sub">Create and manage client onboarding magic links</div>
+  </div>
+  <div style="font-size:12px;color:#64748b;">elad.d.keren@gmail.com</div>
+</div>
+
+<div class="shell">
+
+  <!-- CREATE LINK PANEL -->
+  <div class="create-panel">
+    <h2>🔗 Create New Setup Link</h2>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Client</label>
+        <select class="form-input" id="client-select">
+          <option value="">Loading clients...</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Client Name (for greeting)</label>
+        <input class="form-input" type="text" id="client-name" placeholder="Yaniv Gil">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Client Email (optional — for WhatsApp/Email)</label>
+        <input class="form-input" type="email" id="client-email" placeholder="client@example.com">
+      </div>
+      <div class="form-group">
+        <label>Notification Email (you get notified when done)</label>
+        <input class="form-input" type="email" id="notify-email" value="elad.d.keren@gmail.com">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label>Language</label>
+        <select class="form-input" id="link-language">
+          <option value="he">עברית (Hebrew)</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Expires In</label>
+        <select class="form-input" id="link-expiry">
+          <option value="7">7 days</option>
+          <option value="14" selected>14 days</option>
+          <option value="30">30 days</option>
+          <option value="90">90 days</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-bottom:16px;">
+      <label>Custom Message (optional)</label>
+      <input class="form-input" type="text" id="custom-message" placeholder="e.g. שלום יניב, כדי שנוכל להתחיל לעבוד...">
+    </div>
+
+    <div class="form-group">
+      <label>Connectors to Request</label>
+      <div class="presets" style="margin-top:8px;">
+        <button class="preset-btn" onclick="selectPreset('law_firm')">⚖️ Law Firm</button>
+        <button class="preset-btn" onclick="selectPreset('ecommerce')">🛒 E-Commerce</button>
+        <button class="preset-btn" onclick="selectPreset('local_business')">📍 Local Business</button>
+        <button class="preset-btn" onclick="selectPreset('seo_only')">🔍 SEO Only</button>
+        <button class="preset-btn" onclick="selectPreset('social_only')">📱 Social Only</button>
+        <button class="preset-btn" onclick="selectPreset('all')">✅ Select All</button>
+        <button class="preset-btn" onclick="selectPreset('none')">✕ Clear</button>
+      </div>
+      <div class="connector-grid" id="connector-grid">
+        <!-- populated by JS -->
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:16px;margin-top:20px;">
+      <button class="btn-generate" id="btn-generate" onclick="generateLink()">
+        🔗 Generate Setup Link
+      </button>
+      <span style="font-size:12px;color:var(--muted)" id="selected-count">0 connectors selected</span>
+    </div>
+
+    <div class="result-panel" id="result-panel">
+      <h3>✓ Setup Link Created</h3>
+      <div class="link-display" id="link-url" onclick="copyLink()"></div>
+      <div class="link-actions">
+        <button class="btn-action btn-copy" onclick="copyLink()">📋 Copy Link</button>
+        <button class="btn-action btn-whatsapp" onclick="sendWhatsApp()">💬 Send via WhatsApp</button>
+        <button class="btn-action btn-email" onclick="sendEmail()">✉️ Send via Email</button>
+        <button class="btn-action btn-preview" onclick="previewLink()">👁 Preview</button>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-top:12px;">Expires: <span id="link-expires"></span></div>
+    </div>
+  </div>
+
+  <!-- LINKS TABLE -->
+  <div class="links-section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h2>All Setup Links</h2>
+      <button class="btn-sm" onclick="loadLinks()">↻ Refresh</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" onclick="filterLinks('all', this)">All</button>
+      <button class="tab" onclick="filterLinks('pending', this)">Pending</button>
+      <button class="tab" onclick="filterLinks('in_progress', this)">In Progress</button>
+      <button class="tab" onclick="filterLinks('completed', this)">Completed</button>
+      <button class="tab" onclick="filterLinks('expired', this)">Expired</button>
+    </div>
+    <div class="links-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Connectors</th>
+            <th>Progress</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Expires</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="links-tbody">
+          <tr><td colspan="7" class="empty-state"><div class="emoji">🔗</div><div>Loading setup links...</div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="copy-toast" id="toast">✓ Copied to clipboard</div>
+
+<script>
+const API_BASE = 'http://localhost:3001/api';
+const PRESETS = {
+  law_firm: ['website_url','google_search_console','google_ads','google_analytics','google_business_profile','review_platforms','smtp_email'],
+  ecommerce: ['website_url','google_search_console','google_ads','google_analytics','woocommerce','smtp_email'],
+  local_business: ['website_url','google_business_profile','google_analytics','facebook_page','instagram_business','review_platforms','smtp_email'],
+  seo_only: ['website_url','google_search_console','google_analytics','google_sheets_seo'],
+  social_only: ['facebook_page','instagram_business','smtp_email'],
+  all: null,
+  none: []
+};
+
+let allConnectors = [];
+let selectedConnectors = new Set();
+let currentLinks = [];
+let currentFilter = 'all';
+let generatedLink = null;
+
+async function init() {
+  await Promise.all([loadClients(), loadConnectors(), loadLinks()]);
+  selectPreset('law_firm');
+}
+
+async function loadClients() {
+  try {
+    const res = await fetch(`${API_BASE}/clients`);
+    const clients = await res.json();
+    const sel = document.getElementById('client-select');
+    sel.innerHTML = '<option value="">Select client...</option>' +
+      clients.map(c => `<option value="${c.id}">${c.name} — ${c.domain || ''}</option>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function loadConnectors() {
+  try {
+    const res = await fetch(`${API_BASE}/connector-definitions`);
+    allConnectors = await res.json();
+    renderConnectorGrid();
+  } catch(e) { console.error(e); }
+}
+
+function renderConnectorGrid() {
+  const grid = document.getElementById('connector-grid');
+  grid.innerHTML = allConnectors.map(c => `
+    <div class="connector-chip ${selectedConnectors.has(c.slug) ? 'selected' : ''}"
+         id="chip-${c.slug}" onclick="toggleConnector('${c.slug}')">
+      <span class="chip-icon">${c.icon || '🔌'}</span>
+      <span>${c.name}</span>
+    </div>`).join('');
+  updateSelectedCount();
+}
+
+function toggleConnector(slug) {
+  if (selectedConnectors.has(slug)) selectedConnectors.delete(slug);
+  else selectedConnectors.add(slug);
+  const chip = document.getElementById(`chip-${slug}`);
+  if (chip) chip.classList.toggle('selected', selectedConnectors.has(slug));
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  document.getElementById('selected-count').textContent = `${selectedConnectors.size} connectors selected`;
+}
+
+function selectPreset(preset) {
+  selectedConnectors.clear();
+  const slugs = preset === 'all' ? allConnectors.map(c => c.slug) : (PRESETS[preset] || []);
+  slugs.forEach(s => selectedConnectors.add(s));
+  renderConnectorGrid();
+}
+
+async function generateLink() {
+  const clientId = document.getElementById('client-select').value;
+  if (!clientId) { alert('Please select a client'); return; }
+  if (selectedConnectors.size === 0) { alert('Please select at least one connector'); return; }
+
+  const btn = document.getElementById('btn-generate');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Generating...';
+
+  try {
+    const res = await fetch(`${API_BASE}/clients/${clientId}/setup-links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        requestedConnectors: [...selectedConnectors],
+        clientName: document.getElementById('client-name').value,
+        clientEmail: document.getElementById('client-email').value,
+        notifyEmail: document.getElementById('notify-email').value,
+        language: document.getElementById('link-language').value,
+        customMessage: document.getElementById('custom-message').value || null,
+        expiryDays: parseInt(document.getElementById('link-expiry').value)
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    generatedLink = data;
+    document.getElementById('link-url').textContent = data.setup_url;
+    document.getElementById('link-expires').textContent = new Date(data.expires_at).toLocaleDateString('en-IL', { day: 'numeric', month: 'long', year: 'numeric' });
+    document.getElementById('result-panel').style.display = 'block';
+    document.getElementById('result-panel').scrollIntoView({ behavior: 'smooth' });
+
+    await loadLinks();
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '🔗 Generate Setup Link';
+}
+
+function copyLink() {
+  if (!generatedLink) return;
+  navigator.clipboard.writeText(generatedLink.setup_url);
+  showToast('✓ Link copied to clipboard');
+}
+
+function sendWhatsApp() {
+  if (!generatedLink) return;
+  const clientName = document.getElementById('client-name').value || 'שלום';
+  const lang = document.getElementById('link-language').value;
+  let msg;
+  if (lang === 'he') {
+    msg = `שלום ${clientName} 👋\n\nכדי שנוכל להתחיל לעבוד עבורכם, אנא לחצו על הקישור הבא וחברו את הכלים הדיגיטליים שלכם (לוקח כ-5 דקות):\n\n${generatedLink.setup_url}\n\nהקישור תקף עד ${new Date(generatedLink.expires_at).toLocaleDateString('he-IL')}`;
+  } else {
+    msg = `Hi ${clientName} 👋\n\nTo get started, please click the link below to connect your digital tools (takes about 5 minutes):\n\n${generatedLink.setup_url}\n\nLink expires ${new Date(generatedLink.expires_at).toLocaleDateString()}`;
+  }
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+}
+
+function sendEmail() {
+  if (!generatedLink) return;
+  const clientName = document.getElementById('client-name').value || '';
+  const clientEmail = document.getElementById('client-email').value;
+  const lang = document.getElementById('link-language').value;
+  const subject = lang === 'he' ? 'הגדרת המערכת שלך — AI Growth OS' : 'Your Account Setup — AI Growth OS';
+  const body = lang === 'he'
+    ? `שלום ${clientName},\n\nכדי שנוכל להתחיל לעבוד עבורכם, אנא פתחו את הקישור הבא:\n\n${generatedLink.setup_url}\n\nהקישור תקף ל-14 ימים.\n\nElad Digital`
+    : `Hi ${clientName},\n\nTo get started, please open the link below:\n\n${generatedLink.setup_url}\n\nLink expires in 14 days.\n\nElad Digital`;
+  window.open(`mailto:${clientEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
+}
+
+function previewLink() {
+  if (!generatedLink) return;
+  window.open(generatedLink.setup_url.replace('/api', ''), '_blank');
+}
+
+async function loadLinks() {
+  try {
+    const url = currentFilter === 'all' ? `${API_BASE}/setup-links` : `${API_BASE}/setup-links?status=${currentFilter}`;
+    const res = await fetch(url);
+    currentLinks = await res.json();
+    renderLinksTable();
+  } catch(e) { console.error(e); }
+}
+
+function filterLinks(status, btn) {
+  currentFilter = status;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  loadLinks();
+}
+
+function renderLinksTable() {
+  const tbody = document.getElementById('links-tbody');
+  if (!currentLinks.length) {
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="emoji">🔗</div><div>No setup links yet</div></div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = currentLinks.map(link => {
+    const total = link.requested_connectors?.length || 0;
+    const done = (link.completed_connectors?.length || 0) + (link.skipped_connectors?.length || 0);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const statusClass = { pending: 'pill-pending', in_progress: 'pill-progress', completed: 'pill-completed', expired: 'pill-expired', cancelled: 'pill-cancelled' }[link.status] || 'pill-pending';
+    const isExpired = new Date(link.expires_at) < new Date();
+    return `<tr>
+      <td>
+        <div style="font-weight:600">${link.client_name || link.clients?.name || '—'}</div>
+        <div style="font-size:11px;color:var(--muted)">${link.clients?.domain || ''}</div>
+      </td>
+      <td>
+        <div style="display:flex;flex-wrap:wrap;gap:3px;max-width:200px;">
+          ${(link.requested_connectors || []).slice(0, 4).map(s => {
+            const c = allConnectors.find(c => c.slug === s);
+            const isDone = (link.completed_connectors || []).includes(s);
+            return `<span style="font-size:13px;opacity:${isDone ? 1 : 0.35}" title="${c?.name || s}">${c?.icon || '🔌'}</span>`;
+          }).join('')}${link.requested_connectors?.length > 4 ? `<span style="font-size:11px;color:var(--muted)">+${link.requested_connectors.length - 4}</span>` : ''}
+        </div>
+      </td>
+      <td>
+        <div class="progress-mini">
+          <div class="progress-mini-bar"><div class="progress-mini-fill" style="width:${pct}%"></div></div>
+          <span>${done}/${total}</span>
+        </div>
+      </td>
+      <td><span class="pill ${statusClass}">${link.status}</span></td>
+      <td style="font-size:12px;color:var(--muted)">${new Date(link.created_at).toLocaleDateString()}</td>
+      <td style="font-size:12px;color:${isExpired ? 'var(--red)' : 'var(--muted)'}">${new Date(link.expires_at).toLocaleDateString()}</td>
+      <td>
+        <div class="td-actions">
+          <button class="btn-sm" onclick="copyLinkById('${link.token}')">Copy</button>
+          <button class="btn-sm" onclick="whatsappLinkById('${link.token}', '${link.client_name || ''}', '${link.language || 'he'}')">WA</button>
+          <button class="btn-sm" onclick="regenerate('${link.id}')">↺</button>
+          <button class="btn-sm danger" onclick="revoke('${link.id}')">✕</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function copyLinkById(token) {
+  const url = `${window.location.origin}/setup/${token}`;
+  navigator.clipboard.writeText(url);
+  showToast('✓ Link copied');
+}
+
+function whatsappLinkById(token, clientName, lang) {
+  const url = `${window.location.origin}/setup/${token}`;
+  const msg = lang === 'he'
+    ? `שלום ${clientName || ''} 👋\n\nאנא לחצו על הקישור לחיבור הכלים הדיגיטליים:\n\n${url}`
+    : `Hi ${clientName || ''} 👋\n\nPlease click to connect your tools:\n\n${url}`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+}
+
+async function regenerate(linkId) {
+  if (!confirm('Regenerate this link with a new token and 14-day expiry?')) return;
+  try {
+    const res = await fetch(`${API_BASE}/setup-links/${linkId}/regenerate`, { method: 'POST' });
+    const data = await res.json();
+    if (data.setup_url) {
+      navigator.clipboard.writeText(data.setup_url);
+      showToast('✓ New link generated and copied');
+    }
+    await loadLinks();
+  } catch(e) { alert(e.message); }
+}
+
+async function revoke(linkId) {
+  if (!confirm('Revoke this setup link? The client will no longer be able to use it.')) return;
+  try {
+    await fetch(`${API_BASE}/setup-links/${linkId}`, { method: 'DELETE' });
+    await loadLinks();
+    showToast('Link revoked');
+  } catch(e) { alert(e.message); }
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+init();
+</script>
+</body>
+</html>

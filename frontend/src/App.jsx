@@ -34,12 +34,12 @@ function Dashboard({clientId,clients}){
     {load?<div style={{textAlign:"center",padding:40}}><Spin/></div>:<>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16}}>
         <KpiCard label="Google Reviews" value={bm.google_reviews_count?.metric_value} target={bm.google_reviews_count?.target_value} color="#f59e0b"/>
-        <KpiCard label="LawReviews" value={bm.lawreviews_count?.metric_value||218} sub={`★ ${bm.lawreviews_rating?.metric_value||"5.0"}`} color="#10b981"/>
+        <KpiCard label="LawReviews" value={bm.lawreviews_count?.metric_value} sub={bm.lawreviews_rating?.metric_value?`★ ${bm.lawreviews_rating.metric_value}`:undefined} color="#10b981"/>
         <KpiCard label="Mobile PageSpeed" value={bm.mobile_pagespeed?.metric_value} target={bm.mobile_pagespeed?.target_value} color={(bm.mobile_pagespeed?.metric_value||0)>=80?"#10b981":"#ef4444"} sub="/100"/>
-        <KpiCard label="Page 1 Keywords" value={bm.page1_keyword_count?.metric_value??0} target={bm.page1_keyword_count?.target_value} color="#6366f1"/>
+        <KpiCard label="Page 1 Keywords" value={bm.page1_keyword_count?.metric_value} target={bm.page1_keyword_count?.target_value} color="#6366f1"/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
-        <KpiCard label="Local 3-Pack" value={bm.local_3pack_present?.metric_value===1?"✓ Yes":"✗ No"} color={bm.local_3pack_present?.metric_value===1?"#10b981":"#ef4444"}/>
+        <KpiCard label="Local 3-Pack" value={bm.local_3pack_present?.metric_value!=null?(bm.local_3pack_present.metric_value===1?"✓ Yes":"✗ No"):undefined} color={bm.local_3pack_present?.metric_value===1?"#10b981":"#ef4444"}/>
         <KpiCard label="Indexed Pages" value={bm.indexed_pages?.metric_value} target={bm.indexed_pages?.target_value} color="#3b82f6"/>
         <KpiCard label="Referring Domains" value={bm.referring_domains_count?.metric_value} target={bm.referring_domains_count?.target_value} color="#8b5cf6"/>
         <KpiCard label="Domain Authority" value={bm.domain_authority?.metric_value} target={bm.domain_authority?.target_value} color="#06b6d4"/>

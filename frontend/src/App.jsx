@@ -926,7 +926,7 @@ export default function App(){
         {view==="incidents"&&<IncidentsView clientId={clientId}/>}
         {view==="audit"&&<AuditView clientId={clientId}/>}
         {view==="schedules"&&<SchedulesView clientId={clientId}/>}
-        {view==="onboarding"&&<OnboardingView clientId={clientId} clients={clients} onClientCreated={id=>{setClientId(id);setView("dashboard");}}/>}
+        {view==="onboarding"&&<OnboardingView clientId={clientId} clients={clients} onClientCreated={id=>{sCid(id);sV("dashboard");}}/>}
         {view==="setup-links"&&<SetupLinksView clientId={clientId} clients={clients}/>}
         {view==="website-access"&&<WebsiteAccessView clientId={clientId}/>}
         {view==="connectors"&&<ConnectorsView clientId={clientId}/>}

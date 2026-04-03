@@ -375,7 +375,7 @@ router.get('/clients/:clientId/competitor-snapshots', async (req, res) => {
 // ── VERCEL CRON HANDLERS ──────────────────────────────────────
 // These are triggered by vercel.json cron config
 
-router.post('/cron/process-queue', async (req, res) => {
+router.get('/cron/process-queue', async (req, res) => {
   const secret = req.headers['authorization']?.replace('Bearer ', '');
   if (secret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -385,7 +385,7 @@ router.post('/cron/process-queue', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/cron/enqueue-scheduled', async (req, res) => {
+router.get('/cron/enqueue-scheduled', async (req, res) => {
   const secret = req.headers['authorization']?.replace('Bearer ', '');
   if (secret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -395,7 +395,7 @@ router.post('/cron/enqueue-scheduled', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/cron/health-check', async (req, res) => {
+router.get('/cron/health-check', async (req, res) => {
   const secret = req.headers['authorization']?.replace('Bearer ', '');
   if (secret !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
   try {

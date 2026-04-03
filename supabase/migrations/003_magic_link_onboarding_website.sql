@@ -308,7 +308,7 @@ INSERT INTO connector_definitions (
    {"key":"api_key","label":"API Key","label_he":"מפתח API","type":"password","required":true}
  ]',
  '{}',
- ARRAY[],
+ ARRAY[]::TEXT[],
  99, true);
 -- ============================================================
 -- AI GROWTH OS — ONBOARDING PORTAL SCHEMA

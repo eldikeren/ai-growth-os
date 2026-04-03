@@ -55,6 +55,14 @@ router.patch('/clients/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+router.delete('/clients/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('clients').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true, message: 'Client and all related data deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/clients/:id/stats', async (req, res) => {
   try {
     const clientId = req.params.id;

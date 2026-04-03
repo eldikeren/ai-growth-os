@@ -902,13 +902,15 @@ function WebsiteAccessView({clientId}) {
 const NAV=[{id:"dashboard",label:"Dashboard",icon:LayoutDashboard},{id:"agents",label:"Agents",icon:Bot},{id:"runs",label:"Runs",icon:Play},{id:"queue",label:"Queue",icon:ListOrdered},{id:"approvals",label:"Approvals",icon:CheckSquare},{id:"memory",label:"Memory",icon:Brain},{id:"seo",label:"SEO & Links",icon:Link},{id:"reports",label:"Reports",icon:BarChart3},{id:"verification",label:"Verification",icon:Shield},{id:"credentials",label:"Credentials",icon:Key},{id:"incidents",label:"Incidents",icon:AlertTriangle},{id:"audit",label:"Audit Trail",icon:BookOpen},{id:"schedules",label:"Schedules",icon:Clock},{id:"setup-links",label:"Setup Links",icon:Zap},{id:"website-access",label:"Website Access",icon:Globe},{id:"onboarding",label:"New Client",icon:Users},{id:"connectors",label:"Connectors",icon:Globe},{id:"prompt-overrides",label:"Prompt Overrides",icon:FileText},{id:"link-intelligence",label:"Link Intelligence",icon:Link},{id:"seo-actions",label:"SEO Actions",icon:Activity}];
 
 export default function App(){
-  const[view,sV]=useState("dashboard");const[clients,sC]=useState([]);const[clientId,sCid]=useState("00000000-0000-0000-0000-000000000001");const[loading,sL]=useState(true);
-  useEffect(()=>{api("/clients").then(c=>{sC(c);sL(false);}).catch(()=>sL(false));},[]);
+  const[view,sV]=useState("dashboard");const[clients,sC]=useState([]);const[clientId,sCid]=useState("");const[loading,sL]=useState(true);
+  const loadClients=useCallback(()=>api("/clients").then(c=>{sC(c);if(c.length>0&&!c.find(x=>x.id===clientId)){sCid(c[0].id);}return c;}).catch(()=>[]),[]);
+  useEffect(()=>{loadClients().finally(()=>sL(false));},[]);
+  const deleteClient=async()=>{if(!clientId)return;const client=clients.find(c=>c.id===clientId);if(!confirm(`Delete "${client?.name||clientId}" and ALL related data? This cannot be undone.`))return;try{await api(`/clients/${clientId}`,{method:'DELETE'});const updated=await loadClients();if(updated.length>0)sCid(updated[0].id);else sCid("");}catch(e){alert(`Error: ${e.message}`);}};
   return<div style={{display:"flex",height:"100vh",background:"#f8f9fa",fontFamily:"'DM Sans','Segoe UI',sans-serif",overflow:"hidden"}}>
     <style>{"* { box-sizing: border-box; margin: 0; padding: 0; } @keyframes spin { to { transform: rotate(360deg); } } body { margin: 0; }"}</style>
     <div style={{width:220,background:"#0f0f1a",display:"flex",flexDirection:"column",flexShrink:0}}>
       <div style={{padding:"20px 16px 12px"}}><div style={{fontSize:13,fontWeight:800,color:"#6366f1",letterSpacing:1}}>AI GROWTH OS</div><div style={{fontSize:10,color:"#4b5563",marginTop:2}}>by Elad Digital</div></div>
-      <div style={{padding:"8px 12px 4px"}}><select value={clientId} onChange={e=>sCid(e.target.value)} style={{width:"100%",background:"#1a1a2e",border:"1px solid #2d2d5a",borderRadius:6,padding:"6px 8px",fontSize:11,color:"#e2e8f0",cursor:"pointer"}}><option value="">Select client...</option>{clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+      <div style={{padding:"8px 12px 4px"}}><div style={{display:"flex",gap:4,alignItems:"center"}}><select value={clientId} onChange={e=>sCid(e.target.value)} style={{flex:1,background:"#1a1a2e",border:"1px solid #2d2d5a",borderRadius:6,padding:"6px 8px",fontSize:11,color:"#e2e8f0",cursor:"pointer"}}><option value="">Select client...</option>{clients.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>{clientId&&<button onClick={deleteClient} title="Delete client" style={{background:"#7f1d1d",border:"none",borderRadius:6,padding:"6px",cursor:"pointer",display:"flex",alignItems:"center"}}><Trash2 size={12} color="#fca5a5"/></button>}</div></div>
       <nav style={{flex:1,overflow:"auto",padding:"8px"}}>{NAV.map(({id,label,icon:I})=><button key={id} onClick={()=>sV(id)} style={{width:"100%",display:"flex",alignItems:"center",gap:9,padding:"8px 10px",borderRadius:7,border:"none",cursor:"pointer",marginBottom:2,background:view===id?"#6366f1":"transparent",color:view===id?"#fff":"#94a3b8",fontSize:12,fontWeight:view===id?600:400,textAlign:"left"}}><I size={14}/>{label}</button>)}</nav>
     </div>
     <div style={{flex:1,overflow:"auto",padding:28}}>
@@ -926,7 +928,7 @@ export default function App(){
         {view==="incidents"&&<IncidentsView clientId={clientId}/>}
         {view==="audit"&&<AuditView clientId={clientId}/>}
         {view==="schedules"&&<SchedulesView clientId={clientId}/>}
-        {view==="onboarding"&&<OnboardingView clientId={clientId} clients={clients} onClientCreated={id=>{sCid(id);sV("dashboard");}}/>}
+        {view==="onboarding"&&<OnboardingView clientId={clientId} clients={clients} onClientCreated={id=>{sCid(id);loadClients();sV("dashboard");}}/>}
         {view==="setup-links"&&<SetupLinksView clientId={clientId} clients={clients}/>}
         {view==="website-access"&&<WebsiteAccessView clientId={clientId}/>}
         {view==="connectors"&&<ConnectorsView clientId={clientId}/>}

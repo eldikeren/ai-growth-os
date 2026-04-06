@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Users, RefreshCw } from 'lucide-react';
+import { Users, RefreshCw, Link2, Send } from 'lucide-react';
 import { api } from '../hooks/useApi.js';
 import { colors, spacing, fontSize, fontWeight } from '../theme.js';
 import { Card, KpiCard, SH, Badge, Dot, Btn, Spin, Empty, SkeletonCard, SkeletonKpi } from '../components/index.jsx';
@@ -54,10 +54,10 @@ export default function Dashboard({ clientId, clients }) {
 
       {/* KPI Row 1 */}
       <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <KpiCard label="Google Reviews" value={bm.google_reviews_count?.metric_value} target={bm.google_reviews_count?.target_value} color={colors.accent} sparkData={[12, 14, 15, 15, 16, 18, 20]} />
-        <KpiCard label="LawReviews" value={bm.lawreviews_count?.metric_value} sub={bm.lawreviews_rating?.metric_value ? `\u2605 ${bm.lawreviews_rating.metric_value}` : undefined} color={colors.success} sparkData={[5, 6, 6, 7, 8, 8, 9]} />
-        <KpiCard label="Mobile PageSpeed" value={bm.mobile_pagespeed?.metric_value} target={bm.mobile_pagespeed?.target_value} color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} sub="/100" sparkData={[72, 75, 78, 76, 80, 82, 85]} />
-        <KpiCard label="Page 1 Keywords" value={bm.page1_keyword_count?.metric_value} target={bm.page1_keyword_count?.target_value} color={colors.primary} sparkData={[20, 22, 21, 25, 28, 30, 32]} />
+        <KpiCard label="Google Reviews" value={bm.google_reviews_count?.metric_value} target={bm.google_reviews_count?.target_value} color={colors.accent} />
+        <KpiCard label="LawReviews" value={bm.lawreviews_count?.metric_value} sub={bm.lawreviews_rating?.metric_value ? `\u2605 ${bm.lawreviews_rating.metric_value}` : undefined} color={colors.success} />
+        <KpiCard label="Mobile PageSpeed" value={bm.mobile_pagespeed?.metric_value} target={bm.mobile_pagespeed?.target_value} color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} sub="/100" />
+        <KpiCard label="Page 1 Keywords" value={bm.page1_keyword_count?.metric_value} target={bm.page1_keyword_count?.target_value} color={colors.primary} />
       </div>
 
       {/* KPI Row 2 */}
@@ -89,6 +89,23 @@ export default function Dashboard({ clientId, clients }) {
           </Card>
         </div>
       )}
+
+      {/* Quick Actions — Customer Setup Link */}
+      <Card style={{ marginBottom: 20, background: colors.primaryLightest, borderColor: colors.primaryLighter }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.primary, marginBottom: 2 }}>
+              <Send size={14} style={{ marginRight: 6 }} />Customer Setup Link
+            </div>
+            <div style={{ fontSize: fontSize.sm, color: colors.textSecondary }}>
+              Send your client a magic link to connect their Google, Meta, website and other digital assets.
+            </div>
+          </div>
+          <Btn onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'setup-links' }))} color={colors.primary}>
+            <Link2 size={13} /> Create Setup Link
+          </Btn>
+        </div>
+      </Card>
 
       {/* Two-column: Recent Runs + Open Incidents */}
       <div className="grid-responsive-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 }}>

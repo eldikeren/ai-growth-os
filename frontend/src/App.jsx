@@ -62,6 +62,13 @@ export default function App() {
     return () => mq.removeEventListener('change', handler);
   }, []);
 
+  // Listen for navigation events from child views (e.g. Dashboard "Create Setup Link")
+  useEffect(() => {
+    const handler = (e) => setView(e.detail);
+    window.addEventListener('navigate', handler);
+    return () => window.removeEventListener('navigate', handler);
+  }, []);
+
   const deleteClient = async () => {
     if (!clientId) return;
     const client = clients.find(c => c.id === clientId);

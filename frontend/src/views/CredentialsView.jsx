@@ -5,17 +5,22 @@ import { colors, spacing, radius, fontSize, fontWeight, transitions } from '../t
 import { Card, SH, Badge, Btn, Spin, Empty, SkeletonCard, Field, inputStyle } from '../components/index.jsx';
 
 // Known service types and what credentials they need
+// Maps DB service names to their configuration fields
 const SERVICE_CONFIG = {
   openai: { label: 'OpenAI API (gpt-4.1)', fields: [{ key: 'api_key', label: 'API Key', secret: true }] },
   google_search_console: { label: 'Google Search Console', fields: [{ key: 'property_url', label: 'Property URL' }, { key: 'api_key', label: 'Service Account JSON', secret: true, multiline: true }] },
   google_ads: { label: 'Google Ads', fields: [{ key: 'customer_id', label: 'Customer ID' }, { key: 'api_key', label: 'API Key / OAuth Token', secret: true }] },
   google_analytics: { label: 'Google Analytics 4', fields: [{ key: 'property_id', label: 'Property ID' }, { key: 'api_key', label: 'Service Account JSON', secret: true, multiline: true }] },
   google_business_profile: { label: 'Google Business Profile', fields: [{ key: 'account_id', label: 'Account ID' }, { key: 'api_key', label: 'OAuth Token', secret: true }] },
-  meta_business: { label: 'Facebook Business Page', fields: [{ key: 'page_id', label: 'Page ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
-  instagram_business: { label: 'Instagram Business Profile', fields: [{ key: 'account_id', label: 'Account ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
+  facebook: { label: 'Facebook Business Page', fields: [{ key: 'page_id', label: 'Page ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
+  instagram: { label: 'Instagram Business Profile', fields: [{ key: 'account_id', label: 'Account ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
+  meta_business: { label: 'Meta Business', fields: [{ key: 'page_id', label: 'Page ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
   dataforseo: { label: 'DataForSEO API', fields: [{ key: 'login', label: 'Login' }, { key: 'password', label: 'Password', secret: true }] },
   moz: { label: 'Moz API (Domain Authority)', fields: [{ key: 'access_id', label: 'Access ID' }, { key: 'secret_key', label: 'Secret Key', secret: true }] },
 };
+
+// Fallback config for unknown service types
+const DEFAULT_CONFIG = { label: 'Unknown Service', fields: [{ key: 'api_key', label: 'API Key / Token', secret: true }] };
 
 // ─── Health Bar ─────────────────────────────────────────────────
 function HealthBar({ score }) {
@@ -159,7 +164,7 @@ export default function CredentialsView({ clientId }) {
 
   if (!clientId) return <Empty icon={Key} msg="Select a client to view credentials" />;
 
-  const config = editing ? SERVICE_CONFIG[editing.service] : null;
+  const config = editing ? (SERVICE_CONFIG[editing.service] || { ...DEFAULT_CONFIG, label: editing.label || editing.service }) : null;
 
   return (
     <div>

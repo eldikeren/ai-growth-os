@@ -649,7 +649,7 @@ tr:hover td{background:#fafafa}
 <div class="toast" id="toast"></div>
 
 <script>
-const API = 'http://localhost:3001/api';
+const API = window.location.hostname === 'localhost' ? 'http://localhost:3001/api' : '/api';
 let websiteId = null;
 let currentData = {};
 

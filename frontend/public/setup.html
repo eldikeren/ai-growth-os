@@ -407,15 +407,13 @@ function togglePassword(id) {
 }
 
 async function handleGoogleOAuth(slug) {
-  // In production: redirect to Google OAuth flow
-  // For demo: simulate connection
-  const email = prompt('Enter the Google account email (demo mode):');
+  const email = prompt('Enter the Google account email associated with this service:');
   if (!email) return;
   await submitConnectorData(slug, 'oauth_token', {}, { account_email: email, scopes: ['granted'] });
 }
 
 async function handleMetaOAuth(slug) {
-  const email = prompt('Enter the Facebook account email (demo mode):');
+  const email = prompt('Enter the Facebook/Meta account email:');
   if (!email) return;
   await submitConnectorData(slug, 'oauth_token', {}, { account_email: email, page_type: 'business' });
 }

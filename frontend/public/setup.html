@@ -317,26 +317,88 @@ function renderConnectorForm(c, isHe) {
 
   let html = '';
 
-  // OAuth buttons
+  // Google services — real credential forms
   if (c.auth_type === 'oauth_google') {
+    const googleFields = {
+      google_search_console: [
+        { key: 'property_url', label: isHe ? 'כתובת האתר ב-Search Console' : 'Search Console Property URL', labelHe: 'כתובת האתר ב-Search Console', type: 'url', placeholder: 'https://example.com', required: true },
+        { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
+        { key: 'service_account_json', label: isHe ? 'Service Account JSON (אופציונלי)' : 'Service Account JSON (optional)', type: 'textarea', placeholder: '{"type":"service_account",...}' },
+      ],
+      google_analytics: [
+        { key: 'property_id', label: isHe ? 'מזהה נכס GA4' : 'GA4 Property ID', type: 'text', placeholder: '123456789', required: true, help: isHe ? 'ניתן למצוא בהגדרות GA4 > Property Settings' : 'Found in GA4 > Admin > Property Settings' },
+        { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
+        { key: 'service_account_json', label: isHe ? 'Service Account JSON (אופציונלי)' : 'Service Account JSON (optional)', type: 'textarea', placeholder: '{"type":"service_account",...}' },
+      ],
+      google_ads: [
+        { key: 'customer_id', label: isHe ? 'מזהה לקוח Google Ads' : 'Google Ads Customer ID', type: 'text', placeholder: '123-456-7890', required: true },
+        { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
+        { key: 'developer_token', label: isHe ? 'Developer Token (אופציונלי)' : 'Developer Token (optional)', type: 'password', placeholder: '' },
+      ],
+      google_business_profile: [
+        { key: 'business_name', label: isHe ? 'שם העסק בגוגל' : 'Business Name on Google', type: 'text', placeholder: isHe ? 'שם העסק שלכם' : 'Your business name', required: true },
+        { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
+        { key: 'location_id', label: isHe ? 'מזהה מיקום (אופציונלי)' : 'Location ID (optional)', type: 'text', placeholder: '' },
+      ],
+    };
+    const gFields = googleFields[c.slug] || [
+      { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
+    ];
+    for (const field of gFields) {
+      html += `<div class="form-group">
+        <label class="form-label" for="f-${c.slug}-${field.key}">${field.label}${field.required ? ' *' : ''}</label>`;
+      if (field.type === 'textarea') {
+        html += `<textarea class="form-input" id="f-${c.slug}-${field.key}" rows="3" placeholder="${field.placeholder || ''}" style="resize:vertical;direction:ltr;text-align:left;font-family:monospace;font-size:11px;"></textarea>`;
+      } else if (field.type === 'password') {
+        html += `<div class="password-wrapper">
+          <input class="form-input" type="password" id="f-${c.slug}-${field.key}" placeholder="${field.placeholder || ''}" style="padding-left:40px;direction:ltr;text-align:left;">
+          <button class="password-toggle" type="button" onclick="togglePassword('f-${c.slug}-${field.key}')">👁</button>
+        </div>`;
+      } else {
+        html += `<input class="form-input" type="${field.type || 'text'}" id="f-${c.slug}-${field.key}" placeholder="${field.placeholder || ''}" style="direction:ltr;text-align:left;">`;
+      }
+      if (field.help) html += `<div class="form-help">${field.help}</div>`;
+      html += `</div>`;
+    }
     html += `
-      <button class="oauth-btn oauth-google" onclick="handleGoogleOAuth('${c.slug}')">
-        <svg class="oauth-logo" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-        ${isHe ? 'התחברו עם Google' : 'Continue with Google'}
-      </button>
       <div class="security-note">
         <span class="lock">🔒</span>
-        <span>${isHe ? 'גישה מאובטחת. כל שינוי דורש אישור מפורש מכם.' : 'Secure access. All changes require your explicit approval.'}</span>
+        <span>${isHe ? 'כל הפרטים מוצפנים ומאוחסנים בבטחה. גישה מאובטחת בלבד.' : 'All credentials are encrypted and stored securely.'}</span>
       </div>`;
   } else if (c.auth_type === 'oauth_meta') {
+    const metaFields = {
+      facebook_page: [
+        { key: 'page_url', label: isHe ? 'קישור לדף העסקי' : 'Business Page URL', type: 'url', placeholder: 'https://facebook.com/yourpage', required: true },
+        { key: 'email', label: isHe ? 'אימייל חשבון Facebook' : 'Facebook Account Email', type: 'email', placeholder: 'you@example.com', required: true },
+        { key: 'password', label: isHe ? 'סיסמה' : 'Password', type: 'password', required: true },
+      ],
+      instagram_business: [
+        { key: 'profile_url', label: isHe ? 'קישור לפרופיל' : 'Profile URL', type: 'url', placeholder: 'https://instagram.com/yourprofile', required: true },
+        { key: 'username', label: isHe ? 'שם משתמש' : 'Username', type: 'text', placeholder: '@yourhandle', required: true },
+        { key: 'password', label: isHe ? 'סיסמה' : 'Password', type: 'password', required: true },
+      ],
+    };
+    const mFields = metaFields[c.slug] || [
+      { key: 'email', label: isHe ? 'אימייל' : 'Email', type: 'email', required: true },
+      { key: 'password', label: isHe ? 'סיסמה' : 'Password', type: 'password', required: true },
+    ];
+    for (const field of mFields) {
+      html += `<div class="form-group">
+        <label class="form-label" for="f-${c.slug}-${field.key}">${field.label}${field.required ? ' *' : ''}</label>`;
+      if (field.type === 'password') {
+        html += `<div class="password-wrapper">
+          <input class="form-input" type="password" id="f-${c.slug}-${field.key}" placeholder="${field.placeholder || ''}" style="padding-left:40px;direction:ltr;text-align:left;">
+          <button class="password-toggle" type="button" onclick="togglePassword('f-${c.slug}-${field.key}')">👁</button>
+        </div>`;
+      } else {
+        html += `<input class="form-input" type="${field.type || 'text'}" id="f-${c.slug}-${field.key}" placeholder="${field.placeholder || ''}" style="direction:ltr;text-align:left;">`;
+      }
+      html += `</div>`;
+    }
     html += `
-      <button class="oauth-btn oauth-meta" onclick="handleMetaOAuth('${c.slug}')">
-        <svg class="oauth-logo" viewBox="0 0 24 24" fill="white"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
-        ${isHe ? 'התחברו עם Facebook' : 'Continue with Facebook'}
-      </button>
       <div class="security-note">
         <span class="lock">🔒</span>
-        <span>${isHe ? 'גישה לדף העסקי בלבד. לא לפרופיל האישי.' : 'Business Page access only. Not your personal profile.'}</span>
+        <span>${isHe ? 'גישה לדף העסקי בלבד. כל הפרטים מוצפנים.' : 'Business access only. All credentials encrypted.'}</span>
       </div>`;
   } else if (c.auth_type === 'username_password' || c.auth_type === 'api_key' || c.auth_type === 'manual') {
     for (const field of fields) {
@@ -406,58 +468,56 @@ function togglePassword(id) {
   input.type = input.type === 'password' ? 'text' : 'password';
 }
 
-async function handleGoogleOAuth(slug) {
-  const isHe = linkData?.language === 'he';
-  const labels = {
-    google_search_console: { prop: isHe ? 'כתובת האתר ב-Search Console (למשל https://example.com):' : 'Search Console property URL (e.g. https://example.com):', propKey: 'property_url' },
-    google_analytics: { prop: isHe ? 'מזהה נכס GA4 (למשל 123456789):' : 'GA4 Property ID (e.g. 123456789):', propKey: 'property_id' },
-    google_ads: { prop: isHe ? 'מזהה לקוח Google Ads (למשל 123-456-7890):' : 'Google Ads Customer ID (e.g. 123-456-7890):', propKey: 'customer_id' },
-    google_business_profile: { prop: isHe ? 'שם העסק כפי שמופיע ב-Google:' : 'Business name as it appears on Google:', propKey: 'business_name' },
-  };
-  const email = prompt(isHe ? 'כתובת המייל של חשבון Google שמנהל את השירות הזה:' : 'Google account email that manages this service:');
-  if (!email) return;
-  const cfg = labels[slug];
-  let propertyInfo = {};
-  if (cfg) {
-    const val = prompt(cfg.prop);
-    if (val) propertyInfo[cfg.propKey] = val;
-  }
-  await submitConnectorData(slug, 'oauth_token', propertyInfo, { account_email: email, scopes: ['granted'] });
-}
-
-async function handleMetaOAuth(slug) {
-  const isHe = linkData?.language === 'he';
-  const email = prompt(isHe ? 'כתובת המייל של חשבון Facebook/Meta:' : 'Facebook/Meta account email:');
-  if (!email) return;
-  const pageName = prompt(isHe ? 'שם הדף העסקי (כפי שמופיע בפייסבוק):' : 'Business page name (as it appears on Facebook):');
-  const pageUrl = prompt(isHe ? 'קישור לדף (למשל https://facebook.com/yourpage):' : 'Page URL (e.g. https://facebook.com/yourpage):');
-  await submitConnectorData(slug, 'oauth_token', { page_name: pageName, page_url: pageUrl }, { account_email: email, page_type: 'business' });
-}
+// OAuth handlers removed — Google/Meta now use real credential forms
 
 async function submitConnector(slug) {
   const connector = linkData.connectors.find(c => c.slug === slug);
   if (!connector) return;
-  const fields = Array.isArray(connector.fields) ? connector.fields : JSON.parse(connector.fields || '[]');
 
+  // Collect ALL form fields with id matching f-{slug}-*
   const credData = {};
   let valid = true;
+  const allInputs = document.querySelectorAll(`[id^="f-${slug}-"]`);
 
+  allInputs.forEach(el => {
+    const key = el.id.replace(`f-${slug}-`, '');
+    const val = el.value.trim();
+    if (val) credData[key] = val;
+  });
+
+  // Also check DB-defined required fields
+  const fields = Array.isArray(connector.fields) ? connector.fields : JSON.parse(connector.fields || '[]');
   for (const field of fields) {
     const el = document.getElementById(`f-${slug}-${field.key}`);
     if (!el) continue;
-    const val = el.value.trim();
-    if (field.required && !val) {
+    if (field.required && !el.value.trim()) {
       el.style.borderColor = 'var(--red)';
       valid = false;
     } else {
       el.style.borderColor = 'var(--border)';
-      credData[field.key] = val;
     }
+  }
+
+  // Check hardcoded required fields (Google/Meta forms)
+  allInputs.forEach(el => {
+    if (el.required && !el.value.trim()) {
+      el.style.borderColor = 'var(--red)';
+      valid = false;
+    }
+  });
+
+  if (Object.keys(credData).length === 0) {
+    alert(linkData.language === 'he' ? 'אנא מלאו לפחות שדה אחד' : 'Please fill in at least one field');
+    return;
   }
 
   if (!valid) { alert(linkData.language === 'he' ? 'אנא מלאו את כל השדות הנדרשים' : 'Please fill in all required fields'); return; }
 
-  await submitConnectorData(slug, 'credentials', credData, {});
+  const subType = (connector.auth_type === 'oauth_google' || connector.auth_type === 'oauth_meta') ? 'credentials' : 'credentials';
+  const meta = {};
+  if (credData.email) meta.account_email = credData.email;
+
+  await submitConnectorData(slug, subType, credData, meta);
 }
 
 async function skipConnector(slug) {

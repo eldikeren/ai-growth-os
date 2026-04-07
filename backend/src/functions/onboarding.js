@@ -43,10 +43,10 @@ function generateToken() {
 
 // ── GOOGLE OAUTH SCOPES ───────────────────────────────────────
 const GOOGLE_SCOPE_BUNDLES = {
-  search_console: ['https://www.googleapis.com/auth/webmasters.readonly'],
+  search_console: ['https://www.googleapis.com/auth/webmasters', 'https://www.googleapis.com/auth/webmasters.readonly'],
   ads: ['https://www.googleapis.com/auth/adwords'],
   business_profile: ['https://www.googleapis.com/auth/business.manage'],
-  analytics: ['https://www.googleapis.com/auth/analytics.readonly'],
+  analytics: ['https://www.googleapis.com/auth/analytics', 'https://www.googleapis.com/auth/analytics.readonly', 'https://www.googleapis.com/auth/analytics.edit'],
   // Base scopes always included
   base: ['openid', 'email', 'profile']
 };

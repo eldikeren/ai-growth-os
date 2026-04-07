@@ -12,6 +12,8 @@ export default function Dashboard({ clientId, clients }) {
   const [load, sL] = useState(false);
   const [psLoading, setPsLoading] = useState(false);
   const [psResult, setPsResult] = useState(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
+  const [refreshResult, setRefreshResult] = useState(null);
 
   const fetch_data = useCallback(async () => {
     if (!clientId) return;
@@ -86,11 +88,25 @@ export default function Dashboard({ clientId, clients }) {
     try {
       const result = await api(`/clients/${clientId}/pagespeed`, { method: 'POST' });
       setPsResult(result);
-      // Refresh baselines to show updated score
       const b = await api(`/clients/${clientId}/baselines`);
       sBl(b);
     } catch (e) { console.error('PageSpeed check failed:', e); }
     setPsLoading(false);
+  };
+
+  const refreshAllMetrics = async () => {
+    setRefreshingAll(true);
+    setRefreshResult(null);
+    try {
+      const result = await api(`/clients/${clientId}/metrics/refresh-all`, { method: 'POST' });
+      setRefreshResult(result);
+      // Reload baselines with fresh data
+      const b = await api(`/clients/${clientId}/baselines`);
+      sBl(b);
+    } catch (e) {
+      setRefreshResult({ error: e.message });
+    }
+    setRefreshingAll(false);
   };
 
   if (load) {
@@ -110,14 +126,57 @@ export default function Dashboard({ clientId, clients }) {
 
   return (
     <div>
-      <SH title={client?.name || 'Dashboard'} sub={client?.domain} action={<Btn onClick={fetch_data} small secondary ariaLabel="Refresh dashboard"><RefreshCw size={12} />Refresh</Btn>} />
+      <SH title={client?.name || 'Dashboard'} sub={client?.domain} action={
+        <div style={{ display: 'flex', gap: spacing.sm }}>
+          <Btn onClick={refreshAllMetrics} disabled={refreshingAll} small ariaLabel="Refresh all metrics from live APIs">
+            {refreshingAll ? <Spin /> : <Zap size={12} />} {refreshingAll ? 'Checking APIs...' : 'Refresh All Metrics'}
+          </Btn>
+          <Btn onClick={fetch_data} small secondary ariaLabel="Reload dashboard"><RefreshCw size={12} /></Btn>
+        </div>
+      } />
+
+      {/* Refresh result banner */}
+      {refreshResult && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: spacing.md,
+          background: refreshResult.error ? '#FEE2E2' : '#F0FDF4',
+          border: `1px solid ${refreshResult.error ? '#FECACA' : '#BBF7D0'}`,
+          borderRadius: radius.lg, padding: spacing.lg,
+          marginBottom: spacing.lg, fontSize: fontSize.sm,
+        }}>
+          <div style={{ flex: 1 }}>
+            {refreshResult.error ? (
+              <div style={{ color: '#991B1B' }}>Error: {refreshResult.error}</div>
+            ) : (
+              <>
+                <div style={{ fontWeight: fontWeight.bold, color: '#166534', marginBottom: 4 }}>
+                  ✅ {refreshResult.metrics_updated}/{refreshResult.metrics_checked} metrics updated from live APIs
+                </div>
+                {refreshResult.results?.map((r, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: fontSize.xs, color: r.status === 'ok' ? '#166534' : '#92400E', marginBottom: 2 }}>
+                    <span>{r.status === 'ok' ? '✅' : r.status === 'error' ? '❌' : '⚠️'}</span>
+                    <strong>{r.metric.replace(/_/g, ' ')}</strong>
+                    {r.status === 'ok' ? <span>→ {r.value} (from {r.source})</span> : <span>— {r.detail}</span>}
+                  </div>
+                ))}
+                {refreshResult.missing_credentials?.length > 0 && (
+                  <div style={{ marginTop: 6, fontSize: fontSize.xs, color: '#92400E' }}>
+                    💡 To check more metrics: {refreshResult.missing_credentials.join(' • ')}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <button onClick={() => setRefreshResult(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280', padding: 2 }}>✕</button>
+        </div>
+      )}
 
       {/* Stale data warning */}
-      {(() => {
+      {!refreshResult && (() => {
         const staleMetrics = bl.filter(b => {
           if (!b.recorded_at) return true;
           const age = Date.now() - new Date(b.recorded_at).getTime();
-          return age > 7 * 24 * 60 * 60 * 1000; // older than 7 days
+          return age > 7 * 24 * 60 * 60 * 1000;
         });
         if (staleMetrics.length === 0) return null;
         return (
@@ -128,9 +187,9 @@ export default function Dashboard({ clientId, clients }) {
             marginBottom: spacing.lg, fontSize: fontSize.sm, color: '#92400E',
           }}>
             <AlertTriangle size={14} />
-            <span><strong>{staleMetrics.length} metrics</strong> haven't been updated recently. Run agents or connect APIs to get live data.</span>
-            <Btn small onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'runs' }))} style={{ marginLeft: 'auto', fontSize: fontSize.xs }} ariaLabel="Go to runs">
-              <Zap size={11} /> Run Agents
+            <span><strong>{staleMetrics.length} metrics</strong> haven't been updated recently.</span>
+            <Btn small onClick={refreshAllMetrics} disabled={refreshingAll} style={{ marginLeft: 'auto', fontSize: fontSize.xs }} ariaLabel="Refresh all metrics">
+              {refreshingAll ? <Spin /> : <Zap size={11} />} {refreshingAll ? 'Checking...' : 'Refresh All Now'}
             </Btn>
           </div>
         );
@@ -141,13 +200,8 @@ export default function Dashboard({ clientId, clients }) {
         <KpiWithDate baseline={bm.google_reviews_count} label="Google Reviews" color={colors.accent} target />
         <KpiWithDate baseline={bm.lawreviews_count} label="LawReviews" color={colors.success}
           sub={bm.lawreviews_rating?.metric_value ? `★ ${bm.lawreviews_rating.metric_value}` : undefined} />
-        <div style={{ position: 'relative' }}>
-          <KpiWithDate baseline={bm.mobile_pagespeed} label="Mobile PageSpeed" target
-            color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} suffix="/100" />
-          <Btn small ghost onClick={refreshPageSpeed} disabled={psLoading} style={{ position: 'absolute', top: 8, right: 8, fontSize: fontSize.micro, padding: '2px 6px' }} ariaLabel="Run live PageSpeed check">
-            {psLoading ? <Spin /> : <Zap size={10} />} {psLoading ? 'Checking...' : 'Live Check'}
-          </Btn>
-        </div>
+        <KpiWithDate baseline={bm.mobile_pagespeed} label="Mobile PageSpeed" target
+          color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} suffix="/100" />
         <KpiWithDate baseline={bm.page1_keyword_count} label="Page 1 Keywords" color={colors.primary} target />
       </div>
 

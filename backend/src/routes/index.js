@@ -656,6 +656,336 @@ router.post('/clients/:clientId/pagespeed', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── REFRESH ALL METRICS (real API checks) ────────────────────
+router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const results = [];
+    const now = new Date().toISOString();
+    const today = now.split('T')[0];
+
+    // Get client info
+    const { data: client } = await supabase.from('clients').select('domain, name').eq('id', clientId).single();
+    if (!client) return res.status(404).json({ error: 'Client not found' });
+
+    // Get all credentials for this client
+    const { data: allCreds } = await supabase.from('client_credentials').select('service, credential_data, is_connected').eq('client_id', clientId);
+    const creds = Object.fromEntries((allCreds || []).map(c => [c.service, c]));
+
+    const domain = client.domain?.startsWith('http') ? client.domain : `https://${client.domain}`;
+
+    // Helper: upsert baseline + snapshot
+    async function storeMetric(name, value, text, source, target) {
+      await supabase.from('baselines').upsert({
+        client_id: clientId, metric_name: name,
+        metric_value: value, metric_text: text,
+        source, recorded_at: now, ...(target != null ? { target_value: target } : {}),
+      }, { onConflict: 'client_id,metric_name' });
+      await supabase.from('kpi_snapshots').insert({
+        client_id: clientId, metric_name: name, metric_value: value,
+        metric_text: text, source, source_verified: true, data_date: today,
+      }).catch(() => {}); // ignore snapshot errors
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 1. MOBILE PAGESPEED — Google PageSpeed Insights API (free)
+    // ═══════════════════════════════════════════════════════════
+    if (client.domain) {
+      try {
+        const apiKey = process.env.GOOGLE_PAGESPEED_API_KEY || '';
+        const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(domain)}&strategy=mobile${apiKey ? `&key=${apiKey}` : ''}`;
+        const psRes = await fetch(apiUrl);
+        if (psRes.ok) {
+          const psData = await psRes.json();
+          const score = Math.round((psData.lighthouseResult?.categories?.performance?.score || 0) * 100);
+          await storeMetric('mobile_pagespeed', score, `${score}/100`, 'Google PageSpeed Insights API', 80);
+          results.push({ metric: 'mobile_pagespeed', value: score, source: 'PageSpeed API', status: 'ok' });
+        } else {
+          results.push({ metric: 'mobile_pagespeed', status: 'error', detail: `API returned ${psRes.status}` });
+        }
+      } catch (e) {
+        results.push({ metric: 'mobile_pagespeed', status: 'error', detail: e.message });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 2. GOOGLE REVIEWS — Google Places API (New)
+    // ═══════════════════════════════════════════════════════════
+    // Use Google Places API to find review count by searching for the business
+    if (client.domain || client.name) {
+      try {
+        const apiKey = process.env.GOOGLE_PAGESPEED_API_KEY || process.env.GOOGLE_PLACES_API_KEY || '';
+        if (apiKey) {
+          // Use Places API Text Search to find the business
+          const searchQuery = client.name || client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          const placesUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(searchQuery)}&key=${apiKey}`;
+          const placesRes = await fetch(placesUrl);
+          if (placesRes.ok) {
+            const placesData = await placesRes.json();
+            const place = placesData.results?.[0];
+            if (place) {
+              // Get detailed info with reviews
+              const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${place.place_id}&fields=user_ratings_total,rating,name&key=${apiKey}`;
+              const detailRes = await fetch(detailUrl);
+              if (detailRes.ok) {
+                const detail = await detailRes.json();
+                const reviewCount = detail.result?.user_ratings_total || 0;
+                const rating = detail.result?.rating || 0;
+                await storeMetric('google_reviews_count', reviewCount, `${reviewCount} reviews (${rating}★)`, 'Google Places API', null);
+                results.push({ metric: 'google_reviews_count', value: reviewCount, rating, source: 'Google Places API', status: 'ok' });
+              }
+            } else {
+              results.push({ metric: 'google_reviews_count', status: 'not_found', detail: `No places found for "${searchQuery}"` });
+            }
+          }
+        } else {
+          // Fallback: try GBP API with stored OAuth token
+          const gbpCred = creds.google_business_profile;
+          if (gbpCred?.credential_data?.access_token) {
+            const { data: asset } = await supabase.from('integration_assets')
+              .select('external_id').eq('client_id', clientId)
+              .eq('sub_provider', 'business_profile').eq('is_selected', true).maybeSingle();
+            if (asset?.external_id) {
+              const revRes = await fetch(`https://mybusiness.googleapis.com/v4/${asset.external_id}/reviews?pageSize=1`, {
+                headers: { Authorization: `Bearer ${gbpCred.credential_data.access_token}` }
+              });
+              if (revRes.ok) {
+                const revData = await revRes.json();
+                const count = revData.totalReviewCount || 0;
+                await storeMetric('google_reviews_count', count, `${count} reviews`, 'Google Business Profile API', null);
+                results.push({ metric: 'google_reviews_count', value: count, source: 'GBP API', status: 'ok' });
+              }
+            }
+          }
+          if (!results.find(r => r.metric === 'google_reviews_count')) {
+            results.push({ metric: 'google_reviews_count', status: 'no_api_key', detail: 'Set GOOGLE_PLACES_API_KEY for automatic review checking' });
+          }
+        }
+      } catch (e) {
+        results.push({ metric: 'google_reviews_count', status: 'error', detail: e.message });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 3. PAGE 1 KEYWORDS — Google Search Console API
+    // ═══════════════════════════════════════════════════════════
+    try {
+      const gscCred = creds.google_search_console;
+      if (gscCred?.credential_data) {
+        // Get property URL from credentials or integration_assets
+        let propertyUrl = gscCred.credential_data.property_url;
+        if (!propertyUrl) {
+          const { data: asset } = await supabase.from('integration_assets')
+            .select('external_id').eq('client_id', clientId)
+            .eq('sub_provider', 'search_console').eq('is_selected', true).maybeSingle();
+          propertyUrl = asset?.external_id;
+        }
+        if (!propertyUrl && client.domain) {
+          propertyUrl = domain;
+        }
+
+        if (propertyUrl && gscCred.credential_data.access_token) {
+          const endDate = today;
+          const startDate = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+          const gscRes = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/searchAnalytics/query`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${gscCred.credential_data.access_token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ startDate, endDate, dimensions: ['query'], rowLimit: 500, startRow: 0 })
+          });
+          if (gscRes.ok) {
+            const gscData = await gscRes.json();
+            const rows = gscData.rows || [];
+            const page1Keywords = rows.filter(r => r.position <= 10).length;
+            const totalKeywords = rows.length;
+            await storeMetric('page1_keyword_count', page1Keywords, `${page1Keywords} keywords`, 'Google Search Console API', null);
+            results.push({ metric: 'page1_keyword_count', value: page1Keywords, total: totalKeywords, source: 'GSC API', status: 'ok' });
+
+            // Also update keyword data
+            for (const row of rows.slice(0, 100)) {
+              await supabase.from('client_keywords').upsert({
+                client_id: clientId, keyword: row.keys[0],
+                current_position: Math.round(row.position),
+                source: 'gsc_live_check', last_checked: now,
+              }, { onConflict: 'client_id,keyword' }).catch(() => {});
+            }
+          } else {
+            results.push({ metric: 'page1_keyword_count', status: 'api_error', detail: `GSC returned ${gscRes.status}` });
+          }
+        } else {
+          results.push({ metric: 'page1_keyword_count', status: 'no_token', detail: 'Google Search Console needs OAuth token — use Setup Link' });
+        }
+      } else {
+        results.push({ metric: 'page1_keyword_count', status: 'no_cred', detail: 'Configure Google Search Console in Credentials' });
+      }
+    } catch (e) {
+      results.push({ metric: 'page1_keyword_count', status: 'error', detail: e.message });
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 4. INDEXED PAGES — Google "site:" search via Custom Search API
+    // ═══════════════════════════════════════════════════════════
+    if (client.domain) {
+      try {
+        const apiKey = process.env.GOOGLE_PAGESPEED_API_KEY || process.env.GOOGLE_PLACES_API_KEY || '';
+        const cseId = process.env.GOOGLE_CSE_ID || '';
+        if (apiKey && cseId) {
+          const cleanDomain = client.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          const cseUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=site:${cleanDomain}&num=1`;
+          const cseRes = await fetch(cseUrl);
+          if (cseRes.ok) {
+            const cseData = await cseRes.json();
+            const indexedCount = parseInt(cseData.searchInformation?.totalResults || '0');
+            await storeMetric('indexed_pages', indexedCount, `${indexedCount} pages`, 'Google Custom Search API', null);
+            results.push({ metric: 'indexed_pages', value: indexedCount, source: 'Google CSE', status: 'ok' });
+          }
+        }
+        // Fallback: try GSC sitemaps
+        if (!results.find(r => r.metric === 'indexed_pages' && r.status === 'ok')) {
+          const gscCred = creds.google_search_console;
+          if (gscCred?.credential_data?.access_token) {
+            const propertyUrl = gscCred.credential_data.property_url || domain;
+            const smRes = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/sitemaps`, {
+              headers: { Authorization: `Bearer ${gscCred.credential_data.access_token}` }
+            });
+            if (smRes.ok) {
+              const smData = await smRes.json();
+              let totalIndexed = 0;
+              (smData.sitemap || []).forEach(sm => {
+                (sm.contents || []).forEach(c => { totalIndexed += (c.indexed || 0); });
+              });
+              if (totalIndexed > 0) {
+                await storeMetric('indexed_pages', totalIndexed, `${totalIndexed} pages`, 'Google Search Console Sitemaps', null);
+                results.push({ metric: 'indexed_pages', value: totalIndexed, source: 'GSC Sitemaps', status: 'ok' });
+              }
+            }
+          }
+        }
+        if (!results.find(r => r.metric === 'indexed_pages')) {
+          results.push({ metric: 'indexed_pages', status: 'no_api', detail: 'Set GOOGLE_CSE_ID + API key, or connect GSC' });
+        }
+      } catch (e) {
+        results.push({ metric: 'indexed_pages', status: 'error', detail: e.message });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 5 & 6. DOMAIN AUTHORITY + REFERRING DOMAINS — DataForSEO API
+    // ═══════════════════════════════════════════════════════════
+    try {
+      const dfsCred = creds.dataforseo;
+      if (dfsCred?.credential_data?.login && dfsCred?.credential_data?.password) {
+        const dfsAuth = Buffer.from(`${dfsCred.credential_data.login}:${dfsCred.credential_data.password}`).toString('base64');
+        const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
+
+        // DataForSEO Backlinks Summary
+        const dfsRes = await fetch('https://api.dataforseo.com/v3/backlinks/summary/live', {
+          method: 'POST',
+          headers: { Authorization: `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify([{ target: cleanDomain, internal_list_limit: 0, backlinks_filters: ['dofollow', '=', true] }])
+        });
+        if (dfsRes.ok) {
+          const dfsData = await dfsRes.json();
+          const task = dfsData.tasks?.[0]?.result?.[0];
+          if (task) {
+            const refDomains = task.referring_domains || 0;
+            const backlinks = task.backlinks || 0;
+            const rank = task.rank || 0;
+
+            await storeMetric('referring_domains_count', refDomains, `${refDomains} domains`, 'DataForSEO Backlinks API', null);
+            results.push({ metric: 'referring_domains_count', value: refDomains, backlinks, source: 'DataForSEO', status: 'ok' });
+
+            // DataForSEO rank as proxy for DA (0-1000 scale, normalize to 0-100)
+            const normalizedDA = Math.min(100, Math.round(Math.log10(Math.max(rank, 1)) * 20));
+            await storeMetric('domain_authority', normalizedDA, `${normalizedDA}/100`, 'DataForSEO (rank-derived)', null);
+            results.push({ metric: 'domain_authority', value: normalizedDA, raw_rank: rank, source: 'DataForSEO', status: 'ok' });
+          }
+        } else {
+          results.push({ metric: 'referring_domains_count', status: 'api_error', detail: `DataForSEO returned ${dfsRes.status}` });
+        }
+      } else {
+        // Try Moz API
+        const mozCred = creds.moz;
+        if (mozCred?.credential_data?.access_id && mozCred?.credential_data?.secret_key) {
+          const mozAuth = Buffer.from(`${mozCred.credential_data.access_id}:${mozCred.credential_data.secret_key}`).toString('base64');
+          const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          const mozRes = await fetch('https://lsapi.seomoz.com/v2/url_metrics', {
+            method: 'POST',
+            headers: { Authorization: `Basic ${mozAuth}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ targets: [cleanDomain] })
+          });
+          if (mozRes.ok) {
+            const mozData = await mozRes.json();
+            const result = mozData.results?.[0];
+            if (result) {
+              const da = Math.round(result.domain_authority || 0);
+              const refDomains = result.root_domains_to_root_domain || 0;
+              await storeMetric('domain_authority', da, `${da}/100`, 'Moz API', null);
+              await storeMetric('referring_domains_count', refDomains, `${refDomains} domains`, 'Moz API', null);
+              results.push({ metric: 'domain_authority', value: da, source: 'Moz', status: 'ok' });
+              results.push({ metric: 'referring_domains_count', value: refDomains, source: 'Moz', status: 'ok' });
+            }
+          }
+        }
+        if (!results.find(r => r.metric === 'domain_authority')) {
+          results.push({ metric: 'domain_authority', status: 'no_cred', detail: 'Configure DataForSEO or Moz in Credentials' });
+          results.push({ metric: 'referring_domains_count', status: 'no_cred', detail: 'Configure DataForSEO or Moz in Credentials' });
+        }
+      }
+    } catch (e) {
+      if (!results.find(r => r.metric === 'domain_authority')) {
+        results.push({ metric: 'domain_authority', status: 'error', detail: e.message });
+        results.push({ metric: 'referring_domains_count', status: 'error', detail: e.message });
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 7. LOCAL 3-PACK — DataForSEO SERP API
+    // ═══════════════════════════════════════════════════════════
+    try {
+      const dfsCred = creds.dataforseo;
+      if (dfsCred?.credential_data?.login && dfsCred?.credential_data?.password) {
+        const dfsAuth = Buffer.from(`${dfsCred.credential_data.login}:${dfsCred.credential_data.password}`).toString('base64');
+        const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        // Search for the business name + city to check local pack
+        const searchQuery = client.name || cleanDomain;
+        const serpRes = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+          method: 'POST',
+          headers: { Authorization: `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify([{ keyword: searchQuery, location_code: 2376, language_code: 'he', device: 'desktop', depth: 10 }])
+        });
+        if (serpRes.ok) {
+          const serpData = await serpRes.json();
+          const items = serpData.tasks?.[0]?.result?.[0]?.items || [];
+          // Look for local_pack item type
+          const localPack = items.find(i => i.type === 'local_pack' || i.type === 'maps');
+          const inPack = localPack?.items?.some(li => {
+            const liDomain = (li.domain || li.url || '').toLowerCase();
+            return liDomain.includes(cleanDomain.toLowerCase());
+          }) || false;
+
+          await storeMetric('local_3pack_present', inPack ? 1 : 0, inPack ? 'Yes' : 'No', 'DataForSEO SERP API', 1);
+          results.push({ metric: 'local_3pack_present', value: inPack ? 1 : 0, present: inPack, source: 'DataForSEO SERP', status: 'ok' });
+        }
+      } else {
+        results.push({ metric: 'local_3pack_present', status: 'no_cred', detail: 'Configure DataForSEO in Credentials' });
+      }
+    } catch (e) {
+      results.push({ metric: 'local_3pack_present', status: 'error', detail: e.message });
+    }
+
+    // Summary
+    const ok = results.filter(r => r.status === 'ok').length;
+    const total = results.length;
+    res.json({
+      refreshed_at: now,
+      metrics_checked: total,
+      metrics_updated: ok,
+      results,
+      missing_credentials: results.filter(r => r.status === 'no_cred' || r.status === 'no_api_key' || r.status === 'no_api').map(r => r.detail),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── VERIFICATION ──────────────────────────────────────────────
 router.get('/clients/:clientId/verification', async (req, res) => {
   try {

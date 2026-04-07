@@ -690,6 +690,33 @@ router.get('/clients/:clientId/verification', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── REFRESH ALL METRICS (mark as needing update) ─────────────
+router.post('/clients/:clientId/baselines/refresh', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    // Update specific metric if provided
+    if (req.body.metric_name && req.body.metric_value != null) {
+      const { data, error } = await supabase.from('baselines')
+        .update({ metric_value: req.body.metric_value, recorded_at: new Date().toISOString() })
+        .eq('client_id', clientId)
+        .eq('metric_name', req.body.metric_name)
+        .select().single();
+      if (error) throw error;
+      return res.json({ updated: data });
+    }
+    // Otherwise just return current baselines with freshness info
+    const { data, error } = await supabase.from('baselines').select('*').eq('client_id', clientId);
+    if (error) throw error;
+    const now = Date.now();
+    const withFreshness = data.map(b => ({
+      ...b,
+      age_hours: b.recorded_at ? Math.round((now - new Date(b.recorded_at).getTime()) / 3600000) : null,
+      is_stale: !b.recorded_at || (now - new Date(b.recorded_at).getTime() > 7 * 24 * 60 * 60 * 1000),
+    }));
+    res.json(withFreshness);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── VERIFICATION AUTO-FIX ────────────────────────────────────
 router.post('/clients/:clientId/verification/fix', async (req, res) => {
   try {

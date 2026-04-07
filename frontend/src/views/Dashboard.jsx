@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Users, RefreshCw, Link2, Send, Zap } from 'lucide-react';
+import { Users, RefreshCw, Link2, Send, Zap, AlertTriangle, Clock } from 'lucide-react';
 import { api } from '../hooks/useApi.js';
-import { colors, spacing, fontSize, fontWeight } from '../theme.js';
+import { colors, spacing, fontSize, fontWeight, radius, transitions } from '../theme.js';
 import { Card, KpiCard, SH, Badge, Dot, Btn, Spin, Empty, SkeletonCard, SkeletonKpi } from '../components/index.jsx';
 
 export default function Dashboard({ clientId, clients }) {
@@ -35,6 +35,52 @@ export default function Dashboard({ clientId, clients }) {
   const client = clients.find(c => c.id === clientId);
   const bm = Object.fromEntries(bl.map(b => [b.metric_name, b]));
 
+  // KPI card with data source timestamp
+  function KpiWithDate({ baseline, label, color, target, sub, suffix }) {
+    const b = baseline;
+    const val = b?.metric_value;
+    const isStale = !b?.recorded_at || (Date.now() - new Date(b.recorded_at).getTime() > 7 * 24 * 60 * 60 * 1000);
+    const age = b?.recorded_at ? formatAge(new Date(b.recorded_at)) : null;
+
+    return (
+      <div style={{ position: 'relative' }}>
+        <KpiCard
+          label={label}
+          value={val}
+          target={target ? b?.target_value : undefined}
+          color={color}
+          sub={sub || suffix}
+        />
+        {/* Data freshness indicator */}
+        <div style={{
+          position: 'absolute', bottom: 6, left: 0, right: 0,
+          textAlign: 'center', fontSize: 9, lineHeight: 1,
+          color: isStale ? '#D97706' : colors.textDisabled,
+        }}>
+          {age ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+              {isStale && <AlertTriangle size={8} />}
+              <Clock size={8} /> {age}
+            </span>
+          ) : (
+            <span style={{ color: colors.error }}>No data source</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function formatAge(date) {
+    const diff = Date.now() - date.getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    return date.toLocaleDateString();
+  }
+
   const refreshPageSpeed = async () => {
     setPsLoading(true);
     try {
@@ -66,30 +112,51 @@ export default function Dashboard({ clientId, clients }) {
     <div>
       <SH title={client?.name || 'Dashboard'} sub={client?.domain} action={<Btn onClick={fetch_data} small secondary ariaLabel="Refresh dashboard"><RefreshCw size={12} />Refresh</Btn>} />
 
+      {/* Stale data warning */}
+      {(() => {
+        const staleMetrics = bl.filter(b => {
+          if (!b.recorded_at) return true;
+          const age = Date.now() - new Date(b.recorded_at).getTime();
+          return age > 7 * 24 * 60 * 60 * 1000; // older than 7 days
+        });
+        if (staleMetrics.length === 0) return null;
+        return (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: spacing.sm,
+            background: '#FEF3C7', border: '1px solid #FDE68A',
+            borderRadius: radius.lg, padding: `${spacing.sm}px ${spacing.lg}px`,
+            marginBottom: spacing.lg, fontSize: fontSize.sm, color: '#92400E',
+          }}>
+            <AlertTriangle size={14} />
+            <span><strong>{staleMetrics.length} metrics</strong> haven't been updated recently. Run agents or connect APIs to get live data.</span>
+            <Btn small onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'runs' }))} style={{ marginLeft: 'auto', fontSize: fontSize.xs }} ariaLabel="Go to runs">
+              <Zap size={11} /> Run Agents
+            </Btn>
+          </div>
+        );
+      })()}
+
       {/* KPI Row 1 */}
       <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <KpiCard label="Google Reviews" value={bm.google_reviews_count?.metric_value} target={bm.google_reviews_count?.target_value} color={colors.accent} />
-        <KpiCard label="LawReviews" value={bm.lawreviews_count?.metric_value} sub={bm.lawreviews_rating?.metric_value ? `\u2605 ${bm.lawreviews_rating.metric_value}` : undefined} color={colors.success} />
+        <KpiWithDate baseline={bm.google_reviews_count} label="Google Reviews" color={colors.accent} target />
+        <KpiWithDate baseline={bm.lawreviews_count} label="LawReviews" color={colors.success}
+          sub={bm.lawreviews_rating?.metric_value ? `★ ${bm.lawreviews_rating.metric_value}` : undefined} />
         <div style={{ position: 'relative' }}>
-          <KpiCard label="Mobile PageSpeed" value={bm.mobile_pagespeed?.metric_value} target={bm.mobile_pagespeed?.target_value} color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} sub="/100" />
+          <KpiWithDate baseline={bm.mobile_pagespeed} label="Mobile PageSpeed" target
+            color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} suffix="/100" />
           <Btn small ghost onClick={refreshPageSpeed} disabled={psLoading} style={{ position: 'absolute', top: 8, right: 8, fontSize: fontSize.micro, padding: '2px 6px' }} ariaLabel="Run live PageSpeed check">
             {psLoading ? <Spin /> : <Zap size={10} />} {psLoading ? 'Checking...' : 'Live Check'}
           </Btn>
-          {bm.mobile_pagespeed?.recorded_at && (
-            <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, textAlign: 'center', fontSize: fontSize.micro, color: colors.textDisabled }}>
-              {new Date(bm.mobile_pagespeed.recorded_at).toLocaleDateString()}
-            </div>
-          )}
         </div>
-        <KpiCard label="Page 1 Keywords" value={bm.page1_keyword_count?.metric_value} target={bm.page1_keyword_count?.target_value} color={colors.primary} />
+        <KpiWithDate baseline={bm.page1_keyword_count} label="Page 1 Keywords" color={colors.primary} target />
       </div>
 
       {/* KPI Row 2 */}
       <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 20 }}>
-        <KpiCard label="Local 3-Pack" value={bm.local_3pack_present?.metric_value != null ? (bm.local_3pack_present.metric_value === 1 ? '\u2713 Yes' : '\u2717 No') : undefined} color={bm.local_3pack_present?.metric_value === 1 ? colors.success : colors.error} />
-        <KpiCard label="Indexed Pages" value={bm.indexed_pages?.metric_value} target={bm.indexed_pages?.target_value} color={colors.info} />
-        <KpiCard label="Referring Domains" value={bm.referring_domains_count?.metric_value} target={bm.referring_domains_count?.target_value} color="#8B5CF6" />
-        <KpiCard label="Domain Authority" value={bm.domain_authority?.metric_value} target={bm.domain_authority?.target_value} color="#06B6D4" />
+        <KpiCard label="Local 3-Pack" value={bm.local_3pack_present?.metric_value != null ? (bm.local_3pack_present.metric_value === 1 ? '✓ Yes' : '✗ No') : undefined} color={bm.local_3pack_present?.metric_value === 1 ? colors.success : colors.error} />
+        <KpiWithDate baseline={bm.indexed_pages} label="Indexed Pages" color={colors.info} target />
+        <KpiWithDate baseline={bm.referring_domains_count} label="Referring Domains" color="#8B5CF6" target />
+        <KpiWithDate baseline={bm.domain_authority} label="Domain Authority" color="#06B6D4" target />
       </div>
 
       {/* Stats Row */}

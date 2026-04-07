@@ -654,4 +654,54 @@ router.get('/clients/:clientId/verification', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── VERIFICATION AUTO-FIX ────────────────────────────────────
+router.post('/clients/:clientId/verification/fix', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const { checkId } = req.body;
+    const results = [];
+
+    if (checkId === 'no_orphan_runs' || checkId === 'all') {
+      // Mark stuck runs as failed
+      const { data, error } = await supabase.from('runs')
+        .update({ status: 'failed', error: 'Auto-cancelled: stuck for >10 minutes' })
+        .eq('client_id', clientId).eq('status', 'running')
+        .lt('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+        .select('id');
+      results.push({ check: 'no_orphan_runs', fixed: true, detail: `Cancelled ${data?.length || 0} stuck runs` });
+    }
+
+    if (checkId === 'recent_run' || checkId === 'all') {
+      // Queue a quick agent run
+      const { data: agents } = await supabase.from('client_agent_assignments')
+        .select('agent_template_id').eq('client_id', clientId).eq('enabled', true).limit(1);
+      if (agents?.length > 0) {
+        await supabase.from('run_queue').insert({
+          client_id: clientId, agent_template_id: agents[0].agent_template_id,
+          status: 'queued', priority: 1
+        });
+        results.push({ check: 'recent_run', fixed: true, detail: 'Queued a fresh agent run' });
+      } else {
+        results.push({ check: 'recent_run', fixed: false, detail: 'No agents assigned to queue' });
+      }
+    }
+
+    if (checkId === 'credential_health' || checkId === 'all') {
+      // Refresh credential health scores
+      try {
+        await refreshCredentialHealth(clientId);
+        results.push({ check: 'credential_health', fixed: true, detail: 'Refreshed credential health scores' });
+      } catch (e) {
+        results.push({ check: 'credential_health', fixed: false, detail: 'Navigate to Credentials to configure' });
+      }
+    }
+
+    if (checkId === 'memory_loaded' || checkId === 'all') {
+      results.push({ check: 'memory_loaded', fixed: false, detail: 'Navigate to Memory view to add items', navigate: 'memory' });
+    }
+
+    res.json({ results, message: results.length > 0 ? 'Fix actions completed' : 'No fix available for this check' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 export default router;

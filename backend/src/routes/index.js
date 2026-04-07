@@ -561,6 +561,65 @@ router.post('/clients/:clientId/baselines', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── PAGESPEED (real Google PageSpeed Insights API) ───────────
+router.post('/clients/:clientId/pagespeed', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    // Get client domain
+    const { data: client } = await supabase.from('clients').select('domain').eq('id', clientId).single();
+    if (!client?.domain) return res.status(400).json({ error: 'Client has no domain configured' });
+
+    const url = client.domain.startsWith('http') ? client.domain : `https://${client.domain}`;
+    const apiKey = process.env.GOOGLE_PAGESPEED_API_KEY || ''; // works without key too, just rate-limited
+
+    // Fetch both mobile and desktop scores from Google PageSpeed Insights API
+    const fetchScore = async (strategy) => {
+      const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=${strategy}${apiKey ? `&key=${apiKey}` : ''}`;
+      const resp = await fetch(apiUrl);
+      if (!resp.ok) throw new Error(`PageSpeed API ${strategy} failed: ${resp.status}`);
+      const data = await resp.json();
+      const score = Math.round((data.lighthouseResult?.categories?.performance?.score || 0) * 100);
+      const fcp = data.lighthouseResult?.audits?.['first-contentful-paint']?.displayValue || null;
+      const lcp = data.lighthouseResult?.audits?.['largest-contentful-paint']?.displayValue || null;
+      const cls = data.lighthouseResult?.audits?.['cumulative-layout-shift']?.displayValue || null;
+      const tbt = data.lighthouseResult?.audits?.['total-blocking-time']?.displayValue || null;
+      return { score, fcp, lcp, cls, tbt };
+    };
+
+    const [mobile, desktop] = await Promise.all([
+      fetchScore('mobile'),
+      fetchScore('desktop'),
+    ]);
+
+    // Update baselines
+    const now = new Date().toISOString();
+    await supabase.from('baselines').upsert({
+      client_id: clientId, metric_name: 'mobile_pagespeed',
+      metric_value: mobile.score, metric_text: `${mobile.score}/100`,
+      source: 'Google PageSpeed Insights API (live)', target_value: 80, recorded_at: now,
+    }, { onConflict: 'client_id,metric_name' });
+
+    await supabase.from('baselines').upsert({
+      client_id: clientId, metric_name: 'desktop_pagespeed',
+      metric_value: desktop.score, metric_text: `${desktop.score}/100`,
+      source: 'Google PageSpeed Insights API (live)', target_value: 90, recorded_at: now,
+    }, { onConflict: 'client_id,metric_name' });
+
+    // Also store a KPI snapshot for history
+    await supabase.from('kpi_snapshots').insert([
+      { client_id: clientId, metric_name: 'mobile_pagespeed', metric_value: mobile.score, metric_text: `${mobile.score}/100`, source: 'PageSpeed Insights API', source_verified: true, data_date: now.split('T')[0] },
+      { client_id: clientId, metric_name: 'desktop_pagespeed', metric_value: desktop.score, metric_text: `${desktop.score}/100`, source: 'PageSpeed Insights API', source_verified: true, data_date: now.split('T')[0] },
+    ]);
+
+    res.json({
+      url,
+      mobile: { score: mobile.score, fcp: mobile.fcp, lcp: mobile.lcp, cls: mobile.cls, tbt: mobile.tbt },
+      desktop: { score: desktop.score, fcp: desktop.fcp, lcp: desktop.lcp, cls: desktop.cls, tbt: desktop.tbt },
+      updated_at: now,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── VERIFICATION ──────────────────────────────────────────────
 router.get('/clients/:clientId/verification', async (req, res) => {
   try {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Users, RefreshCw, Link2, Send } from 'lucide-react';
+import { Users, RefreshCw, Link2, Send, Zap } from 'lucide-react';
 import { api } from '../hooks/useApi.js';
 import { colors, spacing, fontSize, fontWeight } from '../theme.js';
 import { Card, KpiCard, SH, Badge, Dot, Btn, Spin, Empty, SkeletonCard, SkeletonKpi } from '../components/index.jsx';
@@ -10,6 +10,8 @@ export default function Dashboard({ clientId, clients }) {
   const [runs, sR] = useState([]);
   const [inc, sI] = useState([]);
   const [load, sL] = useState(false);
+  const [psLoading, setPsLoading] = useState(false);
+  const [psResult, setPsResult] = useState(null);
 
   const fetch_data = useCallback(async () => {
     if (!clientId) return;
@@ -32,6 +34,18 @@ export default function Dashboard({ clientId, clients }) {
 
   const client = clients.find(c => c.id === clientId);
   const bm = Object.fromEntries(bl.map(b => [b.metric_name, b]));
+
+  const refreshPageSpeed = async () => {
+    setPsLoading(true);
+    try {
+      const result = await api(`/clients/${clientId}/pagespeed`, { method: 'POST' });
+      setPsResult(result);
+      // Refresh baselines to show updated score
+      const b = await api(`/clients/${clientId}/baselines`);
+      sBl(b);
+    } catch (e) { console.error('PageSpeed check failed:', e); }
+    setPsLoading(false);
+  };
 
   if (load) {
     return (
@@ -56,7 +70,17 @@ export default function Dashboard({ clientId, clients }) {
       <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
         <KpiCard label="Google Reviews" value={bm.google_reviews_count?.metric_value} target={bm.google_reviews_count?.target_value} color={colors.accent} />
         <KpiCard label="LawReviews" value={bm.lawreviews_count?.metric_value} sub={bm.lawreviews_rating?.metric_value ? `\u2605 ${bm.lawreviews_rating.metric_value}` : undefined} color={colors.success} />
-        <KpiCard label="Mobile PageSpeed" value={bm.mobile_pagespeed?.metric_value} target={bm.mobile_pagespeed?.target_value} color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} sub="/100" />
+        <div style={{ position: 'relative' }}>
+          <KpiCard label="Mobile PageSpeed" value={bm.mobile_pagespeed?.metric_value} target={bm.mobile_pagespeed?.target_value} color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} sub="/100" />
+          <Btn small ghost onClick={refreshPageSpeed} disabled={psLoading} style={{ position: 'absolute', top: 8, right: 8, fontSize: fontSize.micro, padding: '2px 6px' }} ariaLabel="Run live PageSpeed check">
+            {psLoading ? <Spin /> : <Zap size={10} />} {psLoading ? 'Checking...' : 'Live Check'}
+          </Btn>
+          {bm.mobile_pagespeed?.recorded_at && (
+            <div style={{ position: 'absolute', bottom: 8, left: 0, right: 0, textAlign: 'center', fontSize: fontSize.micro, color: colors.textDisabled }}>
+              {new Date(bm.mobile_pagespeed.recorded_at).toLocaleDateString()}
+            </div>
+          )}
+        </div>
         <KpiCard label="Page 1 Keywords" value={bm.page1_keyword_count?.metric_value} target={bm.page1_keyword_count?.target_value} color={colors.primary} />
       </div>
 

@@ -326,7 +326,7 @@ function renderConnectorForm(c, isHe) {
       </button>
       <div class="security-note">
         <span class="lock">🔒</span>
-        <span>${isHe ? 'גישה לקריאה בלבד. איננו מבצעים שינויים ללא אישורכם.' : 'Read-only access. We never make changes without your approval.'}</span>
+        <span>${isHe ? 'גישה מאובטחת. כל שינוי דורש אישור מפורש מכם.' : 'Secure access. All changes require your explicit approval.'}</span>
       </div>`;
   } else if (c.auth_type === 'oauth_meta') {
     html += `
@@ -407,15 +407,31 @@ function togglePassword(id) {
 }
 
 async function handleGoogleOAuth(slug) {
-  const email = prompt('Enter the Google account email associated with this service:');
+  const isHe = linkData?.language === 'he';
+  const labels = {
+    google_search_console: { prop: isHe ? 'כתובת האתר ב-Search Console (למשל https://example.com):' : 'Search Console property URL (e.g. https://example.com):', propKey: 'property_url' },
+    google_analytics: { prop: isHe ? 'מזהה נכס GA4 (למשל 123456789):' : 'GA4 Property ID (e.g. 123456789):', propKey: 'property_id' },
+    google_ads: { prop: isHe ? 'מזהה לקוח Google Ads (למשל 123-456-7890):' : 'Google Ads Customer ID (e.g. 123-456-7890):', propKey: 'customer_id' },
+    google_business_profile: { prop: isHe ? 'שם העסק כפי שמופיע ב-Google:' : 'Business name as it appears on Google:', propKey: 'business_name' },
+  };
+  const email = prompt(isHe ? 'כתובת המייל של חשבון Google שמנהל את השירות הזה:' : 'Google account email that manages this service:');
   if (!email) return;
-  await submitConnectorData(slug, 'oauth_token', {}, { account_email: email, scopes: ['granted'] });
+  const cfg = labels[slug];
+  let propertyInfo = {};
+  if (cfg) {
+    const val = prompt(cfg.prop);
+    if (val) propertyInfo[cfg.propKey] = val;
+  }
+  await submitConnectorData(slug, 'oauth_token', propertyInfo, { account_email: email, scopes: ['granted'] });
 }
 
 async function handleMetaOAuth(slug) {
-  const email = prompt('Enter the Facebook/Meta account email:');
+  const isHe = linkData?.language === 'he';
+  const email = prompt(isHe ? 'כתובת המייל של חשבון Facebook/Meta:' : 'Facebook/Meta account email:');
   if (!email) return;
-  await submitConnectorData(slug, 'oauth_token', {}, { account_email: email, page_type: 'business' });
+  const pageName = prompt(isHe ? 'שם הדף העסקי (כפי שמופיע בפייסבוק):' : 'Business page name (as it appears on Facebook):');
+  const pageUrl = prompt(isHe ? 'קישור לדף (למשל https://facebook.com/yourpage):' : 'Page URL (e.g. https://facebook.com/yourpage):');
+  await submitConnectorData(slug, 'oauth_token', { page_name: pageName, page_url: pageUrl }, { account_email: email, page_type: 'business' });
 }
 
 async function submitConnector(slug) {

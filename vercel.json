@@ -8,7 +8,10 @@
     { "source": "/api/:path*", "destination": "/api/index.mjs" },
     { "source": "/onboarding/:token", "destination": "/onboarding.html" },
     { "source": "/setup/:token", "destination": "/setup.html" },
-    { "source": "/:path*", "destination": "/index.html" }
+    { "source": "/((?!assets/).*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    { "source": "/assets/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] }
   ],
   "crons": [
     { "path": "/api/cron/enqueue-scheduled", "schedule": "*/5 * * * *" },

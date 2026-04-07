@@ -531,6 +531,42 @@ router.get('/clients/:clientId/credentials', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Get credential detail with field presence info (not raw secrets)
+router.get('/credentials/:id/detail', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('client_credentials')
+      .select('id, service, label, is_connected, health_score, last_checked, last_successful, error, credential_data')
+      .eq('id', req.params.id).single();
+    if (error) throw error;
+    // Return field presence map + masked values (don't expose full secrets)
+    const credData = data.credential_data || {};
+    const fieldStatus = {};
+    const maskedData = {};
+    for (const [key, val] of Object.entries(credData)) {
+      if (val && String(val).trim()) {
+        fieldStatus[key] = true;
+        const s = String(val);
+        // Mask secrets: show first 3 and last 4 chars
+        if (s.length > 10 && (key.includes('password') || key.includes('secret') || key.includes('token') || key.includes('api_key') || key === 'key')) {
+          maskedData[key] = s.slice(0, 3) + '...' + s.slice(-4);
+        } else {
+          maskedData[key] = s; // Non-secret fields shown in full
+        }
+      } else {
+        fieldStatus[key] = false;
+        maskedData[key] = '';
+      }
+    }
+    res.json({
+      id: data.id, service: data.service, label: data.label,
+      is_connected: data.is_connected, health_score: data.health_score,
+      last_checked: data.last_checked, last_successful: data.last_successful,
+      error: data.error, field_status: fieldStatus, masked_data: maskedData,
+      raw_data: credData, // The actual values for pre-filling the form
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.patch('/credentials/:id', async (req, res) => {
   try {
     const { data, error } = await supabase.from('client_credentials').update(req.body).eq('id', req.params.id).select('id, service, label, is_connected, health_score').single();

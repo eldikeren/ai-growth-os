@@ -90,30 +90,39 @@ export default function App() {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        body { margin: 0; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        body { margin: 0; background: #F5F7FA; }
         .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
         a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
           outline: 2px solid ${colors.primary};
           outline-offset: 2px;
         }
+        input:focus, textarea:focus, select:focus {
+          border-color: ${colors.primary} !important;
+          box-shadow: 0 0 0 3px rgba(99,102,241,0.12) !important;
+        }
+        button:active:not(:disabled) { transform: scale(0.98) !important; }
         /* Responsive sidebar */
         @media (max-width: 768px) {
           .sidebar { position: fixed !important; height: 100vh !important; z-index: 50 !important; }
           .sidebar-overlay { display: block !important; }
           .mobile-menu-btn { display: flex !important; }
-          .main-content { padding: 16px !important; }
+          .main-content { padding: 20px !important; }
         }
         @media (min-width: 769px) {
           .mobile-menu-btn { display: none !important; }
         }
         /* Smooth view transitions */
-        .view-content { animation: fadeIn 0.2s ease-out; }
+        .view-content { animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
         /* Scrollbar styling */
-        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: ${colors.borderDark}; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: ${colors.textMuted}; }
+        ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
+        /* Selection */
+        ::selection { background: rgba(99,102,241,0.2); color: #111827; }
       `}</style>
 
       {/* Skip to main content (a11y) */}

@@ -1,43 +1,48 @@
-// ─── AI Growth OS — Design Tokens ────────────────────────────────
-// Centralized design system based on Analytics Dashboard palette
-// from UI/UX Pro Max Skill
+// ─── AI Growth OS — Design Tokens v2 ─────────────────────────────
+// Modern dark-accented design with glassmorphism & gradients
 
 export const colors = {
-  // Primary brand
-  primary: '#1E40AF',
-  primaryLight: '#3B82F6',
-  primaryLighter: '#DBEAFE',
-  primaryLightest: '#EFF6FF',
+  // Primary brand — vibrant indigo-violet gradient feel
+  primary: '#6366F1',
+  primaryLight: '#818CF8',
+  primaryLighter: '#E0E7FF',
+  primaryLightest: '#EEF2FF',
   onPrimary: '#FFFFFF',
+  primaryGradient: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
 
   // Accent (attention/CTA)
-  accent: '#D97706',
-  accentLight: '#F59E0B',
+  accent: '#F59E0B',
+  accentLight: '#FBBF24',
   accentLighter: '#FEF3C7',
   onAccent: '#FFFFFF',
+  accentGradient: 'linear-gradient(135deg, #F59E0B 0%, #F97316 100%)',
 
-  // Neutrals
-  background: '#F8FAFC',
+  // Neutrals — softer, more modern
+  background: '#F5F7FA',
   surface: '#FFFFFF',
-  surfaceHover: '#F1F5F9',
-  border: '#DBEAFE',
-  borderLight: '#E2E8F0',
-  borderDark: '#CBD5E1',
+  surfaceHover: '#F8FAFC',
+  surfaceElevated: '#FFFFFF',
+  border: '#E5E7EB',
+  borderLight: '#F3F4F6',
+  borderDark: '#D1D5DB',
 
-  // Text
-  text: '#0F172A',
-  textSecondary: '#475569',
-  textMuted: '#64748B',
-  textDisabled: '#94A3B8',
+  // Text — higher contrast
+  text: '#111827',
+  textSecondary: '#4B5563',
+  textMuted: '#6B7280',
+  textDisabled: '#9CA3AF',
   textInverse: '#FFFFFF',
 
-  // Sidebar
-  sidebarBg: '#0F172A',
-  sidebarText: '#94A3B8',
+  // Sidebar — sleek dark with subtle gradient
+  sidebarBg: '#0F0F1A',
+  sidebarBgGradient: 'linear-gradient(180deg, #0F0F1A 0%, #1A1A2E 100%)',
+  sidebarText: '#9CA3AF',
   sidebarTextActive: '#FFFFFF',
-  sidebarActive: '#1E40AF',
-  sidebarHover: '#1E293B',
-  sidebarBrand: '#3B82F6',
+  sidebarActive: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
+  sidebarActiveBg: 'rgba(99, 102, 241, 0.15)',
+  sidebarHover: 'rgba(255,255,255,0.05)',
+  sidebarBrand: '#818CF8',
+  sidebarDivider: 'rgba(255,255,255,0.06)',
 
   // Semantic — status
   success: '#10B981',
@@ -49,34 +54,23 @@ export const colors = {
   warning: '#F59E0B',
   warningLight: '#FEF3C7',
   warningDark: '#92400E',
-  info: '#3B82F6',
-  infoLight: '#DBEAFE',
-  infoDark: '#1E40AF',
+  info: '#6366F1',
+  infoLight: '#E0E7FF',
+  infoDark: '#4338CA',
 
   // Run statuses
   status: {
-    success: '#10B981',
-    failed: '#EF4444',
-    running: '#3B82F6',
-    pending_approval: '#F59E0B',
-    dry_run: '#8B5CF6',
-    queued: '#64748B',
-    executed: '#10B981',
-    cancelled: '#94A3B8',
-    blocked_dependency: '#F97316',
-    open: '#EF4444',
-    investigating: '#F59E0B',
-    resolved: '#10B981',
-    dismissed: '#94A3B8',
-    pending: '#F59E0B',
-    approved: '#10B981',
-    rejected: '#EF4444',
+    success: '#10B981', failed: '#EF4444', running: '#6366F1',
+    pending_approval: '#F59E0B', dry_run: '#8B5CF6', queued: '#6B7280',
+    executed: '#10B981', cancelled: '#9CA3AF', blocked_dependency: '#F97316',
+    open: '#EF4444', investigating: '#F59E0B', resolved: '#10B981',
+    dismissed: '#9CA3AF', pending: '#F59E0B', approved: '#10B981', rejected: '#EF4444',
   },
 
   // Agent roles
   roles: {
     owner: { bg: '#FEF3C7', color: '#92400E' },
-    worker: { bg: '#DBEAFE', color: '#1E40AF' },
+    worker: { bg: '#E0E7FF', color: '#4338CA' },
     validator: { bg: '#D1FAE5', color: '#065F46' },
   },
 
@@ -96,123 +90,101 @@ export const colors = {
   severity: {
     critical: { color: '#EF4444', bg: '#FEE2E2' },
     high: { color: '#F59E0B', bg: '#FEF3C7' },
-    medium: { color: '#3B82F6', bg: '#DBEAFE' },
-    low: { color: '#94A3B8', bg: '#F1F5F9' },
+    medium: { color: '#6366F1', bg: '#E0E7FF' },
+    low: { color: '#9CA3AF', bg: '#F3F4F6' },
   },
+
+  // Glass effect
+  glass: 'rgba(255,255,255,0.7)',
+  glassBorder: 'rgba(255,255,255,0.2)',
 };
 
 export const spacing = {
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-  xl: 20,
-  '2xl': 24,
-  '3xl': 28,
-  '4xl': 32,
-  '5xl': 40,
+  xs: 4, sm: 8, md: 12, lg: 16, xl: 24,
+  '2xl': 32, '3xl': 40, '4xl': 48, '5xl': 56,
 };
 
 export const radius = {
-  sm: 4,
-  md: 6,
-  lg: 8,
-  xl: 10,
-  '2xl': 12,
-  full: 9999,
+  sm: 6, md: 10, lg: 14, xl: 18, '2xl': 22, full: 9999,
 };
 
 export const fontSize = {
-  micro: 10,
-  xs: 11,
-  sm: 12,
-  md: 13,
-  lg: 14,
-  xl: 15,
-  '2xl': 18,
-  '3xl': 20,
-  '4xl': 24,
-  '5xl': 28,
-  hero: 48,
+  micro: 10, xs: 11, sm: 12, md: 13, lg: 15, xl: 17,
+  '2xl': 20, '3xl': 24, '4xl': 30, '5xl': 36, hero: 48,
 };
 
 export const fontWeight = {
-  normal: 400,
-  medium: 500,
-  semibold: 600,
-  bold: 700,
-  extrabold: 800,
+  normal: 400, medium: 500, semibold: 600, bold: 700, extrabold: 800,
 };
 
 export const shadows = {
-  sm: '0 1px 2px rgba(0,0,0,0.05)',
-  md: '0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05)',
-  lg: '0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.05)',
+  sm: '0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04)',
+  md: '0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04)',
+  lg: '0 12px 32px rgba(0,0,0,0.1), 0 4px 8px rgba(0,0,0,0.06)',
+  xl: '0 20px 48px rgba(0,0,0,0.12)',
+  glow: '0 0 20px rgba(99,102,241,0.3)',
+  cardHover: '0 8px 24px rgba(99,102,241,0.12), 0 2px 8px rgba(0,0,0,0.06)',
 };
 
 export const transitions = {
-  fast: 'all 0.15s ease',
-  normal: 'all 0.25s ease',
-  slow: 'all 0.35s ease',
+  fast: 'all 0.15s cubic-bezier(0.4, 0, 0.2, 1)',
+  normal: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+  slow: 'all 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+  spring: 'all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)',
 };
 
-export const breakpoints = {
-  sm: 640,
-  md: 768,
-  lg: 1024,
-  xl: 1280,
-};
+export const breakpoints = { sm: 640, md: 768, lg: 1024, xl: 1280 };
 
 // Sidebar nav groups
 export const NAV_GROUPS = [
   {
     label: 'Overview',
     items: [
-      { id: 'dashboard', label: 'Dashboard' },
-      { id: 'verification', label: 'Verification' },
-      { id: 'credentials', label: 'Credentials' },
+      { id: 'dashboard', label: 'Dashboard', emoji: '📊' },
+      { id: 'verification', label: 'Verification', emoji: '✅' },
+      { id: 'credentials', label: 'Credentials', emoji: '🔑' },
     ],
   },
   {
     label: 'Operations',
     items: [
-      { id: 'agents', label: 'Agents' },
-      { id: 'runs', label: 'Runs' },
-      { id: 'queue', label: 'Queue' },
-      { id: 'approvals', label: 'Approvals' },
-      { id: 'schedules', label: 'Schedules' },
+      { id: 'agents', label: 'Agents', emoji: '🤖' },
+      { id: 'runs', label: 'Runs', emoji: '▶️' },
+      { id: 'queue', label: 'Queue', emoji: '📋' },
+      { id: 'approvals', label: 'Approvals', emoji: '👍' },
+      { id: 'schedules', label: 'Schedules', emoji: '⏰' },
     ],
   },
   {
     label: 'SEO Intelligence',
     items: [
-      { id: 'seo', label: 'SEO & Links' },
-      { id: 'link-intelligence', label: 'Link Intelligence' },
-      { id: 'seo-actions', label: 'SEO Actions' },
+      { id: 'seo', label: 'SEO & Links', emoji: '🔗' },
+      { id: 'link-intelligence', label: 'Link Intelligence', emoji: '🧠' },
+      { id: 'seo-actions', label: 'SEO Actions', emoji: '🎯' },
     ],
   },
   {
     label: 'Content',
     items: [
-      { id: 'reports', label: 'Reports' },
-      { id: 'memory', label: 'Memory' },
-      { id: 'prompt-overrides', label: 'Prompt Overrides' },
+      { id: 'reports', label: 'Reports', emoji: '📈' },
+      { id: 'memory', label: 'Memory', emoji: '💾' },
+      { id: 'prompt-overrides', label: 'Prompt Overrides', emoji: '✏️' },
     ],
   },
   {
     label: 'Settings',
     items: [
-      { id: 'connectors', label: 'Connectors' },
-      { id: 'website-access', label: 'Website Access' },
-      { id: 'setup-links', label: 'Setup Links' },
-      { id: 'incidents', label: 'Incidents' },
-      { id: 'audit', label: 'Audit Trail' },
+      { id: 'connectors', label: 'Connectors', emoji: '🔌' },
+      { id: 'website-access', label: 'Website Access', emoji: '🌐' },
+      { id: 'setup-links', label: 'Setup Links', emoji: '⚡' },
+      { id: 'incidents', label: 'Incidents', emoji: '🚨' },
+      { id: 'audit', label: 'Audit Trail', emoji: '📜' },
     ],
   },
   {
     label: 'Onboarding',
     items: [
-      { id: 'onboarding', label: 'New Client' },
+      { id: 'onboarding', label: 'New Client', emoji: '🚀' },
     ],
   },
 ];

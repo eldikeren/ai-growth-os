@@ -7,15 +7,15 @@ import { Card, SH, Badge, Btn, Spin, Empty, SkeletonCard, Field, inputStyle } fr
 // Known service types and what credentials they need
 // Maps DB service names to their configuration fields
 const SERVICE_CONFIG = {
-  openai: { label: 'OpenAI API (gpt-4.1)', fields: [{ key: 'api_key', label: 'API Key', secret: true }] },
-  google_search_console: { label: 'Google Search Console', fields: [{ key: 'property_url', label: 'Property URL' }, { key: 'api_key', label: 'Service Account JSON', secret: true, multiline: true }] },
-  google_ads: { label: 'Google Ads', fields: [{ key: 'customer_id', label: 'Customer ID' }, { key: 'api_key', label: 'API Key / OAuth Token', secret: true }] },
-  google_analytics: { label: 'Google Analytics 4', fields: [{ key: 'property_id', label: 'Property ID' }, { key: 'api_key', label: 'Service Account JSON', secret: true, multiline: true }] },
-  google_business_profile: { label: 'Google Business Profile', fields: [{ key: 'account_id', label: 'Account ID' }, { key: 'api_key', label: 'OAuth Token', secret: true }] },
-  facebook: { label: 'Facebook Business Page', fields: [{ key: 'page_id', label: 'Page ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
-  instagram: { label: 'Instagram Business Profile', fields: [{ key: 'account_id', label: 'Account ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
-  meta_business: { label: 'Meta Business', fields: [{ key: 'page_id', label: 'Page ID' }, { key: 'access_token', label: 'Access Token', secret: true }] },
-  dataforseo: { label: 'DataForSEO API', fields: [{ key: 'login', label: 'Login' }, { key: 'password', label: 'Password', secret: true }] },
+  openai: { label: 'OpenAI API (gpt-4.1)', fields: [{ key: 'api_key', label: 'API Key', secret: true, placeholder: 'sk-proj-...' }] },
+  google_search_console: { label: 'Google Search Console', oauth: 'google', fields: [{ key: 'property_url', label: 'Website URL', placeholder: 'https://example.com' }, { key: 'email', label: 'Google Account Email', placeholder: 'you@gmail.com' }, { key: 'password', label: 'Password / App Password', secret: true }] },
+  google_ads: { label: 'Google Ads', oauth: 'google', fields: [{ key: 'customer_id', label: 'Customer ID', placeholder: 'XXX-XXX-XXXX' }, { key: 'email', label: 'Google Account Email', placeholder: 'you@gmail.com' }, { key: 'password', label: 'Password / App Password', secret: true }] },
+  google_analytics: { label: 'Google Analytics 4', oauth: 'google', fields: [{ key: 'property_id', label: 'Property ID', placeholder: 'e.g. 123456789' }, { key: 'email', label: 'Google Account Email', placeholder: 'you@gmail.com' }, { key: 'password', label: 'Password / App Password', secret: true }] },
+  google_business_profile: { label: 'Google Business Profile', oauth: 'google', fields: [{ key: 'email', label: 'Google Account Email', placeholder: 'you@gmail.com' }, { key: 'password', label: 'Password / App Password', secret: true }] },
+  facebook: { label: 'Facebook Business Page', oauth: 'meta', fields: [{ key: 'page_url', label: 'Page URL', placeholder: 'https://facebook.com/yourpage' }, { key: 'email', label: 'Facebook Email / Username' }, { key: 'password', label: 'Password', secret: true }] },
+  instagram: { label: 'Instagram Business Profile', oauth: 'meta', fields: [{ key: 'profile_url', label: 'Profile URL', placeholder: 'https://instagram.com/yourprofile' }, { key: 'username', label: 'Username', placeholder: '@yourhandle' }, { key: 'password', label: 'Password', secret: true }] },
+  meta_business: { label: 'Meta Business', oauth: 'meta', fields: [{ key: 'email', label: 'Meta Business Email' }, { key: 'password', label: 'Password', secret: true }] },
+  dataforseo: { label: 'DataForSEO API', fields: [{ key: 'login', label: 'Login Email' }, { key: 'password', label: 'Password', secret: true }] },
   moz: { label: 'Moz API (Domain Authority)', fields: [{ key: 'access_id', label: 'Access ID' }, { key: 'secret_key', label: 'Secret Key', secret: true }] },
 };
 
@@ -81,19 +81,31 @@ function EditCredentialForm({ cred, config, onSave, onCancel, saving }) {
           <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold }}>{config.label}</div>
           <Btn small secondary onClick={onCancel} ariaLabel="Cancel editing"><X size={12} /></Btn>
         </div>
+        {config.oauth && (
+          <div style={{
+            background: config.oauth === 'google' ? '#f0f7ff' : '#f0f0ff',
+            border: `1px solid ${config.oauth === 'google' ? '#c5ddf7' : '#d5d5f7'}`,
+            borderRadius: radius.md, padding: spacing.md, marginBottom: spacing.lg,
+            fontSize: fontSize.xs, color: colors.textSecondary, lineHeight: 1.5,
+          }}>
+            {config.oauth === 'google' ? '🔑 ' : '🔑 '}
+            <strong>Tip:</strong> You can also connect this service via the <strong>Setup Link</strong> sent to your client — they'll authenticate directly with {config.oauth === 'google' ? 'Google' : 'Meta'} (recommended).
+            The fields below are for manual configuration.
+          </div>
+        )}
         {config.fields.map(field => (
           <Field key={field.key} label={field.label} htmlFor={`cred-${field.key}`}>
             {field.secret ? (
               <SecretInput
                 value={formData[field.key]}
                 onChange={e => setFormData(prev => ({ ...prev, [field.key]: e.target.value }))}
-                placeholder={`Enter ${field.label}...`}
+                placeholder={field.placeholder || `Enter ${field.label}...`}
                 multiline={field.multiline}
               />
             ) : (
               <input id={`cred-${field.key}`} value={formData[field.key]}
                 onChange={e => setFormData(prev => ({ ...prev, [field.key]: e.target.value }))}
-                placeholder={`Enter ${field.label}...`} style={inputStyle} />
+                placeholder={field.placeholder || `Enter ${field.label}...`} style={inputStyle} />
             )}
           </Field>
         ))}

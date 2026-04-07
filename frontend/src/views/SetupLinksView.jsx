@@ -261,8 +261,9 @@ export default function SetupLinksView({ clientId, clients }) {
   };
 
   const copyLink = (l) => {
-    navigator.clipboard?.writeText(`${window.location.origin}/onboarding/${l.token}`);
-    alert('Link copied!');
+    const url = `${window.location.origin}/setup/${l.token}`;
+    navigator.clipboard?.writeText(url);
+    alert(`Link copied!\n\n${url}`);
   };
 
   const toggleConn = (slug) =>

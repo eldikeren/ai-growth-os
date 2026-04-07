@@ -55,7 +55,7 @@ function SecretInput({ value, onChange, placeholder, multiline }) {
   );
 }
 
-// ─── Edit Credential Modal ──────────────────────────────────────
+// ─── Edit Credential Modal (overlay) ────────────────────────────
 function EditCredentialForm({ cred, config, onSave, onCancel, saving }) {
   const [formData, setFormData] = useState(() => {
     const data = {};
@@ -64,34 +64,47 @@ function EditCredentialForm({ cred, config, onSave, onCancel, saving }) {
   });
 
   return (
-    <Card style={{ borderColor: colors.primary, borderWidth: 2 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.lg }}>
-        <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold }}>{config.label}</div>
-        <Btn small secondary onClick={onCancel} ariaLabel="Cancel editing"><X size={12} /></Btn>
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0,0,0,0.5)', zIndex: 1000,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      padding: spacing.xl,
+    }} onClick={onCancel}>
+      <div style={{
+        background: colors.surface, borderRadius: radius.lg,
+        border: `2px solid ${colors.primary}`,
+        padding: spacing.xl, width: '100%', maxWidth: 520,
+        maxHeight: '90vh', overflow: 'auto',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+      }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.lg }}>
+          <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold }}>{config.label}</div>
+          <Btn small secondary onClick={onCancel} ariaLabel="Cancel editing"><X size={12} /></Btn>
+        </div>
+        {config.fields.map(field => (
+          <Field key={field.key} label={field.label} htmlFor={`cred-${field.key}`}>
+            {field.secret ? (
+              <SecretInput
+                value={formData[field.key]}
+                onChange={e => setFormData(prev => ({ ...prev, [field.key]: e.target.value }))}
+                placeholder={`Enter ${field.label}...`}
+                multiline={field.multiline}
+              />
+            ) : (
+              <input id={`cred-${field.key}`} value={formData[field.key]}
+                onChange={e => setFormData(prev => ({ ...prev, [field.key]: e.target.value }))}
+                placeholder={`Enter ${field.label}...`} style={inputStyle} />
+            )}
+          </Field>
+        ))}
+        <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.md }}>
+          <Btn onClick={() => onSave(formData)} disabled={saving}>
+            {saving ? <Spin /> : <Check size={13} />} Save Credentials
+          </Btn>
+          <Btn secondary onClick={onCancel}>Cancel</Btn>
+        </div>
       </div>
-      {config.fields.map(field => (
-        <Field key={field.key} label={field.label} htmlFor={`cred-${field.key}`}>
-          {field.secret ? (
-            <SecretInput
-              value={formData[field.key]}
-              onChange={e => setFormData(prev => ({ ...prev, [field.key]: e.target.value }))}
-              placeholder={`Enter ${field.label}...`}
-              multiline={field.multiline}
-            />
-          ) : (
-            <input id={`cred-${field.key}`} value={formData[field.key]}
-              onChange={e => setFormData(prev => ({ ...prev, [field.key]: e.target.value }))}
-              placeholder={`Enter ${field.label}...`} style={inputStyle} />
-          )}
-        </Field>
-      ))}
-      <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.md }}>
-        <Btn onClick={() => onSave(formData)} disabled={saving}>
-          {saving ? <Spin /> : <Check size={13} />} Save Credentials
-        </Btn>
-        <Btn secondary onClick={onCancel}>Cancel</Btn>
-      </div>
-    </Card>
+    </div>
   );
 }
 
@@ -178,11 +191,9 @@ export default function CredentialsView({ clientId }) {
         }
       />
 
-      {/* Editing form */}
+      {/* Editing modal */}
       {editing && config && (
-        <div style={{ marginBottom: spacing.xl }}>
-          <EditCredentialForm cred={editing} config={config} onSave={handleSave} onCancel={() => setEditing(null)} saving={saving} />
-        </div>
+        <EditCredentialForm cred={editing} config={config} onSave={handleSave} onCancel={() => setEditing(null)} saving={saving} />
       )}
 
       {error && (

@@ -5,6 +5,7 @@ import { Loader, Menu, X } from 'lucide-react';
 import { api } from './hooks/useApi.js';
 import { colors, spacing, transitions } from './theme.js';
 import Sidebar from './layout/Sidebar.jsx';
+import AiChat from './components/AiChat.jsx';
 
 // Lazy-load views for code splitting
 const Dashboard = lazy(() => import('./views/Dashboard.jsx'));
@@ -207,6 +208,9 @@ export default function App() {
           </Suspense>
         )}
       </main>
+
+      {/* AI Chat Assistant */}
+      <AiChat clientId={clientId} />
     </div>
   );
 }

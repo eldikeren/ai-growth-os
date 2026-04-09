@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Data Deletion — Elad Digital AI Growth OS</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #F5F7FA; color: #111827; line-height: 1.8; }
+    .container { max-width: 800px; margin: 0 auto; padding: 48px 24px; }
+    h1 { font-size: 32px; font-weight: 800; margin-bottom: 8px; color: #111827; }
+    .subtitle { font-size: 14px; color: #6B7280; margin-bottom: 32px; }
+    h2 { font-size: 20px; font-weight: 700; margin-top: 32px; margin-bottom: 12px; color: #1F2937; }
+    p, li { font-size: 15px; color: #374151; margin-bottom: 12px; }
+    ul, ol { padding-left: 24px; }
+    li { margin-bottom: 6px; }
+    a { color: #6366F1; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card { background: #fff; border-radius: 16px; padding: 40px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 1px solid #E5E7EB; }
+    .logo { max-width: 160px; margin-bottom: 24px; }
+    .footer { text-align: center; margin-top: 48px; font-size: 13px; color: #9CA3AF; }
+    .cta { display: inline-block; background: #6366F1; color: #fff; padding: 12px 24px; border-radius: 10px; font-weight: 700; margin-top: 16px; text-decoration: none; }
+    .cta:hover { background: #4F46E5; text-decoration: none; }
+    .info-box { background: #EEF2FF; border: 1px solid #C7D2FE; border-radius: 10px; padding: 20px; margin: 20px 0; }
+    .info-box strong { color: #4338CA; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <img src="/images/elad-digital-logo.png" alt="Elad Digital" class="logo" style="filter: invert(1) brightness(2);">
+      <h1>Data Deletion Instructions</h1>
+      <p class="subtitle">How to request deletion of your data from AI Growth OS</p>
+
+      <h2>Your Right to Delete</h2>
+      <p>You have the right to request the deletion of all personal data that AI Growth OS (operated by Elad Digital) has collected about you or your business, including data obtained through Facebook, Instagram, and other connected platforms.</p>
+
+      <h2>What Data We Store</h2>
+      <p>When you connect your accounts to AI Growth OS, we may store:</p>
+      <ul>
+        <li>Facebook/Instagram page insights and engagement metrics</li>
+        <li>Page follower counts and post performance data</li>
+        <li>OAuth access tokens (encrypted)</li>
+        <li>Account identifiers and page IDs</li>
+        <li>Historical KPI snapshots derived from your connected accounts</li>
+      </ul>
+
+      <h2>How to Request Deletion</h2>
+      <p>You can request deletion of your data in any of the following ways:</p>
+
+      <ol>
+        <li><strong>Email us directly:</strong> Send a deletion request to <a href="mailto:elad.d.keren@gmail.com">elad.d.keren@gmail.com</a> with the subject line "Data Deletion Request" and include your account email or business name.</li>
+        <li><strong>Through the app:</strong> If you have access to the AI Growth OS dashboard, you can delete your client profile and all associated data from the Settings section.</li>
+        <li><strong>Revoke access from Facebook/Meta:</strong> Go to your <a href="https://www.facebook.com/settings?tab=business_tools" target="_blank">Facebook Business Integrations settings</a> and remove AI Growth OS. This will revoke our access immediately.</li>
+      </ol>
+
+      <div class="info-box">
+        <strong>What happens when you request deletion:</strong>
+        <ul style="margin-top: 8px;">
+          <li>All your stored credentials and OAuth tokens are immediately revoked and deleted</li>
+          <li>All KPI data, metrics, and analytics associated with your account are permanently deleted</li>
+          <li>All memory items, agent run history, and audit trail entries are removed</li>
+          <li>Deletion is completed within <strong>30 days</strong> of your request</li>
+          <li>You will receive an email confirmation once deletion is complete</li>
+        </ul>
+      </div>
+
+      <h2>Data Deletion Callback (for Meta)</h2>
+      <p>AI Growth OS supports Meta's data deletion callback protocol. When a user removes our app from their Facebook settings, we automatically receive a callback and initiate the deletion process for all data associated with that user.</p>
+      <p>Callback URL: <code>https://ai-growth-os-mu.vercel.app/api/meta/data-deletion</code></p>
+
+      <h2>Confirmation</h2>
+      <p>After your data has been deleted, you will receive a confirmation email. If you have not received confirmation within 30 days, please contact us at <a href="mailto:elad.d.keren@gmail.com">elad.d.keren@gmail.com</a>.</p>
+
+      <h2>Contact</h2>
+      <p><strong>Elad Digital</strong><br>
+      Email: <a href="mailto:elad.d.keren@gmail.com">elad.d.keren@gmail.com</a><br>
+      Website: <a href="https://eladdigital.com">eladdigital.com</a></p>
+    </div>
+    <div class="footer">© 2026 Elad Digital. All rights reserved.</div>
+  </div>
+</body>
+</html>

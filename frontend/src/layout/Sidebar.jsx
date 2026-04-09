@@ -31,17 +31,24 @@ export default function Sidebar({ view, setView, clients, clientId, setClientId,
           borderRight: '1px solid rgba(255,255,255,0.04)',
         }}>
 
-        {/* Brand */}
-        <div style={{ padding: '28px 20px 20px' }}>
+        {/* Brand — EladDigital Logo */}
+        <div style={{ padding: '20px 16px 12px' }}>
+          <img
+            src="/images/elad-digital-logo.png"
+            alt="Elad Digital"
+            style={{
+              width: '100%', maxWidth: 180, height: 'auto',
+              display: 'block',
+              filter: 'brightness(1.1)',
+            }}
+          />
           <div style={{
-            fontSize: fontSize.xl, fontWeight: fontWeight.extrabold, letterSpacing: 1.5,
+            fontSize: fontSize.micro, fontWeight: fontWeight.bold, letterSpacing: 1.5,
+            marginTop: 6, textTransform: 'uppercase',
             background: 'linear-gradient(135deg, #818CF8 0%, #C084FC 50%, #F472B6 100%)',
             WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
           }}>
             AI GROWTH OS
-          </div>
-          <div style={{ fontSize: fontSize.micro, color: 'rgba(255,255,255,0.35)', marginTop: 4, letterSpacing: 0.5 }}>
-            by Elad Digital
           </div>
         </div>
 

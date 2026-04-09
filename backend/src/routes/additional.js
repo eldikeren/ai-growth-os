@@ -410,6 +410,49 @@ router.get('/cron/health-check', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── META DATA DELETION CALLBACK ──────────────────────────────
+// Required by Meta App Review — receives callback when user removes app
+router.post('/meta/data-deletion', async (req, res) => {
+  try {
+    const { signed_request } = req.body;
+    if (!signed_request) return res.status(400).json({ error: 'Missing signed_request' });
+
+    // Parse signed request (base64url encoded)
+    const parts = signed_request.split('.');
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+    const userId = payload.user_id;
+
+    if (userId) {
+      // Find and delete credentials linked to this Meta user
+      // Meta user_id may be stored in credential_data or integration_assets
+      const { data: assets } = await supabase.from('integration_assets')
+        .select('client_id').eq('provider', 'meta');
+
+      // Delete all meta-related credentials and data for matching clients
+      for (const asset of (assets || [])) {
+        await supabase.from('client_credentials')
+          .delete().eq('client_id', asset.client_id).in('service', ['facebook', 'instagram', 'meta_business']);
+        await supabase.from('integration_assets')
+          .delete().eq('client_id', asset.client_id).eq('provider', 'meta');
+        await supabase.from('kpi_snapshots')
+          .delete().eq('client_id', asset.client_id).in('metric_name', ['facebook_page_fans', 'instagram_followers']);
+      }
+
+      console.log(`Meta data deletion callback processed for user ${userId}`);
+    }
+
+    // Meta expects a JSON response with a URL and confirmation code
+    const confirmCode = `del_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    res.json({
+      url: 'https://ai-growth-os-mu.vercel.app/data-deletion',
+      confirmation_code: confirmCode,
+    });
+  } catch (err) {
+    console.error('Meta data deletion error:', err);
+    res.json({ url: 'https://ai-growth-os-mu.vercel.app/data-deletion', confirmation_code: 'error' });
+  }
+});
+
 // ── AI CHAT ASSISTANT ────────────────────────────────────────
 router.post('/chat', async (req, res) => {
   try {

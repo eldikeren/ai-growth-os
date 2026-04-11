@@ -66,12 +66,16 @@ router.post('/oauth/google/start', async (req, res) => {
 
 // ── GOOGLE OAUTH: CALLBACK ────────────────────────────────────
 router.get('/oauth/google/callback', async (req, res) => {
+  const stateStr = req.query.state;
+  const stateObj = (() => { try { return JSON.parse(stateStr); } catch { return {}; } })();
   try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${error}`);
-    if (!code || !state) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=missing_params`);
-    const result = await handleGoogleCallback(code, state, req.ip);
-    const stateObj = JSON.parse(state);
+    const { code, error } = req.query;
+    if (error) {
+      if (stateObj.adminFlow) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(error)}`);
+      return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${error}`);
+    }
+    if (!code || !stateStr) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=missing_params`);
+    const result = await handleGoogleCallback(code, stateStr, req.ip);
     // Admin OAuth flow — redirect back to the app (credentials page), not onboarding
     if (stateObj.adminFlow && stateObj.clientId) {
       res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&connected=google&client=${stateObj.clientId}`);
@@ -80,7 +84,6 @@ router.get('/oauth/google/callback', async (req, res) => {
     }
   } catch (e) {
     console.error('Google callback error:', e.message);
-    const stateObj = (() => { try { return JSON.parse(state); } catch { return {}; } })();
     if (stateObj.adminFlow) {
       res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(e.message)}`);
     } else {

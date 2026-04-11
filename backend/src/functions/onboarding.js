@@ -53,12 +53,12 @@ const GOOGLE_SCOPE_BUNDLES = {
 
 // META SCOPES
 const META_SCOPES = [
-  'pages_manage_posts',
-  'pages_read_engagement',
   'pages_show_list',
+  'pages_read_engagement',
+  'pages_manage_posts',
+  'business_management',
   'instagram_basic',
-  'instagram_content_publish',
-  'business_management'
+  'instagram_content_publish'
 ];
 
 // ============================================================

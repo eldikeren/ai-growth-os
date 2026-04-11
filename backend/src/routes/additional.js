@@ -109,14 +109,12 @@ router.post('/clients/:clientId/oauth/google/start', async (req, res) => {
     const { error: sessError } = await supabase.from('onboarding_sessions').upsert({
       id: sessionId,
       client_id: clientId,
-      session_type: 'admin_oauth',
       status: 'in_progress',
       requested_connectors: subProviders.map(sp => `google_${sp}`),
       completed_connectors: [],
       language: 'en',
       token_hash: `admin_${sessionId}`,
       expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-      created_at: new Date().toISOString(),
     }, { onConflict: 'id' });
     if (sessError) { console.error('Session create error:', sessError); return res.status(500).json({ error: `Session creation failed: ${sessError.message}` }); }
 
@@ -139,14 +137,12 @@ router.post('/clients/:clientId/oauth/meta/start', async (req, res) => {
     const { error: sessError } = await supabase.from('onboarding_sessions').upsert({
       id: sessionId,
       client_id: clientId,
-      session_type: 'admin_oauth',
       status: 'in_progress',
       requested_connectors: ['facebook_page', 'instagram_business'],
       completed_connectors: [],
       language: 'en',
       token_hash: `admin_meta_${sessionId}`,
       expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-      created_at: new Date().toISOString(),
     }, { onConflict: 'id' });
     if (sessError) { console.error('Meta session create error:', sessError); return res.status(500).json({ error: `Session creation failed: ${sessError.message}` }); }
 

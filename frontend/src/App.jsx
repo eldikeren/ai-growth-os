@@ -24,10 +24,10 @@ const SchedulesView = lazy(() => import('./views/SchedulesView.jsx'));
 const OnboardingView = lazy(() => import('./views/OnboardingView.jsx'));
 const SetupLinksView = lazy(() => import('./views/SetupLinksView.jsx'));
 const WebsiteAccessView = lazy(() => import('./views/WebsiteAccessView.jsx'));
-const ConnectorsView = lazy(() => import('./views/ConnectorsView.jsx'));
 const PromptOverridesView = lazy(() => import('./views/PromptOverridesView.jsx'));
 const LinkIntelligenceView = lazy(() => import('./views/LinkIntelligenceView.jsx'));
 const SeoActionPlansView = lazy(() => import('./views/SeoActionPlansView.jsx'));
+const SystemAuditView = lazy(() => import('./views/SystemAuditView.jsx'));
 
 function ViewLoader() {
   return (
@@ -38,11 +38,15 @@ function ViewLoader() {
 }
 
 export default function App() {
-  const [view, setView] = useState('dashboard');
+  const [view, _setView] = useState(() => localStorage.getItem('aigos_view') || 'dashboard');
+  const setView = useCallback((v) => { _setView(v); localStorage.setItem('aigos_view', v); }, []);
   const [clients, setClients] = useState([]);
-  const [clientId, setClientId] = useState('');
+  const [clientId, _setClientId] = useState(() => localStorage.getItem('aigos_clientId') || '');
+  const setClientId = useCallback((id) => { _setClientId(id); if (id) localStorage.setItem('aigos_clientId', id); }, []);
   const [loading, setLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [focusRunId, setFocusRunId] = useState(null);
+  const [focusCredentialService, setFocusCredentialService] = useState(null);
 
   const loadClients = useCallback(() =>
     api('/clients').then(c => {
@@ -52,7 +56,18 @@ export default function App() {
     }).catch(() => [])
   , []);
 
-  useEffect(() => { loadClients().finally(() => setLoading(false)); }, []);
+  useEffect(() => {
+    // Read URL params (e.g. from OAuth redirect: ?view=credentials&client=xxx)
+    const params = new URLSearchParams(window.location.search);
+    const urlView = params.get('view');
+    const urlClient = params.get('client');
+    if (urlView) setView(urlView);
+    if (urlClient) setClientId(urlClient);
+    // Clean URL params after reading
+    if (urlView || urlClient) window.history.replaceState({}, '', window.location.pathname);
+
+    loadClients().finally(() => setLoading(false));
+  }, []);
 
   // Auto-collapse sidebar on small screens
   useEffect(() => {
@@ -65,7 +80,16 @@ export default function App() {
 
   // Listen for navigation events from child views (e.g. Dashboard "Create Setup Link")
   useEffect(() => {
-    const handler = (e) => setView(e.detail);
+    const handler = (e) => {
+      const detail = e.detail;
+      if (typeof detail === 'object' && detail.view) {
+        setView(detail.view);
+        if (detail.runId) setFocusRunId(detail.runId);
+        if (detail.service) setFocusCredentialService(detail.service);
+      } else {
+        setView(detail);
+      }
+    };
     window.addEventListener('navigate', handler);
     return () => window.removeEventListener('navigate', handler);
   }, []);
@@ -82,7 +106,7 @@ export default function App() {
     } catch (e) { alert(`Error: ${e.message}`); }
   };
 
-  const viewProps = { clientId, clients };
+  const viewProps = { clientId, setClientId, clients };
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: colors.background, fontFamily: "'Inter', 'Noto Sans Hebrew', 'DM Sans', 'Segoe UI', sans-serif", overflow: 'hidden' }}>
@@ -185,22 +209,22 @@ export default function App() {
           <Suspense fallback={<ViewLoader />}>
             <div className="view-content">
               {view === 'dashboard' && <Dashboard {...viewProps} />}
+              {view === 'system-audit' && <SystemAuditView clientId={clientId} />}
               {view === 'agents' && <AgentsView clientId={clientId} />}
-              {view === 'runs' && <RunsView clientId={clientId} />}
+              {view === 'runs' && <RunsView clientId={clientId} focusRunId={focusRunId} onFocusConsumed={() => setFocusRunId(null)} />}
               {view === 'queue' && <QueueView clientId={clientId} />}
               {view === 'approvals' && <ApprovalsView clientId={clientId} />}
               {view === 'memory' && <MemoryView clientId={clientId} />}
               {view === 'seo' && <SeoView clientId={clientId} />}
               {view === 'reports' && <ReportsView {...viewProps} />}
               {view === 'verification' && <VerificationView clientId={clientId} />}
-              {view === 'credentials' && <CredentialsView clientId={clientId} />}
+              {view === 'credentials' && <CredentialsView clientId={clientId} focusService={focusCredentialService} onFocusConsumed={() => setFocusCredentialService(null)} />}
               {view === 'incidents' && <IncidentsView clientId={clientId} />}
               {view === 'audit' && <AuditView clientId={clientId} />}
               {view === 'schedules' && <SchedulesView clientId={clientId} />}
               {view === 'onboarding' && <OnboardingView clientId={clientId} clients={clients} onClientCreated={id => { setClientId(id); loadClients(); setView('dashboard'); }} />}
               {view === 'setup-links' && <SetupLinksView {...viewProps} />}
               {view === 'website-access' && <WebsiteAccessView clientId={clientId} />}
-              {view === 'connectors' && <ConnectorsView clientId={clientId} />}
               {view === 'prompt-overrides' && <PromptOverridesView clientId={clientId} />}
               {view === 'link-intelligence' && <LinkIntelligenceView clientId={clientId} />}
               {view === 'seo-actions' && <SeoActionPlansView clientId={clientId} />}
@@ -208,6 +232,31 @@ export default function App() {
           </Suspense>
         )}
       </main>
+
+      {/* App Footer — Legal Links for Meta Compliance */}
+      <footer style={{
+        position: 'fixed', bottom: 0, left: 0, right: 0,
+        display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 24,
+        padding: '8px 16px',
+        background: 'rgba(255,255,255,0.95)', backdropFilter: 'blur(8px)',
+        borderTop: `1px solid ${colors.border}`,
+        zIndex: 30,
+        fontSize: 12, color: '#6B7280',
+      }}>
+        <span style={{ fontWeight: 600, color: '#9CA3AF' }}>© {new Date().getFullYear()} Elad Digital</span>
+        <a href="/privacy-policy" target="_blank" rel="noopener noreferrer"
+          style={{ color: '#6366F1', textDecoration: 'none', fontWeight: 500 }}>
+          Privacy Policy
+        </a>
+        <a href="/data-deletion" target="_blank" rel="noopener noreferrer"
+          style={{ color: '#6366F1', textDecoration: 'none', fontWeight: 500 }}>
+          Data Deletion
+        </a>
+        <a href="/terms-of-service" target="_blank" rel="noopener noreferrer"
+          style={{ color: '#6366F1', textDecoration: 'none', fontWeight: 500 }}>
+          Terms of Service
+        </a>
+      </footer>
 
       {/* AI Chat Assistant */}
       <AiChat clientId={clientId} />

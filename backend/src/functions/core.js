@@ -1,10 +1,12 @@
 // ============================================================
 // AI GROWTH OS — COMPLETE BACKEND FUNCTIONS
 // All functions fully implemented. Nothing stubbed.
+// Now with REAL tool calling — agents can execute actions.
 // ============================================================
 
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
+import { getToolDefinitions, executeTool } from './tools.js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -12,6 +14,53 @@ const supabase = createClient(
 );
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const MAX_TOOL_ITERATIONS = 12; // Max tool call rounds per agent execution
+
+// ── JSON REPAIR — fix common LLM output issues ──────────────
+function repairAndParseJSON(text) {
+  // 1. Direct parse
+  try { return JSON.parse(text); } catch {}
+
+  // 2. Extract JSON object from surrounding text (markdown fences, etc.)
+  const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
+  const candidate = jsonMatch ? jsonMatch[1] || jsonMatch[0] : text;
+
+  // 3. Try direct parse of extracted candidate
+  try { return JSON.parse(candidate); } catch {}
+
+  // 4. Repair common issues
+  let repaired = candidate
+    .replace(/,\s*([}\]])/g, '$1')          // trailing commas
+    .replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":') // unquoted keys
+    .replace(/:\s*'([^']*)'/g, ': "$1"')     // single-quoted values to double
+    .replace(/\n/g, '\\n')                    // newlines in strings
+    .replace(/\t/g, '\\t')                    // tabs in strings
+    .replace(/\\n/g, '\\n');                  // preserve already escaped
+
+  // 5. Try parsing repaired version
+  try { return JSON.parse(repaired); } catch {}
+
+  // 6. If JSON is truncated (hit token limit), try to close it
+  let truncated = candidate.replace(/,\s*$/, ''); // remove trailing comma
+  let opens = 0, closesNeeded = [];
+  for (const ch of truncated) {
+    if (ch === '{') { opens++; closesNeeded.push('}'); }
+    else if (ch === '[') { opens++; closesNeeded.push(']'); }
+    else if (ch === '}' || ch === ']') { opens--; closesNeeded.pop(); }
+  }
+  if (opens > 0) {
+    // Remove any partial value at the end (incomplete string, etc.)
+    truncated = truncated.replace(/,\s*"[^"]*$/, ''); // partial key
+    truncated = truncated.replace(/,\s*"[^"]*":\s*("[^"]*)?$/, ''); // partial key:value
+    truncated = truncated.replace(/,\s*$/, '');
+    truncated += closesNeeded.reverse().join('');
+    try { return JSON.parse(truncated); } catch {}
+  }
+
+  // 7. Last resort — return as raw text
+  return { raw_response: text.slice(0, 2000), parse_error: 'JSON repair failed', _partial: true };
+}
 
 // ============================================================
 // EXECUTE AGENT — core execution engine
@@ -88,11 +137,24 @@ export async function executeAgent(clientId, agentTemplateId, taskPayload = {}, 
     ? `\n\n=== CLIENT MEMORY (${memories.length} items) ===\n${memories.map(m => `[${m.scope}/${m.type}] ${m.content}`).join('\n')}`
     : '\n\n=== CLIENT MEMORY ===\nNo memory items loaded yet.';
 
+  // Build client strategy block if available
+  const strategy = rules.strategy || {};
+  const strategyBlock = strategy.primary_goal ? `\n\n=== CLIENT STRATEGY ===
+- Primary Goal: ${strategy.primary_goal}
+- Secondary Goal: ${strategy.secondary_goal || 'not set'}
+- Focus Keywords: ${strategy.focus_keywords?.join(', ') || 'see TARGET KEYWORDS'}
+- Focus Locations: ${strategy.focus_locations?.join(', ') || 'not set'}
+- Authority Targets: ${strategy.authority_targets || 'not set'}
+- Conversion Targets: ${strategy.conversion_targets || 'not set'}
+- KPI Targets: ${strategy.kpi_targets ? Object.entries(strategy.kpi_targets).map(([k,v]) => `${k}: ${v}`).join(', ') : 'not set'}
+- Success Definition: ${strategy.success_definition || 'not defined'}
+IMPORTANT: Every action you take should align with and advance the client's primary goal. Prioritize tasks that directly impact "${strategy.primary_goal}".` : '';
+
   const rulesBlock = `\n\n=== CLIENT RULES ===
 - Client: ${client.name} | Domain: ${client.domain}
 - Language: ${profile.language || 'he'} | RTL Required: ${profile.rtl_required}
 - Brand Voice: ${profile.brand_voice || 'professional'}
-- Business Type: ${profile.business_type || 'law firm'}
+- Business Type: ${profile.business_type || 'business'}
 - Source of Truth: ${rules.source_of_truth || 'Google Drive'}
 - Allowed Accounts: ${rules.allowed_accounts?.join(', ') || 'none specified'}
 - Forbidden Accounts: ${rules.forbidden_accounts?.join(', ') || 'none specified'}
@@ -100,7 +162,7 @@ export async function executeAgent(clientId, agentTemplateId, taskPayload = {}, 
 - Reviews Voice: ${rules.reviews_voice || 'office'} (plural)
 - Post-Change Validation Mandatory: ${rules.post_change_validation_mandatory}
 - Special Policies:\n${rules.special_policies?.map(p => `  • ${p}`).join('\n') || '  • None'}
-${rules.custom_instructions ? `- Custom Instructions: ${rules.custom_instructions}` : ''}`;
+${rules.custom_instructions ? `- Custom Instructions: ${rules.custom_instructions}` : ''}` + strategyBlock;
 
   const keywordsBlock = keywords?.length
     ? `\n\n=== TARGET KEYWORDS (${keywords.length}) ===\n${keywords.map(k =>
@@ -174,58 +236,189 @@ ${rules.custom_instructions ? `- Custom Instructions: ${rules.custom_instruction
       return { success: true, runId: run.id, output, isDryRun: true };
     }
 
-    // 10. Call OpenAI
-    const completion = await openai.chat.completions.create({
-      model: agent.model || 'gpt-4.1',
-      messages: [
-        {
-          role: 'system',
-          content: `You are ${agent.name}. ${agent.global_rules || ''}
+    // 10. Call OpenAI WITH TOOL CALLING
+    const tools = getToolDefinitions(agent.slug, clientId);
+    const toolCallLog = []; // Track all tool calls for audit
 
-CRITICAL OUTPUT RULES:
-- Respond ONLY with valid JSON
-- Do NOT include markdown code fences, backticks, or any text before/after the JSON
-- Your response must be parseable by JSON.parse()
-- Match the output contract specified in your instructions exactly
-- Never fabricate data — if data is missing, report it as null or unknown
+    const messages = [
+      {
+        role: 'system',
+        content: `You are ${agent.name}. ${agent.global_rules || ''}
+
+EXECUTION MODE: You are an AUTONOMOUS EXECUTION agent, not a reporting tool.
+You have access to real tools that call real APIs and modify real databases.
+
+TOOL USAGE RULES:
+- USE YOUR TOOLS to fetch real data before making any analysis or recommendations
+- DO NOT fabricate data — call the appropriate tool to get real numbers
+- After fetching data with tools, analyze it and take action (store metrics, update keywords, create tasks, write memory)
+- You may call multiple tools in sequence — fetch data first, then act on it
+- Each tool call returns real results that you should incorporate into your analysis
+
+FINAL OUTPUT RULES:
+- After all tool calls, produce your final response as valid JSON
+- Match the output contract specified in your instructions
+- Your final JSON response should reflect REAL data obtained from tool calls
+- Include a "tools_used" array listing which tools you called and what they returned
+- Include an "actions_taken" array listing what you changed/stored/created
 - Never add commentary outside the JSON structure`
-        },
-        { role: 'user', content: fullPrompt }
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: agent.max_tokens || 4000,
-      temperature: agent.temperature || 0.3
-    });
+      },
+      { role: 'user', content: fullPrompt }
+    ];
 
-    outputText = completion.choices[0].message.content;
-    promptTokens = completion.usage?.prompt_tokens || 0;
-    completionTokens = completion.usage?.completion_tokens || 0;
-    tokensUsed = completion.usage?.total_tokens || 0;
+    // Tool calling loop — agent can call tools, get results, call more tools
+    let iteration = 0;
+    let finalResponse = null;
+
+    const EXECUTION_TIMEOUT_MS = 50000; // 50s — leave 10s buffer before Vercel's 60s limit
+
+    while (iteration < MAX_TOOL_ITERATIONS) {
+      iteration++;
+
+      // Guard: stop gracefully before Vercel kills us
+      if (Date.now() - startTime > EXECUTION_TIMEOUT_MS) {
+        finalResponse = JSON.stringify({
+          timeout: true,
+          message: `Agent stopped after ${iteration - 1} iterations due to execution time limit (${Math.round((Date.now() - startTime) / 1000)}s).`,
+          partial_results: true,
+          tools_used: toolCallLog.map(t => t.tool),
+          iterations_completed: iteration - 1,
+        });
+        break;
+      }
+
+      const callParams = {
+        model: agent.model || 'gpt-4.1',
+        messages,
+        max_tokens: agent.max_tokens || 4000,
+        temperature: agent.temperature || 0.3
+      };
+
+      // Add tools if available; on final iteration force no tools to get JSON output
+      if (tools.length > 0 && iteration < MAX_TOOL_ITERATIONS) {
+        callParams.tools = tools;
+        callParams.tool_choice = iteration === 1 ? 'auto' : 'auto';
+      }
+
+      // On last iteration or when no tools, force JSON output
+      if (iteration === MAX_TOOL_ITERATIONS || tools.length === 0) {
+        callParams.response_format = { type: 'json_object' };
+      }
+
+      const completion = await openai.chat.completions.create(callParams);
+      const choice = completion.choices[0];
+
+      promptTokens += completion.usage?.prompt_tokens || 0;
+      completionTokens += completion.usage?.completion_tokens || 0;
+      tokensUsed += completion.usage?.total_tokens || 0;
+
+      // If the model wants to call tools
+      if (choice.finish_reason === 'tool_calls' || choice.message.tool_calls?.length) {
+        messages.push(choice.message); // Add assistant message with tool calls
+
+        for (const toolCall of choice.message.tool_calls) {
+          const fnName = toolCall.function.name;
+          let fnArgs;
+          try {
+            fnArgs = JSON.parse(toolCall.function.arguments);
+          } catch {
+            fnArgs = {};
+          }
+
+          console.log(`[TOOL_CALL] ${agent.slug} → ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
+
+          // Execute the tool
+          const toolResult = await executeTool(fnName, fnArgs, clientId, run.id);
+
+          toolCallLog.push({
+            tool: fnName,
+            args: fnArgs,
+            result_preview: JSON.stringify(toolResult).slice(0, 500),
+            iteration
+          });
+
+          // Add tool result to messages
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(toolResult)
+          });
+        }
+
+        // Continue the loop — model will process tool results
+        continue;
+      }
+
+      // Model returned a text response (no more tool calls)
+      finalResponse = choice.message.content;
+      break;
+    }
+
+    // If we exhausted iterations without a final response, force one
+    if (!finalResponse) {
+      messages.push({
+        role: 'user',
+        content: 'You have reached the maximum number of tool calls. Now produce your final JSON output summarizing everything you found and all actions you took.'
+      });
+      const finalCompletion = await openai.chat.completions.create({
+        model: agent.model || 'gpt-4.1',
+        messages,
+        response_format: { type: 'json_object' },
+        max_tokens: agent.max_tokens || 4000,
+        temperature: agent.temperature || 0.3
+      });
+      finalResponse = finalCompletion.choices[0].message.content;
+      promptTokens += finalCompletion.usage?.prompt_tokens || 0;
+      completionTokens += finalCompletion.usage?.completion_tokens || 0;
+      tokensUsed += finalCompletion.usage?.total_tokens || 0;
+    }
+
+    outputText = finalResponse;
 
     try {
       output = JSON.parse(outputText);
     } catch (parseErr) {
-      // Try to extract JSON from response if parsing fails
-      const jsonMatch = outputText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        output = JSON.parse(jsonMatch[0]);
-      } else {
-        output = { raw_response: outputText, parse_error: 'Could not parse JSON from response' };
-      }
+      // Attempt progressive JSON repair
+      output = repairAndParseJSON(outputText);
     }
+
+    // Inject tool call metadata into output
+    output._tool_calls = toolCallLog;
+    output._tool_call_count = toolCallLog.length;
+    output._iterations = iteration;
 
     // 11. Determine next actions
     const changedAnything = !!(output?.changed_anything || output?.changes_made || output?.change_verified === true);
     const triggerValidation = changedAnything && agent.post_change_trigger && rules.post_change_validation_mandatory;
     const needsApproval = agent.action_mode_default === 'approve_then_act' && !approved && output?.what_needs_approval;
 
-    // 12. Update run
+    // 11b. TRUTH GATE — enforce confidence, completeness, and honest status
+    const truthGate = enforceTruthGate(output, agent.slug, toolCallLog);
+    let finalStatus = needsApproval ? 'pending_approval' : 'success';
+    if (truthGate.status_override && finalStatus === 'success') {
+      finalStatus = truthGate.status_override; // downgrade to 'partial' if data is insufficient
+    }
+
+    // Inject truth metadata into output so UI can display it
+    output._truth_gate = {
+      confidence: truthGate.confidence,
+      data_completeness_percent: truthGate.data_completeness_percent,
+      inspected_assets: truthGate.inspected_assets,
+      data_sources_used: truthGate.data_sources_used,
+      missing_sources: truthGate.missing_sources,
+      measured_findings_count: truthGate.measured_findings.length,
+      inferred_recommendations_count: truthGate.inferred_recommendations.length,
+      freshness_summary: truthGate.freshness_summary,
+      why_this_may_be_incomplete: truthGate.why_this_may_be_incomplete,
+    };
+
+    // 12. Update run (with tool call metadata + truth gate)
     await supabase.from('runs').update({
-      status: needsApproval ? 'pending_approval' : 'success',
+      status: finalStatus,
       output,
       output_text: outputText,
       changed_anything: changedAnything,
-      what_changed: output?.what_changed || null,
+      what_changed: output?.what_changed || output?.actions_taken?.map(a => a.action || a).join('; ') || null,
       trigger_post_change_validation: triggerValidation,
       post_change_validation_status: triggerValidation ? 'pending' : null,
       tokens_used: tokensUsed,
@@ -295,7 +488,7 @@ CRITICAL OUTPUT RULES:
       }
     }
 
-    // 20. Write audit log
+    // 20. Write audit log (with tool call summary)
     await supabase.from('audit_trail').insert({
       client_id: clientId,
       run_id: run.id,
@@ -308,9 +501,66 @@ CRITICAL OUTPUT RULES:
         triggered_validation: triggerValidation,
         needs_approval: needsApproval,
         dry_run: false,
-        duration_ms: Date.now() - startTime
+        duration_ms: Date.now() - startTime,
+        tool_calls: toolCallLog.length,
+        tools_used: [...new Set(toolCallLog.map(t => t.tool))],
+        iterations: iteration
       }
     });
+
+    // 21. CENTRAL COORDINATION — React to agent output and create follow-up work
+    try {
+      await coordinatePostRun(clientId, run.id, agent, output, taskPayload);
+    } catch (coordErr) {
+      console.error('[COORDINATION]', coordErr.message);
+    }
+
+    // 22. FALSE SUCCESS DETECTION — flag runs that claim success but did nothing real
+    try {
+      const { isFalseSuccess, flags } = detectFalseSuccess(
+        { tool_calls_count: toolCallLog.length, changed_anything: changedAnything },
+        output
+      );
+      if (isFalseSuccess) {
+        await supabase.from('runs').update({
+          false_success: true,
+          false_success_flags: flags,
+        }).eq('id', run.id);
+
+        await supabase.from('incidents').insert({
+          client_id: clientId,
+          run_id: run.id,
+          title: `False success detected: ${agent.name}`,
+          severity: 'medium',
+          status: 'open',
+          details: {
+            agent_slug: agent.slug,
+            flags,
+            explanation: 'Agent reported success but showed signs of not performing real work: ' + flags.join(', '),
+          }
+        }).catch(() => {});
+
+        await supabase.from('audit_trail').insert({
+          client_id: clientId,
+          run_id: run.id,
+          agent_slug: agent.slug,
+          action: 'false_success_detected',
+          actor: 'system',
+          details: { flags }
+        }).catch(() => {});
+      }
+    } catch (fsErr) {
+      console.error('[FALSE_SUCCESS]', fsErr.message);
+    }
+
+    // 23. Check if this was a validation chain run → auto-fix if issues found
+    if (taskPayload?.validation_chain && taskPayload?.pipeline_phase === 'validate') {
+      try {
+        await checkValidationAndAutoFix(clientId, run.id);
+      } catch (valErr) {
+        console.error('[VALIDATION_AUTOFIX]', valErr.message);
+      }
+    }
 
     return { success: true, runId: run.id, output, needsApproval, triggeredValidation: triggerValidation };
 
@@ -353,11 +603,65 @@ export async function processRunQueue() {
   const startTime = Date.now();
   let processed = 0, failed = 0, skipped = 0, blocked = 0;
 
-  // Fetch queued items
+  // ── ZOMBIE REAPER: clean up stuck "running" items (>15 min old) ──
+  const zombieCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const { data: zombies } = await supabase
+    .from('run_queue')
+    .select('id')
+    .eq('status', 'running')
+    .lt('updated_at', zombieCutoff)
+    .limit(50);
+  if (zombies?.length) {
+    await supabase
+      .from('run_queue')
+      .update({ status: 'failed', error: 'Timed out — stuck in running state for >15 min', updated_at: new Date().toISOString() })
+      .in('id', zombies.map(z => z.id));
+  }
+  // Also clean zombie runs in the runs table
+  const { data: zombieRuns } = await supabase
+    .from('runs')
+    .select('id')
+    .eq('status', 'running')
+    .lt('created_at', zombieCutoff)
+    .limit(100);
+  if (zombieRuns?.length) {
+    await supabase
+      .from('runs')
+      .update({ status: 'failed', error: 'Auto-cancelled: stuck in running state for >15 minutes' })
+      .in('id', zombieRuns.map(z => z.id));
+  }
+
+  // Re-queue retry_scheduled items whose time has come
+  await supabase
+    .from('run_queue')
+    .update({ status: 'queued', updated_at: new Date().toISOString() })
+    .eq('status', 'retry_scheduled')
+    .lte('next_retry_at', new Date().toISOString());
+
+  // Re-check blocked_dependency items (their deps may have completed)
+  const { data: blockedItems } = await supabase
+    .from('run_queue')
+    .select('id, depends_on')
+    .eq('status', 'blocked_dependency')
+    .limit(50);
+  if (blockedItems?.length) {
+    for (const bi of blockedItems) {
+      if (bi.depends_on?.length) {
+        const { data: deps } = await supabase.from('run_queue').select('id, status').in('id', bi.depends_on);
+        const allDone = deps?.every(d => d.status === 'executed');
+        const anyFailed = deps?.some(d => d.status === 'failed');
+        if (allDone) await supabase.from('run_queue').update({ status: 'queued' }).eq('id', bi.id);
+        else if (anyFailed) await supabase.from('run_queue').update({ status: 'failed', error: 'A dependency failed' }).eq('id', bi.id);
+      }
+    }
+  }
+
+  // Fetch queued items — sort by priority_score (highest first), then legacy priority, then age
   const { data: queueItems } = await supabase
     .from('run_queue')
     .select('*, agent_templates(slug, is_active, name, cooldown_minutes)')
     .eq('status', 'queued')
+    .order('priority_score', { ascending: false, nullsFirst: false })
     .order('priority', { ascending: true })
     .order('created_at', { ascending: true })
     .limit(20);
@@ -456,19 +760,34 @@ export async function processRunQueue() {
       processed++;
 
     } catch (err) {
-      // Retry logic
-      if (item.retry_count < item.max_retries) {
+      const retryCount = (item.retry_count || 0) + 1;
+      const maxRetries = item.max_retries || 3;
+      if (retryCount < maxRetries) {
+        // Exponential backoff: 2min, 8min, 32min
+        const backoffMs = Math.pow(4, retryCount) * 30 * 1000;
+        const nextRetryAt = new Date(Date.now() + backoffMs).toISOString();
         await supabase.from('run_queue').update({
-          status: 'queued',
-          retry_count: (item.retry_count || 0) + 1,
-          error: `Retry ${(item.retry_count || 0) + 1}/${item.max_retries}: ${err.message}`
+          status: 'retry_scheduled',
+          retry_count: retryCount,
+          next_retry_at: nextRetryAt,
+          error: `Retry ${retryCount}/${maxRetries}: ${err.message}`
         }).eq('id', item.id);
       } else {
+        // Hard failure — create incident
         await supabase.from('run_queue').update({
           status: 'failed',
+          retry_count: retryCount,
           error: err.message,
           executed_at: new Date().toISOString()
         }).eq('id', item.id);
+        await supabase.from('incidents').insert({
+          client_id: item.client_id,
+          severity: 'high',
+          title: `Agent ${item.agent_templates?.name || item.agent_template_id} failed after ${maxRetries} retries`,
+          description: `Queue item ${item.id} exhausted retries. Last error: ${err.message}`,
+          source_agent: item.agent_templates?.slug || 'queue_processor',
+          status: 'open',
+        });
       }
       failed++;
     }
@@ -524,37 +843,681 @@ export async function resumeApprovedTask(approvalId) {
 }
 
 // ============================================================
+// PRIORITY SCORING ENGINE
+// Every task gets: impact, effort, confidence, urgency → priority_score
+// Higher score = higher priority (processed first)
+// ============================================================
+function computePriorityScore({ impact = 5, effort = 5, confidence = 5, urgency = 5, businessGoal = null, clientStrategy = null }) {
+  // Impact: 1-10 (how much will this move the needle?)
+  // Effort: 1-10 (how much work? INVERSE — lower effort = higher priority)
+  // Confidence: 1-10 (how sure are we this will work?)
+  // Urgency: 1-10 (time-sensitive? regression? broken?)
+
+  // Weights: impact matters most, then urgency, then confidence, effort is inverse
+  const raw = (impact * 0.35) + (urgency * 0.30) + (confidence * 0.20) + ((10 - effort) * 0.15);
+
+  // Bonus if aligned with client's primary goal
+  let goalBonus = 0;
+  if (clientStrategy && businessGoal) {
+    if (businessGoal === clientStrategy.primary_goal) goalBonus = 1.5;
+    else if (businessGoal === clientStrategy.secondary_goal) goalBonus = 0.75;
+  }
+
+  // Final score 0-10 scale
+  return Math.min(10, Math.round((raw + goalBonus) * 100) / 100);
+}
+
+// Estimate priority scores based on issue type and source agent
+function estimateFollowUpPriority(sourceAgent, targetSlug, issues, output) {
+  const defaults = { impact: 5, effort: 5, confidence: 6, urgency: 5 };
+
+  // Regressions and broken things are urgent
+  if (output?.regressions?.length || output?.ranking_drops?.length) {
+    return { ...defaults, impact: 9, urgency: 9, confidence: 8, effort: 4, businessGoal: 'seo_rankings' };
+  }
+
+  // Credential/integration issues block everything
+  if (targetSlug === 'credential-health-agent') {
+    return { ...defaults, impact: 8, urgency: 10, confidence: 9, effort: 2, businessGoal: 'system_health' };
+  }
+
+  // Technical SEO issues (crawl, speed, indexing)
+  if (targetSlug === 'technical-seo-crawl-agent') {
+    return { ...defaults, impact: 7, urgency: 7, confidence: 7, effort: 5, businessGoal: 'seo_rankings' };
+  }
+
+  // Content issues from SEO analysis
+  if (targetSlug === 'website-content-agent') {
+    return { ...defaults, impact: 7, urgency: 5, confidence: 7, effort: 6, businessGoal: 'content_quality' };
+  }
+
+  // Design/UX issues
+  if (targetSlug === 'design-enforcement-agent' || targetSlug === 'design-consistency-agent') {
+    return { ...defaults, impact: 5, urgency: 4, confidence: 8, effort: 4, businessGoal: 'ux_quality' };
+  }
+
+  // Hebrew/language issues
+  if (targetSlug === 'hebrew-quality-agent') {
+    return { ...defaults, impact: 6, urgency: 5, confidence: 9, effort: 3, businessGoal: 'content_quality' };
+  }
+
+  // GEO/AI visibility
+  if (targetSlug === 'geo-ai-visibility-agent') {
+    return { ...defaults, impact: 6, urgency: 4, confidence: 5, effort: 6, businessGoal: 'ai_visibility' };
+  }
+
+  // Local SEO
+  if (targetSlug === 'local-seo-agent') {
+    return { ...defaults, impact: 7, urgency: 5, confidence: 7, effort: 5, businessGoal: 'local_authority' };
+  }
+
+  // Content distribution / backlinks
+  if (targetSlug === 'content-distribution-agent') {
+    return { ...defaults, impact: 6, urgency: 3, confidence: 5, effort: 7, businessGoal: 'authority_building' };
+  }
+
+  // SEO core (general)
+  if (targetSlug === 'seo-core-agent') {
+    return { ...defaults, impact: 8, urgency: 6, confidence: 7, effort: 5, businessGoal: 'seo_rankings' };
+  }
+
+  return defaults;
+}
+
+// Detect false successes: agent said "success" but didn't actually do anything
+function detectFalseSuccess(run, output) {
+  const flags = [];
+
+  // 1. No tool calls made
+  if (!run.tool_calls_count || run.tool_calls_count === 0) {
+    flags.push('no_tools_used');
+  }
+
+  // 2. Output is too short or generic
+  const outputStr = typeof output === 'string' ? output : JSON.stringify(output || {});
+  if (outputStr.length < 100) {
+    flags.push('minimal_output');
+  }
+
+  // 3. No concrete actions listed
+  const hasActions = output?.actions_taken?.length > 0 || output?.changes_made?.length > 0 ||
+    output?.fixes_applied?.length > 0 || output?.updates?.length > 0 || output?.results?.length > 0;
+  if (!hasActions && !output?.metrics && !output?.issues && !output?.recommendations) {
+    flags.push('no_concrete_actions');
+  }
+
+  // 4. Output just echoes instructions back
+  if (output?.summary && /will monitor|will check|will review|no issues found|everything looks good/i.test(output.summary)) {
+    if (!hasActions) flags.push('passive_summary_only');
+  }
+
+  // 5. Output contains failure keywords in Hebrew or English — agent tried but failed
+  const failurePatterns = /נכשל|חוסר ב|לא נמצא|לא זמין|אין גישה|שגיאה|failed|error|not found|unavailable|no access|missing credential|not connected|could not fetch|unable to|blocked|unauthorized|denied|no data available/i;
+  if (failurePatterns.test(outputStr)) {
+    flags.push('output_contains_failure');
+  }
+
+  // 6. changed_anything is false — the agent didn't actually change anything
+  if (run.changed_anything === false) {
+    flags.push('changed_nothing');
+  }
+
+  // 7. Health score or completeness is very low
+  if (output?.overall_health_score != null && output.overall_health_score < 20) {
+    flags.push('very_low_health_score');
+  }
+  if (output?.data_completeness != null && output.data_completeness < 20) {
+    flags.push('very_low_completeness');
+  }
+
+  const isFalseSuccess = flags.length >= 2; // 2+ signals = likely false
+  return { isFalseSuccess, flags };
+}
+
+// ============================================================
+// FRESHNESS THRESHOLDS BY SOURCE
+// ============================================================
+const FRESHNESS_THRESHOLDS = {
+  gsc: { freshHours: 24, agingHours: 72 },
+  google_ads: { freshHours: 12, agingHours: 48 },
+  gbp_reviews: { freshHours: 12, agingHours: 48 },
+  lawreviews: { freshHours: 24, agingHours: 96 },
+  pagespeed: { freshHours: 72, agingHours: 168 },
+  perplexity_geo: { freshHours: 72, agingHours: 168 },
+  local_falcon: { freshHours: 72, agingHours: 168 },
+  backlink_data: { freshHours: 168, agingHours: 336 },
+  website_scan: { freshHours: 24, agingHours: 72 },
+  ga4: { freshHours: 24, agingHours: 72 },
+  dataforseo: { freshHours: 72, agingHours: 168 },
+  queue_health: { freshHours: 1, agingHours: 6 },
+  run_health: { freshHours: 1, agingHours: 6 },
+};
+
+function getFreshnessState(lastSyncAt, freshHours, agingHours) {
+  if (!lastSyncAt) return 'unknown';
+  const ageHours = (Date.now() - new Date(lastSyncAt).getTime()) / 36e5;
+  if (ageHours <= freshHours) return 'fresh';
+  if (ageHours <= agingHours) return 'aging';
+  return 'stale';
+}
+
+// ============================================================
+// PER-AGENT REQUIRED SOURCE GATES
+// If a hard-block source is missing, agent cannot return success
+// ============================================================
+const HARD_BLOCK_RULES = {
+  'seo-core-agent': ['keyword_rankings'],
+  'technical-seo-crawl-agent': ['website_scan'],
+  'gsc-daily-monitor': ['gsc_property_data'],
+  'google-ads-agent': ['google_ads_campaign_data'],
+  'analytics-conversion-agent': ['analytics_events'],
+  'cro-agent': ['website_scan'],
+  'website-content-agent': ['page_html'],
+  'design-consistency-agent': ['page_structure'],
+  'website-qa-agent': ['validation_target'],
+  'local-seo-agent': ['gbp_location_data'],
+  'reviews-gbp-authority-agent': ['review_source_data'],
+  'authority-backlinks-agent': ['authority_or_link_data'],
+  'competitor-intelligence-agent': ['competitor_dataset'],
+  'geo-ai-visibility-agent': ['perplexity_geo_results'],
+  'content-distribution-agent': ['distribution_targets'],
+  'legal-compliance-agent': ['target_content'],
+  'innovation-agent': ['client_strategy'],
+  'design-enforcement-agent': ['changed_output_target'],
+  'hebrew-quality-agent': ['parsed_hebrew_text'],
+  'regression-agent': ['baseline_snapshot'],
+  'credential-health-agent': ['connector_validation'],
+  'kpi-integrity-agent': ['kpi_sources'],
+  'report-composer-agent': ['report_source_blocks'],
+  'master-orchestrator': ['queue_state'],
+};
+
+// ============================================================
+// DATA COMPLETENESS SCORING
+// ============================================================
+function computeDataCompleteness(output, toolCallLog, agentSlug) {
+  let score = 0;
+
+  // 35% — required source present (did the agent get real data?)
+  const hasRealData = toolCallLog.some(t =>
+    t.tool && !['write_memory_item', 'create_task', 'queue_task'].includes(t.tool)
+  );
+  if (hasRealData) score += 35;
+
+  // 20% — inspected asset (did it look at something specific?)
+  const inspectedAssets = extractInspectedAssets(output, toolCallLog);
+  if (inspectedAssets.length > 0) score += 20;
+
+  // 15% — freshness ok (did sources return recent data?)
+  const dataSources = extractDataSources(output, toolCallLog);
+  const staleCount = dataSources.filter(s => s.freshness_state === 'stale' || s.freshness_state === 'unknown').length;
+  if (dataSources.length > 0 && staleCount === 0) score += 15;
+  else if (dataSources.length > 0 && staleCount < dataSources.length) score += 8;
+
+  // 15% — measured findings (not just recommendations)
+  const measured = extractMeasuredFindings(output);
+  if (measured.length > 0) score += 15;
+
+  // 15% — actions or follow-up tasks
+  const hasActions = (output?.actions_taken?.length > 0) || (output?.follow_up_tasks?.length > 0) ||
+    (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0);
+  if (hasActions) score += 15;
+
+  return score;
+}
+
+// ============================================================
+// EXTRACT STRUCTURED TRUTH DATA FROM OUTPUT
+// ============================================================
+function extractInspectedAssets(output, toolCallLog) {
+  const assets = [];
+  // From tool calls — any fetch/scan/crawl/query tool = inspected something
+  for (const tc of toolCallLog) {
+    if (/fetch_|scan_|crawl_|check_|read_page|get_page/.test(tc.tool)) {
+      assets.push({
+        type: tc.tool.replace('fetch_', '').replace('scan_', ''),
+        label: tc.args?.url || tc.args?.domain || tc.args?.keyword || tc.args?.business_name || tc.tool,
+        fetched_at: new Date().toISOString(),
+      });
+    }
+  }
+  // From output if agent reports what it inspected
+  if (output?.inspected_assets) assets.push(...output.inspected_assets);
+  if (output?.pages_checked) {
+    output.pages_checked.forEach(p => assets.push({ type: 'page', label: p }));
+  }
+  if (output?.urls_scanned) {
+    output.urls_scanned.forEach(u => assets.push({ type: 'url', label: u }));
+  }
+  return assets;
+}
+
+function extractDataSources(output, toolCallLog) {
+  const sources = [];
+  const seenSources = new Set();
+
+  for (const tc of toolCallLog) {
+    let sourceType = null;
+    if (/pagespeed/.test(tc.tool)) sourceType = 'pagespeed';
+    else if (/serp|ranking/.test(tc.tool)) sourceType = 'dataforseo';
+    else if (/backlink/.test(tc.tool)) sourceType = 'backlink_data';
+    else if (/review/.test(tc.tool)) sourceType = 'gbp_reviews';
+    else if (/local/.test(tc.tool)) sourceType = 'local_falcon';
+    else if (/gsc|search_console/.test(tc.tool)) sourceType = 'gsc';
+    else if (/perplexity/.test(tc.tool)) sourceType = 'perplexity_geo';
+    else if (/query_metrics|query_baselines/.test(tc.tool)) sourceType = 'stored_metrics';
+    else if (/read_page|scan_website|fetch_page/.test(tc.tool)) sourceType = 'website_scan';
+
+    if (sourceType && !seenSources.has(sourceType)) {
+      seenSources.add(sourceType);
+      const thresholds = FRESHNESS_THRESHOLDS[sourceType] || { freshHours: 24, agingHours: 72 };
+      sources.push({
+        source: sourceType,
+        freshness_state: getFreshnessState(new Date().toISOString(), thresholds.freshHours, thresholds.agingHours),
+        row_count: tc.resultPreview ? 1 : 0,
+      });
+    }
+  }
+
+  // From output if agent reports its sources
+  if (output?.data_sources_used) sources.push(...output.data_sources_used);
+  return sources;
+}
+
+function extractMeasuredFindings(output) {
+  const findings = [];
+  // Explicit measured findings from output
+  if (output?.measured_findings) return output.measured_findings;
+
+  // Infer from common output patterns
+  if (output?.issues?.length) {
+    output.issues.forEach(i => findings.push({
+      title: typeof i === 'string' ? i : (i.title || i.description || i.issue || 'Issue found'),
+      evidence: typeof i === 'string' ? i : JSON.stringify(i),
+      severity: i.severity || 'medium',
+    }));
+  }
+  if (output?.metrics && typeof output.metrics === 'object') {
+    Object.entries(output.metrics).forEach(([k, v]) => {
+      if (typeof v === 'number') findings.push({ title: k, evidence: `${k} = ${v}`, metric_name: k, metric_value: v });
+    });
+  }
+  if (output?.regressions?.length) {
+    output.regressions.forEach(r => findings.push({ title: 'Regression', evidence: JSON.stringify(r), severity: 'high' }));
+  }
+  return findings;
+}
+
+function extractMissingSources(output, agentSlug, toolCallLog) {
+  const missing = [];
+  // From output if agent reports missing
+  if (output?.missing_sources) return output.missing_sources;
+
+  // Check hard block rules
+  const required = HARD_BLOCK_RULES[agentSlug] || [];
+  const toolNames = toolCallLog.map(t => t.tool).join(' ');
+  const outputStr = JSON.stringify(output || {}).toLowerCase();
+
+  for (const req of required) {
+    let found = false;
+    if (req === 'keyword_rankings' && (/ranking|serp|keyword/.test(toolNames) || output?.rankings)) found = true;
+    if (req === 'website_scan' && (/read_page|scan|fetch_page|crawl/.test(toolNames) || output?.pages_checked)) found = true;
+    if (req === 'gsc_property_data' && (/gsc|search_console/.test(toolNames) || output?.gsc_data)) found = true;
+    if (req === 'review_source_data' && (/review/.test(toolNames) || output?.reviews || output?.google_reviews_count != null)) found = true;
+    if (req === 'gbp_location_data' && (/gbp|google_business|review|local/.test(toolNames))) found = true;
+    if (req === 'page_html' && (/read_page|fetch_page|scan/.test(toolNames))) found = true;
+    if (req === 'competitor_dataset' && (/competitor/.test(toolNames) || output?.competitors)) found = true;
+    if (req === 'perplexity_geo_results' && (/perplexity/.test(toolNames) || output?.citations)) found = true;
+    if (req === 'authority_or_link_data' && (/backlink|authority|link/.test(toolNames) || output?.backlinks)) found = true;
+    if (req === 'parsed_hebrew_text' && (/read_page|fetch_page/.test(toolNames) || output?.hebrew_issues)) found = true;
+    if (req === 'baseline_snapshot' && (/baseline|metric|snapshot/.test(toolNames) || output?.baselines)) found = true;
+    if (req === 'connector_validation' && (/credential|token|test/.test(toolNames))) found = true;
+    if (req === 'queue_state' && (/queue/.test(toolNames) || output?.queue_state)) found = true;
+    if (req === 'client_strategy' && outputStr.includes('strategy')) found = true;
+    // Generic fallback
+    if (!found && outputStr.includes(req.replace(/_/g, ' '))) found = true;
+
+    if (!found) {
+      missing.push({ source: req, critical: true, reason: `Required source "${req}" not found in tool calls or output` });
+    }
+  }
+  return missing;
+}
+
+// ============================================================
+// ENFORCE TRUTH GATE — called after every agent run
+// Downgrades status and confidence if output doesn't prove real work
+// ============================================================
+function enforceTruthGate(output, agentSlug, toolCallLog) {
+  const inspectedAssets = extractInspectedAssets(output, toolCallLog);
+  const dataSources = extractDataSources(output, toolCallLog);
+  const measuredFindings = extractMeasuredFindings(output);
+  const missingSources = extractMissingSources(output, agentSlug, toolCallLog);
+  const dataCompleteness = computeDataCompleteness(output, toolCallLog, agentSlug);
+
+  const realSourceCount = dataSources.filter(s => s.freshness_state !== 'unknown').length;
+  const criticalMissing = missingSources.filter(s => s.critical).length;
+  const staleCount = dataSources.filter(s => s.freshness_state === 'stale').length;
+  const hasActions = (output?.actions_taken?.length > 0) || (output?.follow_up_tasks?.length > 0) ||
+    (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0);
+
+  // Determine confidence
+  let confidence = 'high';
+  if (dataCompleteness < 70 || realSourceCount < 2 || staleCount > 0 || measuredFindings.length === 0 || criticalMissing > 0) {
+    confidence = 'medium';
+  }
+  if (dataCompleteness < 50 || measuredFindings.length === 0) {
+    confidence = 'low';
+  }
+  if (dataCompleteness < 30 || (inspectedAssets.length === 0 && realSourceCount === 0)) {
+    confidence = 'very_low';
+  }
+
+  // Determine if status should be downgraded
+  let statusOverride = null; // null = keep original
+  if (dataCompleteness < 50 || (measuredFindings.length === 0 && !hasActions) || realSourceCount === 0 || inspectedAssets.length === 0) {
+    statusOverride = 'partial';
+  }
+  if (criticalMissing > 0 && dataCompleteness < 40) {
+    statusOverride = 'partial';
+  }
+
+  // Build why_incomplete
+  const whyIncomplete = [];
+  if (inspectedAssets.length === 0) whyIncomplete.push('No real asset was inspected (no page fetch, crawl, or scan)');
+  if (realSourceCount === 0) whyIncomplete.push('No real external data source was queried');
+  if (criticalMissing > 0) whyIncomplete.push(`Missing critical sources: ${missingSources.filter(s => s.critical).map(s => s.source).join(', ')}`);
+  if (staleCount > 0) whyIncomplete.push(`${staleCount} data source(s) are stale`);
+  if (measuredFindings.length === 0) whyIncomplete.push('No measured findings — output may be entirely inferred');
+  if (toolCallLog.length === 0) whyIncomplete.push('No tools were called');
+
+  // Inferred recommendations (anything not backed by measured data)
+  const inferredRecs = [];
+  const recs = output?.recommendations || output?.cro_opportunities || output?.quick_wins || output?.top3_quick_wins || [];
+  if (Array.isArray(recs)) {
+    recs.forEach(r => {
+      inferredRecs.push({
+        recommendation: typeof r === 'string' ? r : (r.recommendation || r.action || r.opportunity || JSON.stringify(r)),
+        based_on: 'inferred from agent knowledge',
+        confidence: measuredFindings.length > 0 ? 'medium' : 'low',
+      });
+    });
+  }
+
+  return {
+    confidence,
+    data_completeness_percent: dataCompleteness,
+    status_override: statusOverride,
+    inspected_assets: inspectedAssets,
+    data_sources_used: dataSources,
+    missing_sources: missingSources,
+    measured_findings: measuredFindings,
+    inferred_recommendations: inferredRecs,
+    freshness_summary: {
+      overall_state: staleCount > 0 ? 'stale' : (dataSources.length === 0 ? 'unknown' : 'fresh'),
+      stale_sources_count: staleCount,
+      critical_stale_sources_count: dataSources.filter(s => s.freshness_state === 'stale').length,
+    },
+    why_this_may_be_incomplete: whyIncomplete,
+  };
+}
+
+// ============================================================
+// CENTRAL COORDINATION ENGINE
+// Runs after EVERY agent completes. Sees output, decides next steps.
+// This is the brain that connects all agents into one growth system.
+// ============================================================
+export async function coordinatePostRun(clientId, runId, agent, output, taskPayload) {
+  if (!output || typeof output !== 'object') return;
+
+  const agentSlug = agent.slug;
+  const lane = agent.lane;
+  const followUps = [];
+
+  // ── 0. REPAIR WEAK RUNS — if truth gate flagged missing inputs, fix them ──
+  const truthGate = output?._truth_gate;
+  if (truthGate?.missing_sources?.length > 0) {
+    const REPAIR_MAP = {
+      'website_scan': 'technical-seo-crawl-agent',
+      'keyword_rankings': 'seo-core-agent',
+      'gsc_property_data': 'credential-health-agent',
+      'review_source_data': 'credential-health-agent',
+      'gbp_location_data': 'credential-health-agent',
+      'page_html': 'website-content-agent',
+      'page_structure': 'technical-seo-crawl-agent',
+      'perplexity_geo_results': 'geo-ai-visibility-agent',
+      'authority_or_link_data': 'authority-backlinks-agent',
+      'competitor_dataset': 'competitor-intelligence-agent',
+      'connector_validation': 'credential-health-agent',
+      'baseline_snapshot': 'kpi-integrity-agent',
+      'google_ads_campaign_data': 'credential-health-agent',
+      'analytics_events': 'credential-health-agent',
+      'kpi_sources': 'kpi-integrity-agent',
+      'parsed_hebrew_text': 'website-content-agent',
+      'target_content': 'website-content-agent',
+      'changed_output_target': 'website-qa-agent',
+      'validation_target': 'technical-seo-crawl-agent',
+      'distribution_targets': 'seo-core-agent',
+      'report_source_blocks': 'kpi-integrity-agent',
+      'client_strategy': 'master-orchestrator',
+    };
+    for (const ms of truthGate.missing_sources) {
+      const repairSlug = REPAIR_MAP[ms.source];
+      if (repairSlug && repairSlug !== agentSlug) {
+        followUps.push({
+          slug: repairSlug,
+          reason: `Repair: ${agentSlug} missing "${ms.source}" — need to fetch/connect this data`,
+          issues: [{ source: ms.source, reason: ms.reason }],
+        });
+      }
+    }
+  }
+
+  // ── 1. Route SEO issues to content/technical agents ──────────
+  const seoIssues = output.issues || output.seo_issues || output.technical_issues || output.regressions || [];
+  if (seoIssues.length > 0 && agentSlug !== 'master-orchestrator') {
+    // SEO/technical issues → queue technical or content agent
+    const contentIssues = seoIssues.filter(i => {
+      const desc = typeof i === 'string' ? i : (i.description || i.issue || '');
+      return /content|thin|missing.*text|title|meta|h1|heading/i.test(desc);
+    });
+    const technicalIssues = seoIssues.filter(i => {
+      const desc = typeof i === 'string' ? i : (i.description || i.issue || '');
+      return /speed|crawl|index|schema|canonical|redirect|404|broken|ssl|robots/i.test(desc);
+    });
+
+    if (contentIssues.length > 0 && agentSlug !== 'website-content-agent') {
+      followUps.push({ slug: 'website-content-agent', reason: `${contentIssues.length} content issues found by ${agent.name}`, issues: contentIssues });
+    }
+    if (technicalIssues.length > 0 && agentSlug !== 'technical-seo-crawl-agent') {
+      followUps.push({ slug: 'technical-seo-crawl-agent', reason: `${technicalIssues.length} technical issues found by ${agent.name}`, issues: technicalIssues });
+    }
+  }
+
+  // ── 2. Route ranking regressions to SEO core ─────────────────
+  const regressions = output.regressions || output.ranking_drops || [];
+  if (regressions.length > 0 && agentSlug !== 'seo-core-agent') {
+    followUps.push({ slug: 'seo-core-agent', reason: `${regressions.length} ranking regressions detected by ${agent.name}`, issues: regressions });
+  }
+
+  // ── 3. Route competitor findings to content/GEO agents ───────
+  const competitorFindings = output.competitor_gaps || output.competitor_advantages || output.content_gaps || [];
+  if (competitorFindings.length > 0 && agentSlug === 'competitor-intelligence-agent') {
+    followUps.push({ slug: 'website-content-agent', reason: `${competitorFindings.length} competitor content gaps to address`, issues: competitorFindings });
+    followUps.push({ slug: 'geo-ai-visibility-agent', reason: `Competitor intelligence found gaps in AI visibility`, issues: competitorFindings });
+  }
+
+  // ── 4. Route review/GBP findings ─────────────────────────────
+  const reviewIssues = output.review_issues || output.gbp_issues || output.negative_reviews || [];
+  if (reviewIssues.length > 0 && agentSlug === 'reviews-gbp-authority-agent') {
+    followUps.push({ slug: 'local-seo-agent', reason: `Review/GBP issues need local SEO attention`, issues: reviewIssues });
+  }
+
+  // ── 5. Route authority/backlink needs ────────────────────────
+  const authorityNeeds = output.backlink_opportunities || output.authority_gaps || output.link_targets || [];
+  if (authorityNeeds.length > 0) {
+    followUps.push({ slug: 'content-distribution-agent', reason: `${authorityNeeds.length} authority/backlink opportunities to pursue`, issues: authorityNeeds });
+  }
+
+  // ── 6. Route design/UX issues ────────────────────────────────
+  const designIssues = output.design_violations || output.ux_issues || output.cro_issues || [];
+  if (designIssues.length > 0 && agentSlug !== 'design-consistency-agent' && agentSlug !== 'design-enforcement-agent') {
+    followUps.push({ slug: 'design-enforcement-agent', reason: `${designIssues.length} design/UX issues found by ${agent.name}`, issues: designIssues });
+  }
+
+  // ── 7. Route Hebrew/language issues ──────────────────────────
+  const hebrewIssues = output.hebrew_issues || output.language_issues || output.rtl_issues || [];
+  if (hebrewIssues.length > 0 && agentSlug !== 'hebrew-quality-agent') {
+    followUps.push({ slug: 'hebrew-quality-agent', reason: `${hebrewIssues.length} Hebrew/language issues found by ${agent.name}`, issues: hebrewIssues });
+  }
+
+  // ── 8. Route credential/integration issues ───────────────────
+  const credIssues = output.credential_issues || output.integration_errors || [];
+  if (credIssues.length > 0 && agentSlug !== 'credential-health-agent') {
+    followUps.push({ slug: 'credential-health-agent', reason: `${credIssues.length} credential/integration issues`, issues: credIssues });
+  }
+
+  // ── 9. Store growth signals in baselines ─────────────────────
+  const metrics = output.metrics || output.kpis || {};
+  if (typeof metrics === 'object' && Object.keys(metrics).length > 0) {
+    for (const [key, value] of Object.entries(metrics)) {
+      if (typeof value === 'number') {
+        await supabase.from('baselines').upsert({
+          client_id: clientId, metric_name: key,
+          metric_value: value, source: `${agent.name} (auto)`,
+          recorded_at: new Date().toISOString(),
+        }, { onConflict: 'client_id,metric_name' }).catch(() => {});
+      }
+    }
+  }
+
+  // ── 10. Queue all follow-up tasks with priority scoring ──────
+  if (followUps.length === 0) return { follow_ups: 0 };
+
+  // Load client strategy for goal-aligned priority boosting
+  const { data: clientStrategy } = await supabase.from('client_rules')
+    .select('*').eq('client_id', clientId).maybeSingle();
+  const strategy = clientStrategy?.strategy || null;
+
+  // Deduplicate: don't queue the same agent if it's already queued for this client
+  const { data: existingQueue } = await supabase.from('run_queue')
+    .select('agent_template_id').eq('client_id', clientId).in('status', ['queued', 'running']);
+  const queuedAgentIds = new Set((existingQueue || []).map(q => q.agent_template_id));
+
+  const { data: agentTemplates } = await supabase.from('agent_templates')
+    .select('id, slug, name').in('slug', followUps.map(f => f.slug)).eq('is_active', true);
+
+  let queued = 0;
+  for (const fu of followUps) {
+    const tmpl = agentTemplates?.find(a => a.slug === fu.slug);
+    if (!tmpl || queuedAgentIds.has(tmpl.id)) continue;
+
+    // Compute priority score for this follow-up
+    const scoringInput = estimateFollowUpPriority(agentSlug, fu.slug, fu.issues, output);
+    scoringInput.clientStrategy = strategy;
+    const priorityScore = computePriorityScore(scoringInput);
+
+    await supabase.from('run_queue').insert({
+      client_id: clientId,
+      agent_template_id: tmpl.id,
+      task_payload: {
+        triggered_by_agent: agentSlug,
+        triggered_by_run: runId,
+        reason: fu.reason,
+        issues_to_address: fu.issues.slice(0, 10),
+        objective: fu.reason,
+        coordination_source: 'central_coordinator',
+        priority_scoring: {
+          impact: scoringInput.impact,
+          effort: scoringInput.effort,
+          confidence: scoringInput.confidence,
+          urgency: scoringInput.urgency,
+          business_goal: scoringInput.businessGoal,
+          computed_score: priorityScore,
+        },
+      },
+      status: 'queued',
+      queued_by: 'central_coordinator',
+      priority: priorityScore >= 8 ? 0 : priorityScore >= 6 ? 1 : priorityScore >= 4 ? 2 : 3,
+      priority_score: priorityScore,
+    });
+    queuedAgentIds.add(tmpl.id);
+    queued++;
+  }
+
+  // Log coordination action
+  if (queued > 0) {
+    await supabase.from('audit_trail').insert({
+      client_id: clientId, run_id: runId,
+      agent_slug: 'central-coordinator',
+      action: 'coordination',
+      actor: 'central_coordinator',
+      details: {
+        source_agent: agentSlug,
+        follow_ups_created: queued,
+        agents_activated: followUps.filter(f => agentTemplates?.find(a => a.slug === f.slug)).map(f => f.slug),
+        reasons: followUps.map(f => f.reason),
+      }
+    }).catch(() => {});
+
+    // Process queue immediately
+    processRunQueue().catch(err => console.error('[COORD_PROCESS]', err.message));
+  }
+
+  return { follow_ups: queued, agents_activated: followUps.map(f => f.slug) };
+}
+
+// ============================================================
 // RUN POST-CHANGE VALIDATION PIPELINE
 // ============================================================
 export async function runPostChangePipeline(clientId, triggeringRunId, originalPayload = {}) {
+  // ── Phase 1: Validation agents check for issues ──────────────
   const validationSlugs = [
     'website-qa-agent',
     'design-enforcement-agent',
     'hebrew-quality-agent',
+    'technical-seo-crawl-agent',
     'regression-agent'
   ];
+
+  // ── Phase 2: If issues found, these agents fix them ──────────
+  // Maps validator slug → fixer slug
+  const FIXER_MAP = {
+    'website-qa-agent': 'website-qa-agent',             // QA fixes its own issues
+    'design-enforcement-agent': 'design-consistency-agent',
+    'hebrew-quality-agent': 'website-content-agent',      // Content agent fixes Hebrew
+    'technical-seo-crawl-agent': 'seo-core-agent',        // SEO core fixes technical issues
+    'regression-agent': 'master-orchestrator',             // Orchestrator handles regressions
+  };
 
   const { data: agents } = await supabase
     .from('agent_templates')
     .select('id, slug, name')
-    .in('slug', validationSlugs)
+    .in('slug', [...validationSlugs, ...Object.values(FIXER_MAP)])
     .eq('is_active', true);
 
   if (!agents?.length) return { queued: 0, error: 'No validation agents found' };
 
-  // Queue with dependencies so they run in order
+  const findAgent = (slug) => agents.find(a => a.slug === slug);
+
+  // Queue validation agents in sequence
   const queueItems = [];
   let prevId = null;
 
-  for (const agent of validationSlugs.map(s => agents.find(a => a.slug === s)).filter(Boolean)) {
+  for (const slug of validationSlugs) {
+    const agent = findAgent(slug);
+    if (!agent) continue;
+
     const { data: queueItem } = await supabase.from('run_queue').insert({
       client_id: clientId,
       agent_template_id: agent.id,
       task_payload: {
         validation_chain: true,
+        pipeline_phase: 'validate',
         triggered_by_run: triggeringRunId,
         original_change: originalPayload?.change_description || 'Unknown change',
-        affected_urls: originalPayload?.affected_urls || []
+        affected_urls: originalPayload?.affected_urls || [],
+        instructions: `CRITICAL: You are running as part of a post-change validation pipeline. A change was made: "${originalPayload?.change_description || 'website content/code change'}". Check EVERYTHING related to your domain. If you find ANY issues, you MUST set "issues_found": true and list them in "issues" array with severity and description. This triggers automatic fixing.`
       },
       status: 'queued',
       queued_by: 'post_change_pipeline',
@@ -569,14 +1532,111 @@ export async function runPostChangePipeline(clientId, triggeringRunId, originalP
   }
 
   // Update the triggering run's validation status
-  await supabase.from('runs')
-    .update({ post_change_validation_status: 'running' })
-    .eq('id', triggeringRunId);
+  if (triggeringRunId) {
+    await supabase.from('runs')
+      .update({ post_change_validation_status: 'running' })
+      .eq('id', triggeringRunId);
+  }
 
   // Fire-and-forget: process queue immediately
   processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
 
-  return { queued: queueItems.length, validation_chain: queueItems.map(q => q.id) };
+  return { queued: queueItems.length, validation_chain: queueItems.map(q => q.id), fixer_map: FIXER_MAP };
+}
+
+// ============================================================
+// POST-CHANGE: Check validation results and auto-fix
+// Called after each validation agent completes
+// ============================================================
+export async function checkValidationAndAutoFix(clientId, completedRunId) {
+  const { data: run } = await supabase.from('runs')
+    .select('*, agent_templates(slug, name)')
+    .eq('id', completedRunId).single();
+
+  if (!run?.task_payload?.validation_chain || run.task_payload.pipeline_phase !== 'validate') return;
+
+  const output = typeof run.output === 'string' ? JSON.parse(run.output) : run.output;
+  const issuesFound = output?.issues_found || output?.issues?.length > 0 ||
+    output?.errors?.length > 0 || output?.critical_issues?.length > 0 ||
+    output?.hebrew_issues?.length > 0 || output?.design_violations?.length > 0 ||
+    output?.seo_issues?.length > 0 || output?.qa_failures?.length > 0;
+
+  if (!issuesFound) return { status: 'clean', agent: run.agent_templates?.slug };
+
+  // Determine the fixer agent
+  const validatorSlug = run.agent_templates?.slug;
+  const FIXER_MAP = {
+    'website-qa-agent': 'website-qa-agent',
+    'design-enforcement-agent': 'design-consistency-agent',
+    'hebrew-quality-agent': 'website-content-agent',
+    'technical-seo-crawl-agent': 'seo-core-agent',
+    'regression-agent': 'master-orchestrator',
+  };
+  const fixerSlug = FIXER_MAP[validatorSlug];
+  if (!fixerSlug) return { status: 'no_fixer', agent: validatorSlug };
+
+  const { data: fixerAgent } = await supabase.from('agent_templates')
+    .select('id, slug, name').eq('slug', fixerSlug).eq('is_active', true).single();
+
+  if (!fixerAgent) return { status: 'fixer_not_found', slug: fixerSlug };
+
+  // Queue the fixer agent with issue context
+  const issues = output.issues || output.errors || output.critical_issues ||
+    output.hebrew_issues || output.design_violations || output.seo_issues || output.qa_failures || [];
+
+  const { data: fixRun } = await supabase.from('run_queue').insert({
+    client_id: clientId,
+    agent_template_id: fixerAgent.id,
+    task_payload: {
+      validation_chain: true,
+      pipeline_phase: 'fix',
+      triggered_by_validator: validatorSlug,
+      triggered_by_run: completedRunId,
+      issues_to_fix: issues,
+      instructions: `URGENT FIX REQUIRED: The ${run.agent_templates?.name || validatorSlug} found the following issues that need immediate fixing:\n\n${JSON.stringify(issues, null, 2)}\n\nFix ALL of these issues. After fixing, set "fixed": true and list what you fixed in "fixes_applied".`
+    },
+    status: 'queued',
+    queued_by: 'post_change_autofix',
+    priority: 0  // Highest priority
+  }).select().single();
+
+  // After the fix, queue a re-validation run
+  if (fixRun) {
+    const { data: revalidateAgent } = await supabase.from('agent_templates')
+      .select('id').eq('slug', validatorSlug).eq('is_active', true).single();
+
+    if (revalidateAgent) {
+      await supabase.from('run_queue').insert({
+        client_id: clientId,
+        agent_template_id: revalidateAgent.id,
+        task_payload: {
+          validation_chain: true,
+          pipeline_phase: 're-validate',
+          triggered_by_fix: fixRun.id,
+          original_validator: validatorSlug,
+          instructions: `RE-VALIDATION: A fixer agent attempted to resolve issues found earlier. Re-check everything to confirm the fixes were applied correctly. If issues persist, flag them again.`
+        },
+        status: 'queued',
+        queued_by: 'post_change_revalidation',
+        priority: 0,
+        depends_on: [fixRun.id]
+      });
+    }
+  }
+
+  // Create incident for visibility
+  await supabase.from('incidents').insert({
+    client_id: clientId,
+    run_id: completedRunId,
+    title: `Post-change issues found by ${run.agent_templates?.name || validatorSlug}`,
+    severity: 'high',
+    status: 'open',
+    details: { validator: validatorSlug, fixer: fixerSlug, issues_count: issues.length, issues: issues.slice(0, 10) }
+  }).catch(() => {});
+
+  processRunQueue().catch(err => console.error('[AUTOFIX_PROCESS]', err.message));
+
+  return { status: 'fixing', validator: validatorSlug, fixer: fixerSlug, issues: issues.length };
 }
 
 // ============================================================
@@ -751,7 +1811,7 @@ export async function ingestDocumentToMemory(clientId, documentId) {
           messages: [
             {
               role: 'system',
-              content: `You are a knowledge extraction system. Extract structured operational memory items from this document chunk for an AI agent system managing a law firm's digital marketing.
+              content: `You are a knowledge extraction system. Extract structured operational memory items from this document chunk for an AI agent system managing a client's digital marketing.
 
 Return ONLY a JSON object: {"memory_items": [...]}
 
@@ -903,7 +1963,11 @@ export async function generateLinkRecommendations(clientId) {
     .eq('id', clientId)
     .single();
 
-  const prompt = `You are a senior link building strategist specializing in Israeli legal services. Your client is ${client?.name} (${client?.domain}), a family law firm in Tel Aviv.
+  const profile = client?.client_profiles?.[0] || {};
+  const bizType = profile.business_type || profile.industry || 'business';
+  const location = profile.city || profile.location || 'Israel';
+
+  const prompt = `You are a senior link building strategist. Your client is ${client?.name} (${client?.domain}), a ${bizType} in ${location}.
 
 Analyze this backlink gap data and recommend the top 15 domains to target to outrank competitors in Google Israel.
 
@@ -917,9 +1981,9 @@ OUR EXISTING REFERRING DOMAINS (we already have these — exclude from recommend
 ${JSON.stringify(existing?.slice(0, 20), null, 2)}
 
 For each recommendation:
-- Focus on Israeli media, legal directories, and professional sites
-- Prioritize by domain authority AND topical relevance to Israeli family law
-- Explain specifically why this domain matters for Israeli legal SEO
+- Focus on Israeli media, industry directories, and professional sites relevant to ${bizType}
+- Prioritize by domain authority AND topical relevance to ${bizType} in ${location}
+- Explain specifically why this domain matters for this client's SEO
 - Suggest a realistic outreach angle
 
 Return JSON:
@@ -929,7 +1993,7 @@ Return JSON:
       "domain": "string",
       "domain_authority": number,
       "competitor_that_has_it": "string",
-      "why_it_matters": "string (specific to Israeli law firm SEO)",
+      "why_it_matters": "string (specific to ${bizType} SEO)",
       "outreach_strategy": "string (specific approach)",
       "estimated_impact": "high|medium|low",
       "priority": number 1-15,
@@ -1173,12 +2237,12 @@ export async function generateReportHtml(reportJsonContent, clientName, period) 
   <div class="section">
     <h2>לוח מחוונים</h2>
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.google_reviews || 18}</div><div class="kpi-label">ביקורות Google</div></div>
-      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.lawreviews_reviews || 218}</div><div class="kpi-label">ביקורות LawReviews</div></div>
-      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.mobile_pagespeed || '~60'}</div><div class="kpi-label">PageSpeed נייד</div></div>
-      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.page1_keywords || 0}</div><div class="kpi-label">מילות מפתח עמוד 1</div></div>
-      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.leads_this_period || 0}</div><div class="kpi-label">לידים בתקופה</div></div>
-      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.lawreviews_rating || '5.0'}</div><div class="kpi-label">דירוג LawReviews</div></div>
+      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.google_reviews ?? '—'}</div><div class="kpi-label">ביקורות Google</div></div>
+      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.google_rating ?? '—'}</div><div class="kpi-label">דירוג Google</div></div>
+      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.mobile_pagespeed ?? '—'}</div><div class="kpi-label">PageSpeed נייד</div></div>
+      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.page1_keywords ?? '—'}</div><div class="kpi-label">מילות מפתח עמוד 1</div></div>
+      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.domain_authority ?? '—'}</div><div class="kpi-label">Domain Authority</div></div>
+      <div class="kpi-card"><div class="kpi-value">${j.kpi_dashboard.referring_domains ?? '—'}</div><div class="kpi-label">Referring Domains</div></div>
     </div>
   </div>
   ` : ''}
@@ -1379,6 +2443,57 @@ export async function validateKpiSources(clientId) {
 }
 
 // ============================================================
+// CRON EXPRESSION PARSER — calculates next run time
+// Supports: minute hour day-of-month month day-of-week
+// ============================================================
+function getNextCronRun(cronExpression, fromDate) {
+  const parts = cronExpression.trim().split(/\s+/);
+  if (parts.length < 5) {
+    // Fallback: +24h
+    const d = new Date(fromDate);
+    d.setDate(d.getDate() + 1);
+    return d;
+  }
+
+  const [minuteStr, hourStr, domStr, monthStr, dowStr] = parts;
+  const minute = minuteStr === '*' ? null : parseInt(minuteStr);
+  const hour = hourStr === '*' ? null : parseInt(hourStr);
+  const dom = domStr === '*' ? null : parseInt(domStr);
+  const dow = dowStr === '*' ? null : parseInt(dowStr);
+
+  // Start from next minute
+  const next = new Date(fromDate);
+  next.setSeconds(0, 0);
+  next.setMinutes(next.getMinutes() + 1);
+
+  // Try up to 366 days forward
+  for (let i = 0; i < 366 * 24 * 60; i++) {
+    const matches =
+      (minute === null || next.getMinutes() === minute) &&
+      (hour === null || next.getHours() === hour) &&
+      (dom === null || next.getDate() === dom) &&
+      (dow === null || next.getDay() === dow);
+
+    if (matches) return next;
+
+    // Advance by the largest possible step
+    if (hour !== null && next.getHours() !== hour) {
+      next.setHours(next.getHours() + 1);
+      next.setMinutes(0);
+    } else if (minute !== null && next.getMinutes() !== minute) {
+      next.setMinutes(next.getMinutes() + 1);
+    } else {
+      next.setMinutes(next.getMinutes() + 1);
+    }
+  }
+
+  // Fallback if no match found
+  const fallback = new Date(fromDate);
+  fallback.setDate(fallback.getDate() + 1);
+  return fallback;
+}
+
+// ============================================================
 // ENQUEUE DUE SCHEDULED RUNS
 // ============================================================
 export async function enqueueDueRuns() {
@@ -1416,14 +2531,8 @@ export async function enqueueDueRuns() {
       priority: 3
     });
 
-    // Update next run (simple +24h for daily, +7d for weekly — real impl uses cron-parser)
-    const cronParts = schedule.cron_expression.split(' ');
-    let nextRun = new Date(now);
-    if (cronParts[4] === '*') {
-      nextRun.setDate(nextRun.getDate() + 1); // daily
-    } else {
-      nextRun.setDate(nextRun.getDate() + 7); // weekly
-    }
+    // Calculate next run time from cron expression
+    const nextRun = getNextCronRun(schedule.cron_expression, now);
 
     await supabase.from('agent_schedules').update({
       last_run_at: now.toISOString(),

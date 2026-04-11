@@ -523,7 +523,11 @@ export async function handleMetaCallback(code, stateStr) {
   const tokenRes = await fetch(
     `https://graph.facebook.com/v19.0/oauth/access_token?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(`${APP_URL}/api/oauth/meta/callback`)}&client_secret=${META_APP_SECRET}&code=${code}`
   );
-  if (!tokenRes.ok) throw new Error('Meta token exchange failed');
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    console.error('Meta token exchange error:', errText);
+    throw new Error(`Meta token exchange failed: ${errText}`);
+  }
   const tokens = await tokenRes.json();
 
   // Exchange for long-lived token

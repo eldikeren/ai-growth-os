@@ -119,11 +119,13 @@ router.get('/oauth/meta/callback', async (req, res) => {
       res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/${stateObj.rawToken}?connected=meta`);
     }
   } catch (e) {
+    console.error('Meta callback error:', e);
     const stateObj = (() => { try { return JSON.parse(req.query.state); } catch { return {}; } })();
+    const errMsg = e?.message || String(e) || 'Unknown Meta OAuth error';
     if (stateObj.adminFlow) {
-      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(e.message)}`);
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(errMsg)}`);
     } else {
-      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${encodeURIComponent(e.message)}`);
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${encodeURIComponent(errMsg)}`);
     }
   }
 });

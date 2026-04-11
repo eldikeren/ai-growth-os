@@ -10,15 +10,25 @@
     { "source": "/setup/:token", "destination": "/setup.html" },
     { "source": "/privacy-policy", "destination": "/privacy-policy.html" },
     { "source": "/data-deletion", "destination": "/data-deletion.html" },
-    { "source": "/((?!assets/|privacy-policy|data-deletion).*)", "destination": "/index.html" }
+    { "source": "/terms-of-service", "destination": "/terms-of-service.html" },
+    { "source": "/((?!assets/|privacy-policy|data-deletion|terms-of-service).*)", "destination": "/index.html" }
   ],
   "headers": [
-    { "source": "/assets/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] }
+    { "source": "/assets/(.*\\.js)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=3600, s-maxage=60" }, { "key": "Content-Type", "value": "application/javascript" }] },
+    { "source": "/assets/(.*\\.css)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=3600, s-maxage=60" }, { "key": "Content-Type", "value": "text/css" }] },
+    { "source": "/index.html", "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }] },
+    { "source": "/", "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }] }
   ],
   "crons": [
     { "path": "/api/cron/enqueue-scheduled", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/process-queue", "schedule": "*/5 * * * *" },
-    { "path": "/api/cron/health-check", "schedule": "0 */6 * * *" }
+    { "path": "/api/cron/health-check", "schedule": "0 */6 * * *" },
+    { "path": "/api/cron/refresh-metrics", "schedule": "0 6 * * *" },
+    { "path": "/api/cron/orchestrator", "schedule": "0 */3 * * *" },
+    { "path": "/api/cron/geo-sweep", "schedule": "0 */12 * * *" },
+    { "path": "/api/cron/refresh-tokens", "schedule": "0 */6 * * *" },
+    { "path": "/api/cron/process-browser-tasks", "schedule": "*/10 * * * *" },
+    { "path": "/api/cron/audit-snapshot", "schedule": "0 5 * * *" }
   ],
   "functions": {
     "api/index.mjs": { "maxDuration": 60 }

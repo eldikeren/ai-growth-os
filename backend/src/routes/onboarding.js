@@ -72,10 +72,20 @@ router.get('/oauth/google/callback', async (req, res) => {
     if (!code || !state) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=missing_params`);
     const result = await handleGoogleCallback(code, state, req.ip);
     const stateObj = JSON.parse(state);
-    res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/${stateObj.rawToken}?connected=google&providers=${stateObj.requestedSubProviders?.join(',')}`);
+    // Admin OAuth flow — redirect back to the app (credentials page), not onboarding
+    if (stateObj.adminFlow && stateObj.clientId) {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&connected=google&client=${stateObj.clientId}`);
+    } else {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/${stateObj.rawToken}?connected=google&providers=${stateObj.requestedSubProviders?.join(',')}`);
+    }
   } catch (e) {
     console.error('Google callback error:', e.message);
-    res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${encodeURIComponent(e.message)}`);
+    const stateObj = (() => { try { return JSON.parse(state); } catch { return {}; } })();
+    if (stateObj.adminFlow) {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(e.message)}`);
+    } else {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${encodeURIComponent(e.message)}`);
+    }
   }
 });
 
@@ -94,12 +104,24 @@ router.post('/oauth/meta/start', async (req, res) => {
 router.get('/oauth/meta/callback', async (req, res) => {
   try {
     const { code, state, error } = req.query;
-    if (error) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${error}`);
+    const stateObj = (() => { try { return JSON.parse(state); } catch { return {}; } })();
+    if (error) {
+      if (stateObj.adminFlow) return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(error)}`);
+      return res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${error}`);
+    }
     const result = await handleMetaCallback(code, state);
-    const stateObj = JSON.parse(state);
-    res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/${stateObj.rawToken}?connected=meta`);
+    if (stateObj.adminFlow && stateObj.clientId) {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&connected=meta&client=${stateObj.clientId}`);
+    } else {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/${stateObj.rawToken}?connected=meta`);
+    }
   } catch (e) {
-    res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${encodeURIComponent(e.message)}`);
+    const stateObj = (() => { try { return JSON.parse(req.query.state); } catch { return {}; } })();
+    if (stateObj.adminFlow) {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?view=credentials&error=${encodeURIComponent(e.message)}`);
+    } else {
+      res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/onboarding/error?reason=${encodeURIComponent(e.message)}`);
+    }
   }
 });
 
@@ -189,6 +211,67 @@ router.get('/clients/:clientId/integration-assets', async (req, res) => {
     if (req.query.provider) q = q.eq('provider', req.query.provider);
     const { data } = await q.order('discovered_at', { ascending: false });
     res.json(data || []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── SELECT INTEGRATION ASSET (admin — no onboarding session needed) ──
+// PATCH /clients/:clientId/integration-assets/:assetId/select
+// Deselects all other assets of the same sub_provider and selects this one.
+// Use case: choosing which GBP location, GA4 property, GSC site, etc. to use per client.
+router.patch('/clients/:clientId/integration-assets/:assetId/select', async (req, res) => {
+  try {
+    const { clientId, assetId } = req.params;
+
+    // Get the asset being selected
+    const { data: asset, error: assetErr } = await supabase
+      .from('integration_assets')
+      .select('*')
+      .eq('id', assetId)
+      .eq('client_id', clientId)
+      .single();
+
+    if (assetErr || !asset) return res.status(404).json({ error: 'Asset not found for this client' });
+
+    // Deselect all assets of same provider+sub_provider for this client
+    await supabase
+      .from('integration_assets')
+      .update({ is_selected: false })
+      .eq('client_id', clientId)
+      .eq('provider', asset.provider)
+      .eq('sub_provider', asset.sub_provider);
+
+    // Select this one
+    await supabase
+      .from('integration_assets')
+      .update({ is_selected: true })
+      .eq('id', assetId);
+
+    res.json({
+      success: true,
+      selected: { id: asset.id, label: asset.label, external_id: asset.external_id, sub_provider: asset.sub_provider },
+      message: `Selected "${asset.label}" as the active ${asset.sub_provider} for this client`
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── LIST GBP LOCATIONS (convenience endpoint) ─────────────────
+// GET /clients/:clientId/gbp-locations
+// Returns all GBP locations for this client with which one is selected
+router.get('/clients/:clientId/gbp-locations', async (req, res) => {
+  try {
+    const { data } = await supabase
+      .from('integration_assets')
+      .select('id, external_id, label, url, metadata_json, is_selected, discovered_at')
+      .eq('client_id', req.params.clientId)
+      .eq('provider', 'google')
+      .eq('sub_provider', 'business_profile')
+      .order('label');
+
+    res.json({
+      locations: data || [],
+      selected: data?.find(d => d.is_selected) || null,
+      count: data?.length || 0
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

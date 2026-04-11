@@ -12,10 +12,10 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 // Encryption key must be 64 hex chars (32 bytes)
 const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || process.env.FRONTEND_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3001');
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const META_APP_ID = process.env.META_APP_ID;
-const META_APP_SECRET = process.env.META_APP_SECRET;
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+const META_APP_ID = (process.env.META_APP_ID || '').trim();
+const META_APP_SECRET = (process.env.META_APP_SECRET || '').trim();
 
 // ── ENCRYPTION ────────────────────────────────────────────────
 function encryptToken(text) {
@@ -503,13 +503,13 @@ async function discoverGA4Properties(accessToken, clientId) {
 // ============================================================
 // META OAUTH — REAL IMPLEMENTATION
 // ============================================================
-export function buildMetaAuthUrl(sessionId, rawToken) {
+export function buildMetaAuthUrl(sessionId, rawToken, extra = {}) {
   const redirectUri = `${APP_URL}/api/oauth/meta/callback`;
   const params = new URLSearchParams({
     client_id: META_APP_ID,
     redirect_uri: redirectUri,
     scope: META_SCOPES.join(','),
-    state: JSON.stringify({ sessionId, rawToken }),
+    state: JSON.stringify({ sessionId, rawToken, ...extra }),
     response_type: 'code'
   });
   return `https://www.facebook.com/v19.0/dialog/oauth?${params.toString()}`;

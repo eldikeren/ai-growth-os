@@ -1707,9 +1707,9 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
 
     results.website_control = {
       score: 0, max: 5, tests: [
-        { id: 'T24', name: 'Website access policy defined', pass: !!(rules.website_access_level),
-          detail: rules.website_access_level ? `Access level: ${rules.website_access_level}` : 'No access policy defined',
-          fix: !rules.website_access_level ? 'Define website access policy (read-only, PR required, direct edit) in client rules.' : null },
+        { id: 'T24', name: 'Website access policy defined', pass: !!(rules.website_access_level || rules.auth_model?.website_access_level),
+          detail: (rules.website_access_level || rules.auth_model?.website_access_level) ? `Access level: ${rules.website_access_level || rules.auth_model?.website_access_level}` : 'No access policy defined',
+          fix: !(rules.website_access_level || rules.auth_model?.website_access_level) ? 'Define website access policy (read-only, PR required, direct edit) in client rules.' : null },
         { id: 'T25', name: 'Real change history exists', pass: changesWithDetail.length > 0 || changesRecorded.length === 0,
           detail: `${changesRecorded.length} changes recorded, ${changesWithDetail.length} with details`,
           fix: changesRecorded.length > 0 && changesWithDetail.length === 0 ? 'Changes are recorded but without details — no audit trail.' : null },

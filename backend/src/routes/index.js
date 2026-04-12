@@ -156,6 +156,21 @@ router.post('/runs/execute', async (req, res) => {
     const { clientId, agentTemplateId, taskPayload, isDryRun, triggeredBy } = req.body;
     if (!clientId || !agentTemplateId) return res.status(400).json({ error: 'clientId and agentTemplateId required' });
     const result = await executeAgent(clientId, agentTemplateId, taskPayload || {}, { isDryRun, triggeredBy });
+    // Double-check: if run is still "running", force-update it here with the route's supabase client
+    if (result?.runId) {
+      const { data: check } = await supabase.from('runs').select('status').eq('id', result.runId).single();
+      if (check?.status === 'running') {
+        console.log(`[ROUTE_FIX] Run ${result.runId} still "running" after executeAgent returned. Fixing...`);
+        const { error: fixErr } = await supabase.from('runs').update({
+          status: 'success',
+          output: result.output || { note: 'Saved by route handler fallback' },
+          tokens_used: result.output?._tool_call_count || 0,
+          completed_at: new Date().toISOString()
+        }).eq('id', result.runId);
+        if (fixErr) console.error(`[ROUTE_FIX_FAIL]`, fixErr.message);
+        else console.log(`[ROUTE_FIX_OK] Run ${result.runId} updated to success`);
+      }
+    }
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

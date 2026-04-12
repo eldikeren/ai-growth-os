@@ -17,6 +17,35 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MAX_TOOL_ITERATIONS = 8; // Max tool call rounds per agent execution (keep under 300s Vercel limit)
 
+// ============================================================
+// VALIDATION GOVERNANCE — action_type → required validators
+// No agent may close its own work. Master Orchestrator decides.
+// ============================================================
+const VALIDATION_MATRIX = {
+  website_content_change:  ['hebrew-quality-agent', 'design-consistency-agent', 'website-qa-agent', 'seo-core-agent', 'regression-agent'],
+  seo_metadata_change:     ['seo-core-agent', 'website-qa-agent', 'regression-agent'],
+  schema_change:           ['technical-seo-crawl-agent', 'website-qa-agent', 'regression-agent'],
+  cta_change:              ['cro-agent', 'design-consistency-agent', 'website-qa-agent', 'hebrew-quality-agent', 'regression-agent'],
+  layout_change:           ['design-consistency-agent', 'website-qa-agent', 'regression-agent'],
+  review_reply:            ['hebrew-quality-agent', 'legal-compliance-agent'],
+  social_post:             ['hebrew-quality-agent', 'legal-compliance-agent'],
+  local_profile_change:    ['local-seo-agent', 'hebrew-quality-agent', 'regression-agent'],
+  generic_change:          ['website-qa-agent', 'regression-agent'],
+};
+
+const VALIDATOR_FIXER_MAP = {
+  'hebrew-quality-agent':       'website-content-agent',
+  'design-consistency-agent':   'design-consistency-agent',
+  'design-enforcement-agent':   'design-consistency-agent',
+  'website-qa-agent':           'website-content-agent',
+  'seo-core-agent':             'seo-core-agent',
+  'technical-seo-crawl-agent':  'seo-core-agent',
+  'cro-agent':                  'website-content-agent',
+  'local-seo-agent':            'local-seo-agent',
+  'legal-compliance-agent':     'website-content-agent',
+  'regression-agent':           'master-orchestrator',
+};
+
 // ── JSON REPAIR — fix common LLM output issues ──────────────
 function repairAndParseJSON(text) {
   // 1. Direct parse
@@ -198,6 +227,7 @@ ${rules.custom_instructions ? `- Custom Instructions: ${rules.custom_instruction
     task_payload: taskPayload,
     prompt_used: fullPrompt,
     approval_id: approvalId,
+    owner_agent_slug: agent.slug,
     memory_items_used: memories?.map(m => m.id) || [],
     triggered_by: triggeredBy,
     context_summary: {
@@ -392,6 +422,10 @@ FINAL OUTPUT RULES:
     const triggerValidation = changedAnything && agent.post_change_trigger && rules.post_change_validation_mandatory;
     const needsApproval = agent.action_mode_default === 'approve_then_act' && !approved && output?.what_needs_approval;
 
+    // Extract action_type declared by the agent, fall back to generic
+    const actionType = output?.action_type || (changedAnything ? 'generic_change' : null);
+    const requiredValidators = actionType ? (VALIDATION_MATRIX[actionType] || VALIDATION_MATRIX.generic_change) : [];
+
     // 11b. TRUTH GATE — enforce confidence, completeness, and honest status
     const truthGate = enforceTruthGate(output, agent.slug, toolCallLog);
     let finalStatus = needsApproval ? 'pending_approval' : 'success';
@@ -412,17 +446,30 @@ FINAL OUTPUT RULES:
       why_this_may_be_incomplete: truthGate.why_this_may_be_incomplete,
     };
 
+    // GOVERNANCE HARD RULE: An agent cannot self-validate its own change.
+    // If this agent is being run as a validator and it is the same agent that owns the change, block it.
+    if (taskPayload?.validation_chain && taskPayload?.owner_agent_slug === agent.slug) {
+      throw new Error(
+        `GOVERNANCE VIOLATION: Agent "${agent.slug}" attempted to validate its own change. ` +
+        `Owner agent cannot be its own validator. Blocked by post-change ownership governance.`
+      );
+    }
+
     // 12. CRITICAL: Save run output to DB IMMEDIATELY
     console.log(`[RUN_SAVE] Starting DB update for run=${run.id}, elapsed=${Date.now()-startTime}ms, output_size=${JSON.stringify(output).length}`);
     try {
       const updatePayload = {
-        status: finalStatus,
+        status: triggerValidation ? 'executed_pending_validation' : finalStatus,
         output,
         output_text: outputText,
         changed_anything: changedAnything,
         what_changed: output?.what_changed || output?.actions_taken?.map(a => a.action || a).join('; ') || null,
         trigger_post_change_validation: triggerValidation,
         post_change_validation_status: triggerValidation ? 'pending' : null,
+        owner_agent_slug: agent.slug,
+        action_type: actionType,
+        validation_required: triggerValidation ? requiredValidators : [],
+        final_validation_status: triggerValidation ? 'pending' : null,
         tokens_used: tokensUsed,
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
@@ -485,7 +532,7 @@ FINAL OUTPUT RULES:
 
     // 18. Queue post-change validation chain
     if (triggerValidation) {
-      await runPostChangePipeline(clientId, run.id, taskPayload);
+      await governPostChange(clientId, run.id, agent.slug, actionType, taskPayload);
     }
 
     // 19. Create incident if run failed or found critical issues
@@ -1509,44 +1556,45 @@ export async function coordinatePostRun(clientId, runId, agent, output, taskPayl
 }
 
 // ============================================================
-// RUN POST-CHANGE VALIDATION PIPELINE
+// GOVERN POST-CHANGE — action_type-aware validation pipeline
+// Replaces runPostChangePipeline. Routes validators by action_type.
 // ============================================================
-export async function runPostChangePipeline(clientId, triggeringRunId, originalPayload = {}) {
-  // ── Phase 1: Validation agents check for issues ──────────────
-  const validationSlugs = [
-    'website-qa-agent',
-    'design-enforcement-agent',
-    'hebrew-quality-agent',
-    'technical-seo-crawl-agent',
-    'regression-agent'
-  ];
-
-  // ── Phase 2: If issues found, these agents fix them ──────────
-  // Maps validator slug → fixer slug
-  const FIXER_MAP = {
-    'website-qa-agent': 'website-qa-agent',             // QA fixes its own issues
-    'design-enforcement-agent': 'design-consistency-agent',
-    'hebrew-quality-agent': 'website-content-agent',      // Content agent fixes Hebrew
-    'technical-seo-crawl-agent': 'seo-core-agent',        // SEO core fixes technical issues
-    'regression-agent': 'master-orchestrator',             // Orchestrator handles regressions
-  };
+export async function governPostChange(clientId, ownerRunId, ownerAgentSlug, actionType, originalPayload = {}) {
+  const requiredValidators = VALIDATION_MATRIX[actionType] || VALIDATION_MATRIX.generic_change;
 
   const { data: agents } = await supabase
     .from('agent_templates')
     .select('id, slug, name')
-    .in('slug', [...validationSlugs, ...Object.values(FIXER_MAP)])
+    .in('slug', requiredValidators)
     .eq('is_active', true);
 
-  if (!agents?.length) return { queued: 0, error: 'No validation agents found' };
+  if (!agents?.length) {
+    console.warn(`[GOVERNANCE] No active validator agents found for action_type=${actionType}`);
+    // Fallback: mark run as success since we can't validate
+    await supabase.from('runs').update({
+      status: 'success',
+      final_validation_status: 'partial',
+      validation_required: requiredValidators,
+    }).eq('id', ownerRunId);
+    return { queued: 0, error: 'No validator agents found' };
+  }
 
-  const findAgent = (slug) => agents.find(a => a.slug === slug);
+  const agentMap = Object.fromEntries(agents.map(a => [a.slug, a]));
+  const actualValidators = requiredValidators.filter(slug => agentMap[slug]);
 
-  // Queue validation agents in sequence
+  // Update the owner run with actual validation_required list
+  await supabase.from('runs').update({
+    validation_required: actualValidators,
+    final_validation_status: 'in_progress',
+    post_change_validation_status: 'running',
+  }).eq('id', ownerRunId);
+
+  // Queue validators in sequence (each depends on the previous completing)
   const queueItems = [];
-  let prevId = null;
+  let prevQueueId = null;
 
-  for (const slug of validationSlugs) {
-    const agent = findAgent(slug);
+  for (const slug of actualValidators) {
+    const agent = agentMap[slug];
     if (!agent) continue;
 
     const { data: queueItem } = await supabase.from('run_queue').insert({
@@ -1555,129 +1603,238 @@ export async function runPostChangePipeline(clientId, triggeringRunId, originalP
       task_payload: {
         validation_chain: true,
         pipeline_phase: 'validate',
-        triggered_by_run: triggeringRunId,
-        original_change: originalPayload?.change_description || 'Unknown change',
+        owner_run_id: ownerRunId,
+        owner_agent_slug: ownerAgentSlug,
+        action_type: actionType,
+        triggered_by_run: ownerRunId,
+        original_change: originalPayload?.change_description || 'Change made by ' + ownerAgentSlug,
         affected_urls: originalPayload?.affected_urls || [],
-        instructions: `CRITICAL: You are running as part of a post-change validation pipeline. A change was made: "${originalPayload?.change_description || 'website content/code change'}". Check EVERYTHING related to your domain. If you find ANY issues, you MUST set "issues_found": true and list them in "issues" array with severity and description. This triggers automatic fixing.`
+        instructions: `GOVERNANCE VALIDATION: Agent "${ownerAgentSlug}" made a "${actionType}" change. ` +
+          `You are the "${slug}" validator. Check everything in your domain related to this change. ` +
+          `Set "validation_passed": true/false. If failed, populate "issues" array with severity and details. ` +
+          `You may NOT self-approve changes made by "${slug === ownerAgentSlug ? '[BLOCKED]' : slug}".`
       },
       status: 'queued',
-      queued_by: 'post_change_pipeline',
+      queued_by: 'governance_engine',
       priority: 1,
-      depends_on: prevId ? [prevId] : []
-    }).select().single();
+      depends_on: prevQueueId ? [prevQueueId] : [],
+    }).select('id').single();
 
     if (queueItem) {
       queueItems.push(queueItem);
-      prevId = queueItem.id;
+      prevQueueId = queueItem.id;
     }
   }
 
-  // Update the triggering run's validation status
-  if (triggeringRunId) {
-    await supabase.from('runs')
-      .update({ post_change_validation_status: 'running' })
-      .eq('id', triggeringRunId);
-  }
+  console.log(`[GOVERNANCE] Queued ${queueItems.length} validators for owner_run=${ownerRunId} action_type=${actionType}`);
+  processRunQueue().catch(err => console.error('[GOVERNANCE_PROCESS]', err.message));
 
-  // Fire-and-forget: process queue immediately
-  processRunQueue().catch(err => console.error('[IMMEDIATE_PROCESS]', err.message));
-
-  return { queued: queueItems.length, validation_chain: queueItems.map(q => q.id), fixer_map: FIXER_MAP };
+  return {
+    owner_run_id: ownerRunId,
+    action_type: actionType,
+    validators_required: actualValidators,
+    validators_queued: queueItems.length,
+    queue_ids: queueItems.map(q => q.id),
+  };
 }
+
+// Keep old name as alias for backward compatibility
+export const runPostChangePipeline = governPostChange;
 
 // ============================================================
 // POST-CHANGE: Check validation results and auto-fix
 // Called after each validation agent completes
 // ============================================================
 export async function checkValidationAndAutoFix(clientId, completedRunId) {
-  const { data: run } = await supabase.from('runs')
+  const { data: validatorRun } = await supabase.from('runs')
     .select('*, agent_templates(slug, name)')
     .eq('id', completedRunId).single();
 
-  if (!run?.task_payload?.validation_chain || run.task_payload.pipeline_phase !== 'validate') return;
+  if (!validatorRun?.task_payload?.validation_chain || validatorRun.task_payload.pipeline_phase !== 'validate') return;
 
-  const output = typeof run.output === 'string' ? JSON.parse(run.output) : run.output;
-  const issuesFound = output?.issues_found || output?.issues?.length > 0 ||
-    output?.errors?.length > 0 || output?.critical_issues?.length > 0 ||
-    output?.hebrew_issues?.length > 0 || output?.design_violations?.length > 0 ||
-    output?.seo_issues?.length > 0 || output?.qa_failures?.length > 0;
+  const validatorSlug = validatorRun.agent_templates?.slug;
+  const ownerRunId = validatorRun.task_payload.owner_run_id || validatorRun.task_payload.triggered_by_run;
+  const ownerAgentSlug = validatorRun.task_payload.owner_agent_slug;
 
-  if (!issuesFound) return { status: 'clean', agent: run.agent_templates?.slug };
+  if (!ownerRunId) {
+    console.warn(`[GOVERNANCE] Validator run ${completedRunId} has no owner_run_id`);
+    return;
+  }
 
-  // Determine the fixer agent
-  const validatorSlug = run.agent_templates?.slug;
-  const FIXER_MAP = {
-    'website-qa-agent': 'website-qa-agent',
-    'design-enforcement-agent': 'design-consistency-agent',
-    'hebrew-quality-agent': 'website-content-agent',
-    'technical-seo-crawl-agent': 'seo-core-agent',
-    'regression-agent': 'master-orchestrator',
+  // Load current state of the owner run
+  const { data: ownerRun } = await supabase.from('runs')
+    .select('id, status, owner_agent_slug, action_type, validation_required, validation_completed, validation_failed_reasons, final_validation_status')
+    .eq('id', ownerRunId).single();
+
+  if (!ownerRun) {
+    console.warn(`[GOVERNANCE] Owner run ${ownerRunId} not found`);
+    return;
+  }
+
+  const output = typeof validatorRun.output === 'string' ? JSON.parse(validatorRun.output || '{}') : (validatorRun.output || {});
+
+  // Determine if this validator passed
+  const issuesFound = output?.issues_found === true ||
+    (output?.issues?.length > 0) ||
+    (output?.errors?.length > 0) ||
+    (output?.critical_issues?.length > 0) ||
+    (output?.hebrew_issues?.length > 0) ||
+    (output?.design_violations?.length > 0) ||
+    (output?.seo_issues?.length > 0) ||
+    (output?.qa_failures?.length > 0);
+  const validationPassed = output?.validation_passed === true || (!issuesFound && validatorRun.status === 'success');
+
+  // Update owner run: add this validator to completed list
+  const alreadyCompleted = ownerRun.validation_completed || [];
+  const alreadyFailed = ownerRun.validation_failed_reasons || [];
+  const newCompleted = alreadyCompleted.includes(validatorSlug) ? alreadyCompleted : [...alreadyCompleted, validatorSlug];
+
+  let newFailedReasons = [...alreadyFailed];
+  if (!validationPassed) {
+    const issues = output.issues || output.errors || output.critical_issues ||
+      output.hebrew_issues || output.design_violations || output.seo_issues || output.qa_failures || [];
+    newFailedReasons.push({
+      validator: validatorSlug,
+      issues,
+      validated_at: new Date().toISOString(),
+    });
+  }
+
+  const requiredValidators = ownerRun.validation_required || [];
+  const allDone = requiredValidators.length > 0 && requiredValidators.every(v => newCompleted.includes(v));
+  const anyFailed = newFailedReasons.length > 0;
+
+  // Determine new owner run status
+  let ownerStatusUpdate = {
+    validation_completed: newCompleted,
+    validation_failed_reasons: newFailedReasons,
   };
-  const fixerSlug = FIXER_MAP[validatorSlug];
-  if (!fixerSlug) return { status: 'no_fixer', agent: validatorSlug };
 
-  const { data: fixerAgent } = await supabase.from('agent_templates')
-    .select('id, slug, name').eq('slug', fixerSlug).eq('is_active', true).single();
+  if (allDone) {
+    if (!anyFailed) {
+      // All validators passed — work is complete
+      ownerStatusUpdate.status = 'success';
+      ownerStatusUpdate.final_validation_status = 'passed';
+      ownerStatusUpdate.post_change_validation_status = 'passed';
+      console.log(`[GOVERNANCE] Owner run ${ownerRunId} fully validated — all ${requiredValidators.length} validators passed`);
+    } else {
+      // Some validators failed — owner run stays failed
+      ownerStatusUpdate.status = 'validation_failed';
+      ownerStatusUpdate.final_validation_status = 'failed';
+      ownerStatusUpdate.post_change_validation_status = 'failed';
+      console.log(`[GOVERNANCE] Owner run ${ownerRunId} validation FAILED — ${newFailedReasons.length} validator(s) found issues`);
 
-  if (!fixerAgent) return { status: 'fixer_not_found', slug: fixerSlug };
-
-  // Queue the fixer agent with issue context
-  const issues = output.issues || output.errors || output.critical_issues ||
-    output.hebrew_issues || output.design_violations || output.seo_issues || output.qa_failures || [];
-
-  const { data: fixRun } = await supabase.from('run_queue').insert({
-    client_id: clientId,
-    agent_template_id: fixerAgent.id,
-    task_payload: {
-      validation_chain: true,
-      pipeline_phase: 'fix',
-      triggered_by_validator: validatorSlug,
-      triggered_by_run: completedRunId,
-      issues_to_fix: issues,
-      instructions: `URGENT FIX REQUIRED: The ${run.agent_templates?.name || validatorSlug} found the following issues that need immediate fixing:\n\n${JSON.stringify(issues, null, 2)}\n\nFix ALL of these issues. After fixing, set "fixed": true and list what you fixed in "fixes_applied".`
-    },
-    status: 'queued',
-    queued_by: 'post_change_autofix',
-    priority: 0  // Highest priority
-  }).select().single();
-
-  // After the fix, queue a re-validation run
-  if (fixRun) {
-    const { data: revalidateAgent } = await supabase.from('agent_templates')
-      .select('id').eq('slug', validatorSlug).eq('is_active', true).single();
-
-    if (revalidateAgent) {
-      await supabase.from('run_queue').insert({
+      // Create incident for master orchestrator visibility
+      await supabase.from('incidents').insert({
         client_id: clientId,
-        agent_template_id: revalidateAgent.id,
-        task_payload: {
-          validation_chain: true,
-          pipeline_phase: 're-validate',
-          triggered_by_fix: fixRun.id,
-          original_validator: validatorSlug,
-          instructions: `RE-VALIDATION: A fixer agent attempted to resolve issues found earlier. Re-check everything to confirm the fixes were applied correctly. If issues persist, flag them again.`
-        },
-        status: 'queued',
-        queued_by: 'post_change_revalidation',
-        priority: 0,
-        depends_on: [fixRun.id]
-      });
+        run_id: ownerRunId,
+        title: `Validation failed: ${ownerRun.action_type || 'change'} by ${ownerRun.owner_agent_slug || 'unknown agent'}`,
+        severity: 'high',
+        status: 'open',
+        details: {
+          owner_agent: ownerRun.owner_agent_slug,
+          action_type: ownerRun.action_type,
+          failed_validators: newFailedReasons.map(f => f.validator),
+          validation_required: requiredValidators,
+          validation_completed: newCompleted,
+        }
+      }).catch(() => {});
+    }
+  } else {
+    // Still waiting on more validators
+    ownerStatusUpdate.final_validation_status = 'in_progress';
+  }
+
+  await supabase.from('runs').update(ownerStatusUpdate).eq('id', ownerRunId);
+
+  // If this validator failed — queue a fixer (not the owner agent)
+  if (!validationPassed) {
+    const fixerSlug = VALIDATOR_FIXER_MAP[validatorSlug];
+
+    // HARD RULE: fixer cannot be the owner agent
+    const effectiveFixerSlug = (fixerSlug && fixerSlug !== ownerAgentSlug)
+      ? fixerSlug
+      : (fixerSlug === ownerAgentSlug ? 'master-orchestrator' : null); // escalate to orchestrator
+
+    if (!effectiveFixerSlug) {
+      console.warn(`[GOVERNANCE] No fixer found for validator ${validatorSlug}`);
+      return;
+    }
+
+    if (effectiveFixerSlug === ownerAgentSlug) {
+      // This should not happen after the check above, but safety net
+      console.error(`[GOVERNANCE BLOCK] Prevented ${ownerAgentSlug} from self-fixing via ${validatorSlug} validation`);
+      return;
+    }
+
+    const { data: fixerAgent } = await supabase.from('agent_templates')
+      .select('id, slug, name').eq('slug', effectiveFixerSlug).eq('is_active', true).single();
+
+    if (!fixerAgent) {
+      console.warn(`[GOVERNANCE] Fixer agent not found or not active: ${effectiveFixerSlug}`);
+      return;
+    }
+
+    const issues = output.issues || output.errors || output.critical_issues ||
+      output.hebrew_issues || output.design_violations || output.seo_issues || output.qa_failures || [];
+
+    const { data: fixQueueItem } = await supabase.from('run_queue').insert({
+      client_id: clientId,
+      agent_template_id: fixerAgent.id,
+      task_payload: {
+        validation_chain: true,
+        pipeline_phase: 'fix',
+        owner_run_id: ownerRunId,
+        owner_agent_slug: ownerRun.owner_agent_slug,
+        action_type: ownerRun.action_type,
+        triggered_by_validator: validatorSlug,
+        triggered_by_run: completedRunId,
+        issues_to_fix: issues,
+        instructions: `GOVERNANCE FIX REQUIRED: Validator "${validatorSlug}" found issues after a "${ownerRun.action_type}" change made by "${ownerRun.owner_agent_slug}". ` +
+          `You are the designated fixer. Fix ALL listed issues. Set "fixed": true and populate "fixes_applied" when done.\n\nISSUES:\n${JSON.stringify(issues, null, 2)}`
+      },
+      status: 'queued',
+      queued_by: 'governance_engine',
+      priority: 0,
+    }).select('id').single();
+
+    // Queue re-validation after fix (same validator, depends on fix completing)
+    if (fixQueueItem) {
+      const { data: revalidateAgent } = await supabase.from('agent_templates')
+        .select('id').eq('slug', validatorSlug).eq('is_active', true).single();
+
+      if (revalidateAgent) {
+        await supabase.from('run_queue').insert({
+          client_id: clientId,
+          agent_template_id: revalidateAgent.id,
+          task_payload: {
+            validation_chain: true,
+            pipeline_phase: 're-validate',
+            owner_run_id: ownerRunId,
+            owner_agent_slug: ownerRun.owner_agent_slug,
+            action_type: ownerRun.action_type,
+            triggered_by_fix: fixQueueItem.id,
+            original_validator: validatorSlug,
+            instructions: `RE-VALIDATION: Fixer "${effectiveFixerSlug}" attempted to resolve issues found by you. ` +
+              `Re-check your domain to confirm the fix was applied correctly. ` +
+              `Set "validation_passed": true if resolved, or re-flag issues if they persist.`
+          },
+          status: 'queued',
+          queued_by: 'governance_engine',
+          priority: 0,
+          depends_on: [fixQueueItem.id],
+        });
+      }
     }
   }
 
-  // Create incident for visibility
-  await supabase.from('incidents').insert({
-    client_id: clientId,
-    run_id: completedRunId,
-    title: `Post-change issues found by ${run.agent_templates?.name || validatorSlug}`,
-    severity: 'high',
-    status: 'open',
-    details: { validator: validatorSlug, fixer: fixerSlug, issues_count: issues.length, issues: issues.slice(0, 10) }
-  }).catch(() => {});
-
-  processRunQueue().catch(err => console.error('[AUTOFIX_PROCESS]', err.message));
-
-  return { status: 'fixing', validator: validatorSlug, fixer: fixerSlug, issues: issues.length };
+  return {
+    validator: validatorSlug,
+    passed: validationPassed,
+    owner_run_id: ownerRunId,
+    all_done: allDone,
+    any_failed: anyFailed,
+  };
 }
 
 // ============================================================

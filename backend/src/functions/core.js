@@ -270,7 +270,7 @@ FINAL OUTPUT RULES:
     let iteration = 0;
     let finalResponse = null;
 
-    const EXECUTION_TIMEOUT_MS = 50000; // 50s — leave 10s buffer before Vercel's 60s limit
+    const EXECUTION_TIMEOUT_MS = 42000; // 42s — leave 18s for post-processing before Vercel's 60s limit
 
     while (iteration < MAX_TOOL_ITERATIONS) {
       iteration++;
@@ -412,7 +412,8 @@ FINAL OUTPUT RULES:
       why_this_may_be_incomplete: truthGate.why_this_may_be_incomplete,
     };
 
-    // 12. Update run (with tool call metadata + truth gate)
+    // 12. CRITICAL: Save run output to DB IMMEDIATELY — must happen before Vercel kills the function
+    //     All subsequent steps (13-22) are best-effort and can be lost without data loss.
     const { error: runUpdateErr } = await supabase.from('runs').update({
       status: finalStatus,
       output,
@@ -427,7 +428,18 @@ FINAL OUTPUT RULES:
       duration_ms: Date.now() - startTime,
       completed_at: new Date().toISOString()
     }).eq('id', run.id);
-    if (runUpdateErr) console.error(`[RUN_UPDATE_FAIL] run=${run.id}:`, runUpdateErr.message, runUpdateErr.details);
+    if (runUpdateErr) {
+      console.error(`[RUN_UPDATE_FAIL] run=${run.id}:`, runUpdateErr.message, runUpdateErr.details);
+      // Retry with smaller output if the full output is too large
+      const { error: retryErr } = await supabase.from('runs').update({
+        status: finalStatus,
+        output: { _tool_call_count: toolCallLog.length, _iterations: iteration, summary: 'Output too large - saved partial', _truth_gate: output._truth_gate },
+        tokens_used: tokensUsed,
+        duration_ms: Date.now() - startTime,
+        completed_at: new Date().toISOString()
+      }).eq('id', run.id);
+      if (retryErr) console.error(`[RUN_UPDATE_RETRY_FAIL] run=${run.id}:`, retryErr.message);
+    }
 
     // 13. Update assignment stats
     await supabase.from('client_agent_assignments')

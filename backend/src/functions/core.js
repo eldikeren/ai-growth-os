@@ -413,7 +413,7 @@ FINAL OUTPUT RULES:
     };
 
     // 12. Update run (with tool call metadata + truth gate)
-    await supabase.from('runs').update({
+    const { error: runUpdateErr } = await supabase.from('runs').update({
       status: finalStatus,
       output,
       output_text: outputText,
@@ -427,6 +427,7 @@ FINAL OUTPUT RULES:
       duration_ms: Date.now() - startTime,
       completed_at: new Date().toISOString()
     }).eq('id', run.id);
+    if (runUpdateErr) console.error(`[RUN_UPDATE_FAIL] run=${run.id}:`, runUpdateErr.message, runUpdateErr.details);
 
     // 13. Update assignment stats
     await supabase.from('client_agent_assignments')

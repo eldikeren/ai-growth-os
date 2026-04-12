@@ -209,7 +209,7 @@ router.post('/queue/enqueue-due', async (req, res) => {
 
 router.delete('/queue/:id', async (req, res) => {
   try {
-    await supabase.from('run_queue').update({ status: 'cancelled' }).eq('id', req.params.id).eq('status', 'queued');
+    await supabase.from('run_queue').update({ status: 'cancelled' }).eq('id', req.params.id).in('status', ['queued', 'failed', 'blocked_dependency']);
     res.json({ cancelled: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1482,7 +1482,7 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
       supabase.from('runs').select('id, status, agent_template_id, created_at').eq('client_id', clientId).gte('created_at', d7),
       supabase.from('run_queue').select('*').eq('client_id', clientId).in('status', ['queued', 'running', 'failed']),
       supabase.from('client_credentials').select('*').eq('client_id', clientId),
-      supabase.from('memory_items').select('id, category, approved, is_stale, times_used, last_used_at, created_at, derived_from_file_id, source').eq('client_id', clientId),
+      supabase.from('memory_items').select('id, scope, approved, is_stale, times_used, last_used_at, created_at, derived_from_file_id, source').eq('client_id', clientId),
       supabase.from('baselines').select('*').eq('client_id', clientId),
       supabase.from('incidents').select('*').eq('client_id', clientId).order('created_at', { ascending: false }).limit(50),
       supabase.from('approvals').select('*').eq('client_id', clientId).order('created_at', { ascending: false }).limit(50),

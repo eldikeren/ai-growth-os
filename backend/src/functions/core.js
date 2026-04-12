@@ -412,33 +412,36 @@ FINAL OUTPUT RULES:
       why_this_may_be_incomplete: truthGate.why_this_may_be_incomplete,
     };
 
-    // 12. CRITICAL: Save run output to DB IMMEDIATELY — must happen before Vercel kills the function
-    //     All subsequent steps (13-22) are best-effort and can be lost without data loss.
-    const { error: runUpdateErr } = await supabase.from('runs').update({
-      status: finalStatus,
-      output,
-      output_text: outputText,
-      changed_anything: changedAnything,
-      what_changed: output?.what_changed || output?.actions_taken?.map(a => a.action || a).join('; ') || null,
-      trigger_post_change_validation: triggerValidation,
-      post_change_validation_status: triggerValidation ? 'pending' : null,
-      tokens_used: tokensUsed,
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      duration_ms: Date.now() - startTime,
-      completed_at: new Date().toISOString()
-    }).eq('id', run.id);
-    if (runUpdateErr) {
-      console.error(`[RUN_UPDATE_FAIL] run=${run.id}:`, runUpdateErr.message, runUpdateErr.details);
-      // Retry with smaller output if the full output is too large
-      const { error: retryErr } = await supabase.from('runs').update({
+    // 12. CRITICAL: Save run output to DB IMMEDIATELY
+    console.log(`[RUN_SAVE] Starting DB update for run=${run.id}, elapsed=${Date.now()-startTime}ms, output_size=${JSON.stringify(output).length}`);
+    try {
+      const updatePayload = {
         status: finalStatus,
-        output: { _tool_call_count: toolCallLog.length, _iterations: iteration, summary: 'Output too large - saved partial', _truth_gate: output._truth_gate },
+        output,
+        output_text: outputText,
+        changed_anything: changedAnything,
+        what_changed: output?.what_changed || output?.actions_taken?.map(a => a.action || a).join('; ') || null,
+        trigger_post_change_validation: triggerValidation,
+        post_change_validation_status: triggerValidation ? 'pending' : null,
         tokens_used: tokensUsed,
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
         duration_ms: Date.now() - startTime,
         completed_at: new Date().toISOString()
-      }).eq('id', run.id);
-      if (retryErr) console.error(`[RUN_UPDATE_RETRY_FAIL] run=${run.id}:`, retryErr.message);
+      };
+      const { data: updateData, error: runUpdateErr } = await supabase.from('runs').update(updatePayload).eq('id', run.id).select('id, status').single();
+      if (runUpdateErr) {
+        console.error(`[RUN_UPDATE_FAIL] run=${run.id}: ${runUpdateErr.message} | ${runUpdateErr.details || ''} | ${runUpdateErr.hint || ''}`);
+        // Retry with smaller output
+        await supabase.from('runs').update({
+          status: finalStatus, output: { _tool_call_count: toolCallLog.length, summary: 'Output saved partial' },
+          tokens_used: tokensUsed, duration_ms: Date.now() - startTime, completed_at: new Date().toISOString()
+        }).eq('id', run.id);
+      } else {
+        console.log(`[RUN_SAVE_OK] run=${run.id} status=${updateData?.status} elapsed=${Date.now()-startTime}ms`);
+      }
+    } catch (saveErr) {
+      console.error(`[RUN_SAVE_EXCEPTION] run=${run.id}: ${saveErr.message}`);
     }
 
     // 13. Update assignment stats

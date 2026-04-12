@@ -671,6 +671,11 @@ export async function processRunQueue() {
   }
 
   for (const item of queueItems) {
+    // Time budget: stop processing 8s before Vercel timeout (60s)
+    if (Date.now() - startTime > 50000) {
+      console.log(`[QUEUE] Time budget exhausted after ${processed} processed, stopping`);
+      break;
+    }
     try {
       // Mark as running
       await supabase.from('run_queue').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', item.id);
@@ -2499,6 +2504,21 @@ function getNextCronRun(cronExpression, fromDate) {
 export async function enqueueDueRuns() {
   const now = new Date();
   let queued = 0;
+
+  // Initialize any schedules with null next_run_at
+  const { data: uninit } = await supabase
+    .from('agent_schedules')
+    .select('id, cron_expression')
+    .eq('enabled', true)
+    .is('next_run_at', null);
+
+  for (const s of (uninit || [])) {
+    const nextRun = getNextCronRun(s.cron_expression, now);
+    await supabase.from('agent_schedules').update({
+      next_run_at: nextRun.toISOString()
+    }).eq('id', s.id);
+    console.log(`[SCHEDULER] Initialized next_run_at for schedule ${s.id} → ${nextRun.toISOString()}`);
+  }
 
   const { data: schedules } = await supabase
     .from('agent_schedules')

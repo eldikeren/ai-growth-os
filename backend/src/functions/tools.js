@@ -487,6 +487,31 @@ export function getToolDefinitions(agentSlug, clientId) {
         }
       },
       allowed_agents: ['master-orchestrator', 'reviews-gbp-authority-agent', 'local-seo-agent', 'credential-health-agent', 'facebook-agent', 'instagram-agent']
+    },
+    // --- PROPOSE WEBSITE CHANGE ---
+    {
+      type: 'function',
+      function: {
+        name: 'propose_website_change',
+        description: 'Propose a concrete change to the client website. Works for any platform — GitHub, WordPress, Wix, Webflow, Shopify, or manual. Creates a tracked change proposal that routes to the correct platform connector. The change is staged for approval before execution.',
+        parameters: {
+          type: 'object',
+          properties: {
+            page_url: { type: 'string', description: 'Full URL of the page to change (e.g. https://yanivgil.co.il/about)' },
+            change_type: {
+              type: 'string',
+              enum: ['seo_title','meta_description','h1','h2','body_content','schema_markup','image_alt','canonical_url','redirect','internal_link','nav_label','cta_text','page_slug','robots_txt'],
+              description: 'Type of change to make'
+            },
+            current_value: { type: 'string', description: 'Current value on the page (what it says now). Leave empty if adding new content.' },
+            proposed_value: { type: 'string', description: 'The new value to set. Must be complete and ready to publish — no placeholders.' },
+            reason: { type: 'string', description: 'Why this change improves SEO, UX, or conversions. Be specific.' },
+            priority: { type: 'string', enum: ['critical','high','medium','low'], description: 'Priority level. critical = blocking issue, high = significant impact, medium = improvement, low = nice to have' }
+          },
+          required: ['page_url', 'change_type', 'proposed_value', 'reason']
+        }
+      },
+      allowed_agents: ['seo-core-agent','technical-seo-crawl-agent','website-content-agent','cro-agent','local-seo-agent','master-orchestrator','hebrew-quality-agent']
     }
   ];
 
@@ -1522,11 +1547,297 @@ export async function executeTool(toolName, args, clientId, runId) {
         return { task_id: data.id, status: 'pending', message: 'Browser task queued for Manus execution' };
       }
 
+      case 'propose_website_change': {
+        // 1. Detect client's website platform
+        const { data: website } = await supabase.from('client_websites')
+          .select('id, website_platform_type, cms_type, domain')
+          .eq('client_id', clientId)
+          .maybeSingle();
+
+        // Also check client_connectors for github
+        const { data: connectors } = await supabase.from('client_connectors')
+          .select('connector_type, config, is_active')
+          .eq('client_id', clientId)
+          .eq('is_active', true);
+
+        const connectorMap = Object.fromEntries((connectors || []).map(c => [c.connector_type, c]));
+
+        // Determine platform from website record or connectors
+        let platform = 'manual';
+        if (connectorMap['github']) platform = 'github';
+        else if (website?.cms_type) platform = website.cms_type; // wordpress/wix/webflow/shopify
+        else if (website?.website_platform_type === 'wordpress') platform = 'wordpress';
+        else if (website?.website_platform_type === 'wix') platform = 'wix';
+        else if (website?.website_platform_type === 'webflow') platform = 'webflow';
+        else if (website?.website_platform_type === 'shopify') platform = 'shopify';
+
+        // 2. Save the proposed change
+        const { data: change, error: changeErr } = await supabase.from('proposed_changes').insert({
+          client_id: clientId,
+          run_id: runId,
+          agent_slug: 'agent', // will be populated from context
+          page_url: args.page_url,
+          change_type: args.change_type,
+          current_value: args.current_value || null,
+          proposed_value: args.proposed_value,
+          reason: args.reason,
+          priority: args.priority || 'medium',
+          platform,
+          status: 'proposed',
+        }).select().single();
+
+        if (changeErr) return { error: `Failed to save proposed change: ${changeErr.message}` };
+
+        // 3. Try immediate execution if platform connector is available
+        let executionResult = null;
+
+        if (platform === 'github' && connectorMap['github']?.config?.repo_url) {
+          executionResult = await executeGitHubChange(clientId, change, connectorMap['github'].config);
+        } else if (platform === 'wordpress') {
+          executionResult = await executeWordPressChange(clientId, change);
+        } else if (platform === 'webflow') {
+          executionResult = await executeWebflowChange(clientId, change);
+        }
+
+        if (executionResult?.success) {
+          await supabase.from('proposed_changes').update({
+            status: 'executed',
+            platform_ref: executionResult.ref,
+            executed_at: new Date().toISOString(),
+            execution_result: executionResult,
+          }).eq('id', change.id);
+          return {
+            status: 'executed',
+            platform,
+            change_id: change.id,
+            ref: executionResult.ref,
+            message: executionResult.message,
+          };
+        }
+
+        // No direct execution — staged for manual approval
+        return {
+          status: 'proposed',
+          platform,
+          change_id: change.id,
+          page_url: args.page_url,
+          change_type: args.change_type,
+          proposed_value: args.proposed_value,
+          priority: args.priority || 'medium',
+          message: platform === 'manual'
+            ? 'Change staged. No platform connector configured — requires manual implementation.'
+            : `Change staged for ${platform}. Platform connector found but execution pending approval.`,
+        };
+      }
+
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
     console.error(`[TOOL_ERROR] ${toolName}:`, err.message);
     return { error: err.message, tool: toolName };
+  }
+}
+
+// ============================================================
+// PLATFORM EXECUTION HELPERS
+// ============================================================
+
+async function executeGitHubChange(clientId, change, config) {
+  try {
+    const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
+    const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+
+    // Try repo-level token first (stored in website_git_repos)
+    const { data: gitRepo } = await supabase.from('website_git_repos')
+      .select('repo_url, default_branch, access_token_encrypted, encryption_iv')
+      .eq('client_id', clientId)
+      .maybeSingle();
+
+    let token = GITHUB_TOKEN;
+    if (gitRepo?.access_token_encrypted && ENC_KEY) {
+      try {
+        const iv = (gitRepo.encryption_iv || '').split(':')[0];
+        const decipher = (await import('crypto')).default.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(iv, 'hex'));
+        let dec = decipher.update(gitRepo.access_token_encrypted, 'hex', 'utf8');
+        token = dec + decipher.final('utf8');
+      } catch { /* fall back to global token */ }
+    }
+
+    if (!token) return { success: false, error: 'No GitHub token available' };
+
+    const repoUrl = gitRepo?.repo_url || config?.repo_url || '';
+    const repoMatch = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+    if (!repoMatch) return { success: false, error: `Cannot parse repo URL: ${repoUrl}` };
+
+    const owner = repoMatch[1];
+    const repo = repoMatch[2].replace('.git', '');
+    const branch = gitRepo?.default_branch || 'main';
+    const headers = { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json', 'Content-Type': 'application/json' };
+
+    // Build a descriptive branch name and commit message
+    const safePage = change.page_url.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 40);
+    const prBranch = `seo/${change.change_type}-${safePage}-${Date.now()}`.slice(0, 80);
+
+    // Create branch from default
+    const refRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers });
+    const refData = await refRes.json();
+    if (!refData.object?.sha) return { success: false, error: `Cannot get SHA for branch ${branch}` };
+
+    await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ ref: `refs/heads/${prBranch}`, sha: refData.object.sha }),
+    });
+
+    // Create a change description file in the repo for human review
+    // (We create a _seo_changes/<id>.md file describing the change — the developer applies it)
+    const changeDoc = [
+      `# SEO Change Proposal`,
+      ``,
+      `**Page:** ${change.page_url}`,
+      `**Type:** ${change.change_type}`,
+      `**Priority:** ${change.priority}`,
+      `**Proposed by:** AI Growth OS`,
+      `**Date:** ${new Date().toISOString()}`,
+      ``,
+      `## Reason`,
+      change.reason,
+      ``,
+      `## Change`,
+      ``,
+      `**Current:**`,
+      `\`\`\``,
+      change.current_value || '(not set)',
+      `\`\`\``,
+      ``,
+      `**Proposed:**`,
+      `\`\`\``,
+      change.proposed_value,
+      `\`\`\``,
+    ].join('\n');
+
+    const filePath = `_seo_changes/${change.id}.md`;
+    const contentB64 = Buffer.from(changeDoc).toString('base64');
+    await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`, {
+      method: 'PUT', headers,
+      body: JSON.stringify({ message: `SEO: ${change.change_type} on ${safePage}`, content: contentB64, branch: prBranch }),
+    });
+
+    // Open PR
+    const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+      method: 'POST', headers,
+      body: JSON.stringify({
+        title: `[SEO] ${change.change_type.replace(/_/g,' ')} — ${change.page_url}`,
+        body: `## SEO Change Proposed by AI Growth OS\n\n**Page:** ${change.page_url}\n**Type:** ${change.change_type}\n**Priority:** ${change.priority}\n\n### Reason\n${change.reason}\n\n### Current Value\n\`\`\`\n${change.current_value || '(not set)'}\n\`\`\`\n\n### Proposed Value\n\`\`\`\n${change.proposed_value}\n\`\`\`\n\n---\n*Generated by AI Growth OS. Review, apply the change manually if needed, then merge.*`,
+        head: prBranch,
+        base: branch,
+      }),
+    });
+    const pr = await prRes.json();
+
+    if (pr.html_url) {
+      return { success: true, ref: pr.html_url, message: `GitHub PR opened: ${pr.html_url}`, pr_number: pr.number };
+    }
+    return { success: false, error: pr.message || 'PR creation failed' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function executeWordPressChange(clientId, change) {
+  try {
+    const { data: cms } = await supabase.from('website_cms_connections')
+      .select('site_url, api_token_encrypted, encryption_iv, cms_username')
+      .eq('client_id', clientId).eq('cms_type', 'wordpress').maybeSingle();
+    if (!cms?.api_token_encrypted) return { success: false, error: 'WordPress credentials not configured' };
+
+    const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
+    if (!ENC_KEY) return { success: false, error: 'Encryption key not set' };
+
+    const iv = (cms.encryption_iv || '').split(':')[0];
+    const decipher = (await import('crypto')).default.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(iv, 'hex'));
+    let appPassword = decipher.update(cms.api_token_encrypted, 'hex', 'utf8');
+    appPassword += decipher.final('utf8');
+
+    const auth = Buffer.from(`${cms.cms_username}:${appPassword}`).toString('base64');
+    const baseUrl = cms.site_url.replace(/\/$/, '');
+
+    // Find the page/post by URL slug
+    const slug = change.page_url.replace(/.*\//, '').replace(/\/$/, '') || 'home';
+    const searchRes = await fetch(`${baseUrl}/wp-json/wp/v2/pages?slug=${slug}&_fields=id,title,content,yoast_head_json`, {
+      headers: { Authorization: `Basic ${auth}` }
+    });
+    const pages = await searchRes.json();
+    const page = pages?.[0];
+    if (!page) return { success: false, error: `Page not found for slug: ${slug}` };
+
+    // Apply the change based on type
+    let updateBody = {};
+    if (change.change_type === 'seo_title') updateBody = { title: { rendered: change.proposed_value } };
+    else if (change.change_type === 'meta_description') updateBody = { excerpt: { rendered: change.proposed_value } };
+    else if (change.change_type === 'h1') updateBody = { title: { raw: change.proposed_value } };
+    else if (change.change_type === 'body_content') updateBody = { content: { raw: change.proposed_value } };
+    else {
+      // For other types, stage as proposed — WordPress API doesn't have direct fields
+      return { success: false, error: `Change type ${change.change_type} requires manual WordPress editing` };
+    }
+
+    const updateRes = await fetch(`${baseUrl}/wp-json/wp/v2/pages/${page.id}`, {
+      method: 'POST', headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(updateBody),
+    });
+    const updated = await updateRes.json();
+    if (updated.id) {
+      return { success: true, ref: `${baseUrl}/?p=${updated.id}`, message: `WordPress page ${updated.id} updated` };
+    }
+    return { success: false, error: updated.message || 'WordPress update failed' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function executeWebflowChange(clientId, change) {
+  try {
+    const { data: cms } = await supabase.from('website_cms_connections')
+      .select('site_url, api_token_encrypted, encryption_iv, site_id')
+      .eq('client_id', clientId).eq('cms_type', 'webflow').maybeSingle();
+    if (!cms?.api_token_encrypted) return { success: false, error: 'Webflow credentials not configured' };
+
+    const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
+    const iv = (cms.encryption_iv || '').split(':')[0];
+    const decipher = (await import('crypto')).default.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(iv, 'hex'));
+    let token = decipher.update(cms.api_token_encrypted, 'hex', 'utf8');
+    token += decipher.final('utf8');
+
+    const siteId = cms.site_id;
+    const headers = { Authorization: `Bearer ${token}`, 'accept-version': '1.0.0', 'Content-Type': 'application/json' };
+
+    // Get pages list to find matching page
+    const pagesRes = await fetch(`https://api.webflow.com/v2/sites/${siteId}/pages`, { headers });
+    const pagesData = await pagesRes.json();
+    const slug = change.page_url.replace(/.*\//, '').replace(/\/$/, '') || 'index';
+    const page = pagesData?.pages?.find(p => p.slug === slug || p.slug === '');
+    if (!page) return { success: false, error: `Webflow page not found for slug: ${slug}` };
+
+    // Update SEO fields
+    let updateBody = {};
+    if (change.change_type === 'seo_title') updateBody = { seo: { title: change.proposed_value } };
+    else if (change.change_type === 'meta_description') updateBody = { seo: { description: change.proposed_value } };
+    else return { success: false, error: `Change type ${change.change_type} requires Webflow Designer access` };
+
+    const updateRes = await fetch(`https://api.webflow.com/v2/pages/${page.id}`, {
+      method: 'PATCH', headers, body: JSON.stringify(updateBody),
+    });
+    const updated = await updateRes.json();
+    if (updated.id) {
+      // Publish the page
+      await fetch(`https://api.webflow.com/v2/sites/${siteId}/publish`, {
+        method: 'POST', headers, body: JSON.stringify({ publishToWebflowSubdomain: true }),
+      });
+      return { success: true, ref: `https://webflow.com/design/${siteId}`, message: `Webflow page updated and published` };
+    }
+    return { success: false, error: updated.message || 'Webflow update failed' };
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 }

@@ -94,10 +94,20 @@ export async function createClientOnboarding(onboardingData) {
     await supabase.from('client_connectors').insert(connectors.map(c => ({ client_id: clientId, ...c })));
   }
 
-  // 5. Create credentials entries (all disconnected — to be connected manually)
-  const credentialServices = ['google_ads', 'google_analytics', 'google_search_console', 'google_business_profile', 'openai', 'facebook', 'instagram'];
+  // 5. Create empty credential placeholders for the new client
+  // SERVICE-LEVEL API keys (DataForSEO, OpenAI) come from env vars — no need to copy.
+  // OAUTH tokens (GSC, GBP, Facebook, etc.) are per-client and must NEVER be shared.
+  // Each client must connect their own OAuth accounts via the Setup Link / Credentials page.
+  const credentialServices = ['google_ads', 'google_analytics', 'google_search_console', 'google_business_profile', 'openai', 'facebook', 'instagram', 'dataforseo', 'moz'];
+
   await supabase.from('client_credentials').insert(
-    credentialServices.map(service => ({ client_id: clientId, service, is_connected: false, health_score: 0 }))
+    credentialServices.map(service => ({
+      client_id: clientId,
+      service,
+      credential_data: null,
+      is_connected: false,
+      health_score: 0,
+    }))
   );
 
   // 6. Insert keywords
@@ -414,11 +424,16 @@ export async function generateFullLinkIntelligence(clientId) {
 
   const { data: client } = await supabase.from('clients').select('name, domain, client_profiles(*)').eq('id', clientId).single();
 
-  const prompt = `You are a senior link building strategist specializing in Israeli legal services SEO.
+  const profile = client?.client_profiles?.[0] || {};
+  const bizType = profile.business_type || profile.industry || 'business';
+  const location = profile.city || profile.location || 'Israel';
+  const lang = profile.language || 'he';
+
+  const prompt = `You are a senior link building strategist specializing in ${bizType} SEO in ${location}.
 
 CLIENT: ${client?.name} (${client?.domain})
-INDUSTRY: ${client?.client_profiles?.[0]?.industry || 'legal services'}
-LANGUAGE: Hebrew | MARKET: Israel | LOCATION: Tel Aviv
+INDUSTRY: ${bizType}
+LANGUAGE: ${lang} | MARKET: Israel | LOCATION: ${location}
 
 MISSING REFERRING DOMAINS (competitors have, we don't):
 ${JSON.stringify(missingDomains.data?.slice(0, 30), null, 2)}
@@ -433,8 +448,8 @@ COMPETITORS:
 ${JSON.stringify(competitors.data, null, 2)}
 
 Generate a prioritized link acquisition strategy. For each opportunity:
-- Why this specific domain matters for Israeli legal SEO
-- Realistic outreach strategy for an Israeli law firm
+- Why this specific domain matters for ${bizType} SEO in ${location}
+- Realistic outreach strategy for ${client?.name}
 - Estimated effort and expected ranking/authority impact
 - Which competitor winning this link is hurting us most
 
@@ -506,21 +521,28 @@ Return ONLY valid JSON:
 // SEO ACTION PLANS
 // ============================================================
 export async function generateSeoActionPlan(clientId) {
-  const [keywords, competitors, baselines, memory, techDebt] = await Promise.all([
+  const [keywords, competitors, baselines, memory, techDebt, clientRes] = await Promise.all([
     supabase.from('client_keywords').select('*').eq('client_id', clientId).order('volume', { ascending: false }).limit(30),
     supabase.from('client_competitors').select('*').eq('client_id', clientId),
     supabase.from('baselines').select('*').eq('client_id', clientId),
     supabase.from('memory_items').select('content, scope').eq('client_id', clientId).eq('approved', true).eq('is_stale', false).limit(20),
-    supabase.from('seo_action_plans').select('title, status').eq('client_id', clientId).eq('status', 'open')
+    supabase.from('seo_action_plans').select('title, status').eq('client_id', clientId).eq('status', 'open'),
+    supabase.from('clients').select('name, domain, client_profiles(*)').eq('id', clientId).single()
   ]);
 
-  const prompt = `You are a senior SEO strategist for an Israeli family law firm.
+  const client = clientRes.data;
+  const profile = client?.client_profiles?.[0] || {};
+  const bizType = profile.business_type || profile.industry || 'business';
+  const location = profile.city || profile.location || 'Israel';
+  const lang = profile.language || 'he';
+
+  const prompt = `You are a senior SEO strategist for ${client?.name || 'this client'} (${client?.domain}), a ${bizType} in ${location}.
 
 CURRENT SEO STATUS:
 - Mobile PageSpeed: ${baselines.data?.find(b => b.metric_name === 'mobile_pagespeed')?.metric_value || '~60'}/100
 - Page 1 Keywords: ${baselines.data?.find(b => b.metric_name === 'page1_keywords')?.metric_value || 0}
 - Local 3-Pack: ${baselines.data?.find(b => b.metric_name === 'local_3pack_present')?.metric_value ? 'Yes' : 'No'}
-- Google Reviews: ${baselines.data?.find(b => b.metric_name === 'google_reviews_count')?.metric_value || 18}
+- Google Reviews: ${baselines.data?.find(b => b.metric_name === 'google_reviews_count')?.metric_value || 0}
 
 TARGET KEYWORDS (top by volume):
 ${keywords.data?.slice(0, 15).map(k => `${k.keyword} | pos: ${k.current_position || 'unranked'} | vol: ${k.volume}`).join('\n')}
@@ -531,7 +553,7 @@ ${techDebt.data?.map(a => a.title).join('\n') || 'None'}
 MEMORY INSIGHTS:
 ${memory.data?.map(m => m.content).join('\n').slice(0, 1000)}
 
-Generate 10 specific, actionable SEO tasks prioritized by impact. For a Hebrew family law firm in Tel Aviv.
+Generate 10 specific, actionable SEO tasks prioritized by impact for this ${bizType} in ${location}. Language: ${lang}.
 
 Return ONLY valid JSON:
 {

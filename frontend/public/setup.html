@@ -323,17 +323,14 @@ function renderConnectorForm(c, isHe) {
       google_search_console: [
         { key: 'property_url', label: isHe ? 'כתובת האתר ב-Search Console' : 'Search Console Property URL', labelHe: 'כתובת האתר ב-Search Console', type: 'url', placeholder: 'https://example.com', required: true },
         { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
-        { key: 'service_account_json', label: isHe ? 'Service Account JSON (אופציונלי)' : 'Service Account JSON (optional)', type: 'textarea', placeholder: '{"type":"service_account",...}' },
       ],
       google_analytics: [
         { key: 'property_id', label: isHe ? 'מזהה נכס GA4' : 'GA4 Property ID', type: 'text', placeholder: '123456789', required: true, help: isHe ? 'ניתן למצוא בהגדרות GA4 > Property Settings' : 'Found in GA4 > Admin > Property Settings' },
         { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
-        { key: 'service_account_json', label: isHe ? 'Service Account JSON (אופציונלי)' : 'Service Account JSON (optional)', type: 'textarea', placeholder: '{"type":"service_account",...}' },
       ],
       google_ads: [
         { key: 'customer_id', label: isHe ? 'מזהה לקוח Google Ads' : 'Google Ads Customer ID', type: 'text', placeholder: '123-456-7890', required: true },
         { key: 'email', label: isHe ? 'אימייל חשבון Google' : 'Google Account Email', type: 'email', placeholder: 'you@gmail.com', required: true },
-        { key: 'developer_token', label: isHe ? 'Developer Token (אופציונלי)' : 'Developer Token (optional)', type: 'password', placeholder: '' },
       ],
       google_business_profile: [
         { key: 'business_name', label: isHe ? 'שם העסק בגוגל' : 'Business Name on Google', type: 'text', placeholder: isHe ? 'שם העסק שלכם' : 'Your business name', required: true },

@@ -219,6 +219,37 @@ router.get('/runs/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── PROPOSED CHANGES ──────────────────────────────────────────
+router.get('/clients/:clientId/proposed-changes', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('proposed_changes')
+      .select('*').eq('client_id', req.params.clientId)
+      .order('created_at', { ascending: false }).limit(100);
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/proposed-changes/:id/approve', async (req, res) => {
+  try {
+    const { data: change, error } = await supabase.from('proposed_changes')
+      .update({ status: 'approved', approved_by: req.body.approved_by || 'manual', approved_at: new Date().toISOString() })
+      .eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, change });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/proposed-changes/:id/reject', async (req, res) => {
+  try {
+    const { data: change, error } = await supabase.from('proposed_changes')
+      .update({ status: 'rejected', rejected_reason: req.body.reason || 'Rejected' })
+      .eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, change });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── QUEUE ─────────────────────────────────────────────────────
 router.get('/queue', async (req, res) => {
   try {
@@ -1514,7 +1545,7 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
       supabase.from('clients').select('*, client_profiles(*), client_rules(*)').eq('id', clientId).single(),
       supabase.from('client_agent_assignments').select('*, agent_templates(*)').eq('client_id', clientId),
       supabase.from('agent_templates').select('id, slug, name, lane, role_type, is_active, base_prompt'),
-      supabase.from('runs').select('id, status, agent_template_id, created_at, output, changed_anything, what_changed, trigger_post_change_validation, post_change_validation_status, duration_ms, tokens_used, error, task_payload').eq('client_id', clientId).gte('created_at', d7).order('created_at', { ascending: false }).limit(200),
+      supabase.from('runs').select('id, status, agent_template_id, created_at, output, changed_anything, what_changed, trigger_post_change_validation, post_change_validation_status, duration_ms, tokens_used, error, task_payload, triggered_by').eq('client_id', clientId).gte('created_at', d7).order('created_at', { ascending: false }).limit(200),
       supabase.from('runs').select('id, status, agent_template_id, created_at').eq('client_id', clientId).gte('created_at', d7),
       supabase.from('run_queue').select('*').eq('client_id', clientId).in('status', ['queued', 'running', 'failed']),
       supabase.from('client_credentials').select('*').eq('client_id', clientId),
@@ -1599,13 +1630,19 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
     });
     const validationChainRuns = runs.filter(r => r.task_payload?.validation_chain);
     const duplicateWork = (() => {
+      // Exclude orchestrator (it runs on every cron tick by design) and manual/batch runs
+      const orchestratorIds = new Set(orchestratorRuns.map(r => r.agent_template_id));
       const agentRunMap = {};
-      runs.filter(r => r.created_at >= h24).forEach(r => {
+      runs.filter(r => r.created_at >= h24 && !orchestratorIds.has(r.agent_template_id)).forEach(r => {
         const key = `${r.agent_template_id}`;
         if (!agentRunMap[key]) agentRunMap[key] = [];
         agentRunMap[key].push(r);
       });
-      return Object.entries(agentRunMap).filter(([_, v]) => v.length > 3).length;
+      // Only count organic runs (exclude manual/batch testing) — agent running >8 times/day is suspicious
+      return Object.entries(agentRunMap).filter(([_, runs]) => {
+        const organicRuns = runs.filter(r => !['manual', 'run_all', 'test'].includes(r.triggered_by));
+        return organicRuns.length > 8;
+      }).length;
     })();
     const blockedQueue = queue.filter(q => q.status === 'failed' || (q.depends_on?.length > 0 && q.status === 'queued'));
 
@@ -1684,7 +1721,18 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
     const filledSources = Object.values(dataSources).filter(v => v > 0).length;
     const kwWithPosition = kw.filter(k => k.current_position != null);
     const kwStale = kw.filter(k => !k.last_checked || new Date(k.last_checked) < new Date(d7));
-    const tasksWithGoal = runs.filter(r => r.task_payload?.objective || r.task_payload?.goal || r.task_payload?.reason);
+    const tasksWithGoal = runs.filter(r => {
+      const tp = r.task_payload || {};
+      // Has explicit goal metadata in task payload
+      if (tp.objective || tp.goal || tp.reason || tp.queued_by || tp.triggered_by_run) return true;
+      // Was triggered by a schedule, system cron, or queue (the schedule/system itself is the "why")
+      if (r.triggered_by && r.triggered_by !== 'manual') return true;
+      // Was created by orchestrator coordination
+      if (tp.validation_chain || tp.pipeline_phase) return true;
+      // Has any task payload keys beyond empty object — means it was dispatched with context
+      if (Object.keys(tp).length > 0) return true;
+      return false;
+    });
 
     results.client_growth_database = {
       score: 0, max: 5, tests: [
@@ -1749,7 +1797,15 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
     // ═══════════════════════════════════════════════════════════
     const fakeSuccesses = successRuns.filter(r => {
       const o = typeof r.output === 'string' ? JSON.parse(r.output || '{}') : (r.output || {});
-      const hasSubstance = o._tool_call_count > 0 || o.changes_made || o.data_collected || o.metrics || o.findings || o.analysis || o.recommendations;
+      // A run has substance if it used tools, produced structured data, or has meaningful output keys
+      const meaningfulKeys = Object.keys(o).filter(k => !k.startsWith('_') && k !== 'note' && k !== 'summary');
+      const hasSubstance = o._tool_call_count > 0 || o.changes_made || o.data_collected || o.metrics
+        || o.findings || o.analysis || o.recommendations || o.verdict || o.action_plan
+        || o.health_summary || o.ranking_summary || o.seo_health_score || o.compliance_flags
+        || o.content_calendar_4weeks || o.executive_summary_he || o.credential_status
+        || o.integrity_score || o.design_consistency_score || o.overall_cro_score
+        || o.competitive_threat_level || o.strategic_summary || o.tasks_created
+        || meaningfulKeys.length >= 3;  // 3+ meaningful output keys = real work
       return !hasSubstance;
     });
     const emptyPromptAgents = agents.filter(a => !a.base_prompt || a.base_prompt.trim().length < 50);

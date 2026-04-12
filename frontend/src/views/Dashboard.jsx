@@ -1,286 +1,1405 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Users, RefreshCw, Link2, Send, Zap, AlertTriangle, Clock } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  Activity, AlertTriangle, CheckCircle, Clock, RefreshCw, ChevronDown,
+  ChevronRight, Users, Zap, Shield, TrendingUp, XCircle, Play, Eye,
+  Filter, Server, Wifi, WifiOff, ArrowRight, RotateCcw, AlertCircle,
+  Circle, Layers, FileText, Trash2
+} from 'lucide-react';
 import { api } from '../hooks/useApi.js';
-import { colors, spacing, fontSize, fontWeight, radius, transitions } from '../theme.js';
-import { Card, KpiCard, SH, Badge, Dot, Btn, Spin, Empty, SkeletonCard, SkeletonKpi } from '../components/index.jsx';
+import { colors, spacing, fontSize, fontWeight, radius, shadows, transitions } from '../theme.js';
+import { Card, Badge, Dot, Spin } from '../components/index.jsx';
 
-export default function Dashboard({ clientId, clients }) {
-  const [stats, sS] = useState(null);
-  const [bl, sBl] = useState([]);
-  const [runs, sR] = useState([]);
-  const [inc, sI] = useState([]);
-  const [load, sL] = useState(false);
-  const [psLoading, setPsLoading] = useState(false);
-  const [psResult, setPsResult] = useState(null);
-  const [refreshingAll, setRefreshingAll] = useState(false);
-  const [refreshResult, setRefreshResult] = useState(null);
+// ─── Constants ──────────────────────────────────────────────────
+const STATUS_COLORS = {
+  success: '#10B981', executed: '#10B981',
+  failed: '#EF4444',
+  running: '#3B82F6',
+  queued: '#6B7280',
+  pending_approval: '#F59E0B',
+  dry_run: '#8B5CF6',
+  cancelled: '#9CA3AF',
+  blocked_dependency: '#F97316',
+};
 
-  const fetch_data = useCallback(async () => {
-    if (!clientId) return;
-    sL(true);
-    try {
-      const [s, b, r, i] = await Promise.all([
-        api(`/clients/${clientId}/stats`),
-        api(`/clients/${clientId}/baselines`),
-        api(`/clients/${clientId}/runs?limit=10`),
-        api(`/clients/${clientId}/incidents?status=open`),
-      ]);
-      sS(s); sBl(b); sR(r); sI(i);
-    } catch (e) { console.error(e); }
-    sL(false);
-  }, [clientId]);
+const LANE_COLORS = colors.lanes;
 
-  useEffect(() => { fetch_data(); }, [fetch_data]);
+const MONO = "'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace";
 
-  if (!clientId) return <Empty icon={Users} msg="Select a client to view dashboard" />;
+// Which agents are responsible for each KPI metric
+const METRIC_AGENTS = {
+  mobile_pagespeed: ['Technical SEO Crawl Agent', 'Website QA Agent', 'CRO Agent'],
+  desktop_pagespeed: ['Technical SEO Crawl Agent', 'Website QA Agent', 'CRO Agent'],
+  page1_keyword_count: ['SEO Core Agent', 'GSC Daily Monitor', 'Keyword Research Agent'],
+  google_reviews_count: ['Reviews / GBP / Authority Agent', 'Local SEO Agent'],
+  google_reviews_rating: ['Reviews / GBP / Authority Agent', 'Local SEO Agent'],
+  domain_authority: ['Backlink & Digital PR Agent', 'SEO Core Agent'],
+  referring_domains_count: ['Backlink & Digital PR Agent'],
+  indexed_pages: ['Technical SEO Crawl Agent', 'GSC Daily Monitor'],
+  local_3pack_present: ['Local SEO Agent', 'Reviews / GBP / Authority Agent'],
+};
 
-  const client = clients.find(c => c.id === clientId);
-  const bm = Object.fromEntries(bl.map(b => [b.metric_name, b]));
+// ─── Helpers ────────────────────────────────────────────────────
+function relativeTime(dateStr) {
+  if (!dateStr) return 'never';
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 0) return 'just now';
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(dateStr).toLocaleDateString();
+}
 
-  // KPI card with data source timestamp
-  function KpiWithDate({ baseline, label, color, target, sub, suffix }) {
-    const b = baseline;
-    const val = b?.metric_value;
-    const isStale = !b?.recorded_at || (Date.now() - new Date(b.recorded_at).getTime() > 7 * 24 * 60 * 60 * 1000);
-    const age = b?.recorded_at ? formatAge(new Date(b.recorded_at)) : null;
+function formatDuration(seconds) {
+  if (!seconds && seconds !== 0) return '--';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m}m ${s}s`;
+}
 
-    return (
-      <div style={{ position: 'relative' }}>
-        <KpiCard
-          label={label}
-          value={val}
-          target={target ? b?.target_value : undefined}
-          color={color}
-          sub={sub || suffix}
-        />
-        {/* Data freshness indicator */}
-        <div style={{
-          position: 'absolute', bottom: 6, left: 0, right: 0,
-          textAlign: 'center', fontSize: 9, lineHeight: 1,
-          color: isStale ? '#D97706' : colors.textDisabled,
-        }}>
-          {age ? (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
-              {isStale && <AlertTriangle size={8} />}
-              <Clock size={8} /> {age}
-            </span>
-          ) : (
-            <span style={{ color: colors.error }}>No data source</span>
-          )}
-        </div>
-      </div>
-    );
-  }
+function parseAgentOutput(output) {
+  if (!output) return null;
+  try {
+    const data = typeof output === 'string' ? JSON.parse(output) : output;
+    const findings = [];
+    const metrics = [];
+    const actions = [];
 
-  function formatAge(date) {
-    const diff = Date.now() - date.getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    if (days < 7) return `${days}d ago`;
-    return date.toLocaleDateString();
-  }
-
-  const refreshPageSpeed = async () => {
-    setPsLoading(true);
-    try {
-      const result = await api(`/clients/${clientId}/pagespeed`, { method: 'POST' });
-      setPsResult(result);
-      const b = await api(`/clients/${clientId}/baselines`);
-      sBl(b);
-    } catch (e) { console.error('PageSpeed check failed:', e); }
-    setPsLoading(false);
-  };
-
-  const refreshAllMetrics = async () => {
-    setRefreshingAll(true);
-    setRefreshResult(null);
-    try {
-      const result = await api(`/clients/${clientId}/metrics/refresh-all`, { method: 'POST' });
-      setRefreshResult(result);
-      // Reload baselines with fresh data
-      const b = await api(`/clients/${clientId}/baselines`);
-      sBl(b);
-    } catch (e) {
-      setRefreshResult({ error: e.message });
+    // Extract key-value metrics
+    for (const [key, val] of Object.entries(data)) {
+      if (val === null || val === undefined) continue;
+      const k = key.replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
+      if (typeof val === 'number' || (typeof val === 'string' && !val.includes('\n') && val.length < 80)) {
+        metrics.push({ label: k, value: String(val) });
+      } else if (Array.isArray(val)) {
+        if (key.toLowerCase().includes('action') || key.toLowerCase().includes('todo') || key.toLowerCase().includes('recommendation')) {
+          val.slice(0, 5).forEach(item => {
+            actions.push(typeof item === 'string' ? item : (item.title || item.description || item.text || JSON.stringify(item)));
+          });
+        } else if (val.length > 0 && typeof val[0] === 'string') {
+          findings.push({ label: k, items: val.slice(0, 5) });
+        } else {
+          metrics.push({ label: k, value: `${val.length} items` });
+        }
+      } else if (typeof val === 'object') {
+        metrics.push({ label: k, value: Object.keys(val).length + ' entries' });
+      } else if (typeof val === 'string' && val.length < 300) {
+        findings.push({ label: k, items: [val] });
+      }
     }
-    setRefreshingAll(false);
-  };
 
-  if (load) {
-    return (
-      <div>
-        <SH title={client?.name || 'Dashboard'} sub={client?.domain} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-          {[1, 2, 3, 4].map(i => <SkeletonKpi key={i} />)}
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-          <SkeletonCard rows={5} />
-          <SkeletonCard rows={4} />
-        </div>
-      </div>
-    );
+    return { metrics: metrics.slice(0, 8), findings: findings.slice(0, 4), actions: actions.slice(0, 5), raw: data };
+  } catch {
+    if (typeof output === 'string' && output.length > 0) {
+      return { metrics: [], findings: [{ label: 'Output', items: [output.slice(0, 500)] }], actions: [], raw: output };
+    }
+    return null;
   }
+}
+
+function getErrorFix(errorMsg) {
+  if (!errorMsg) return null;
+  const msg = String(errorMsg).toLowerCase();
+  if (msg.includes('401') || msg.includes('unauthorized') || msg.includes('auth') || msg.includes('token')) {
+    return 'Credential expired or invalid. Go to Credentials and re-authenticate the relevant service.';
+  }
+  if (msg.includes('429') || msg.includes('rate limit') || msg.includes('quota')) {
+    return 'API rate limit hit. Wait 15-30 minutes and re-run, or upgrade the API plan.';
+  }
+  if (msg.includes('timeout') || msg.includes('econnrefused') || msg.includes('network')) {
+    return 'Network/timeout error. Check that the external service is reachable and retry.';
+  }
+  if (msg.includes('404') || msg.includes('not found')) {
+    return 'Resource not found. Verify the target URL/ID is correct in the agent config.';
+  }
+  if (msg.includes('500') || msg.includes('internal server')) {
+    return 'External service error. This is on their end -- retry in a few minutes.';
+  }
+  if (msg.includes('permission') || msg.includes('forbidden') || msg.includes('403')) {
+    return 'Permission denied. Check that the connected account has the required access/scopes.';
+  }
+  return 'Check the full error output for details. If this keeps happening, review the agent config and credentials.';
+}
+
+// ─── Sub-components ─────────────────────────────────────────────
+
+function HealthBar({ score, label }) {
+  const barColor = score >= 80 ? '#10B981' : score >= 50 ? '#F59E0B' : '#EF4444';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 120 }}>
+      <span style={{ fontSize: fontSize.xs, color: colors.textSecondary, whiteSpace: 'nowrap' }}>{label}</span>
+      <div style={{ flex: 1, height: 6, borderRadius: 3, background: colors.borderLight, overflow: 'hidden' }}>
+        <div style={{
+          width: `${Math.min(100, Math.max(0, score))}%`, height: '100%',
+          borderRadius: 3, background: barColor, transition: transitions.normal,
+        }} />
+      </div>
+      <span style={{ fontSize: fontSize.xs, fontFamily: MONO, color: barColor, fontWeight: fontWeight.bold, minWidth: 28, textAlign: 'right' }}>
+        {Math.round(score)}
+      </span>
+    </div>
+  );
+}
+
+function StatusDot({ status, size = 8 }) {
+  const color = STATUS_COLORS[status] || colors.textDisabled;
+  const isRunning = status === 'running';
+  return (
+    <span style={{
+      display: 'inline-block', width: size, height: size, borderRadius: '50%',
+      background: color, flexShrink: 0,
+      boxShadow: `0 0 ${isRunning ? 8 : 4}px ${color}`,
+      animation: isRunning ? 'pulse 1.5s ease-in-out infinite' : 'none',
+    }} />
+  );
+}
+
+function FilterPill({ label, active, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      padding: '4px 12px', borderRadius: radius.full, border: `1px solid ${active ? colors.primary : colors.border}`,
+      background: active ? colors.primaryLightest : 'transparent', color: active ? colors.primary : colors.textSecondary,
+      fontSize: fontSize.xs, fontWeight: active ? fontWeight.bold : fontWeight.medium,
+      cursor: 'pointer', transition: transitions.fast, whiteSpace: 'nowrap',
+    }}>
+      {label}
+    </button>
+  );
+}
+
+function RunRow({ run, clientName, expanded, onToggle, onRerun }) {
+  const duration = run.completed_at && run.created_at
+    ? (new Date(run.completed_at).getTime() - new Date(run.created_at).getTime()) / 1000
+    : null;
+  const parsed = expanded ? parseAgentOutput(run.output || run.result) : null;
+  const isFailed = run.status === 'failed';
+  const errorMsg = run.error || run.error_message || (isFailed && run.output ? String(run.output).slice(0, 300) : null);
 
   return (
-    <div>
-      <SH title={client?.name || 'Dashboard'} sub={client?.domain} action={
-        <div style={{ display: 'flex', gap: spacing.sm }}>
-          <Btn onClick={refreshAllMetrics} disabled={refreshingAll} small ariaLabel="Refresh all metrics from live APIs">
-            {refreshingAll ? <Spin /> : <Zap size={12} />} {refreshingAll ? 'Checking APIs...' : 'Refresh All Metrics'}
-          </Btn>
-          <Btn onClick={fetch_data} small secondary ariaLabel="Reload dashboard"><RefreshCw size={12} /></Btn>
+    <div style={{
+      borderBottom: `1px solid ${colors.borderLight}`,
+      background: expanded ? colors.surfaceHover : 'transparent',
+      transition: transitions.fast,
+    }}>
+      <div
+        onClick={onToggle}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px',
+          cursor: 'pointer', transition: transitions.fast,
+        }}
+        onMouseEnter={e => e.currentTarget.style.background = colors.surfaceHover}
+        onMouseLeave={e => e.currentTarget.style.background = expanded ? colors.surfaceHover : 'transparent'}
+      >
+        {expanded ? <ChevronDown size={14} color={colors.textMuted} /> : <ChevronRight size={14} color={colors.textMuted} />}
+        <StatusDot status={run.status} />
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: fontSize.sm, fontWeight: fontWeight.semibold, color: colors.text,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220,
+          }}>
+            {run.agent_templates?.name || run.agent_name || 'Unknown Agent'}
+          </span>
+          <span style={{
+            fontSize: fontSize.xs, color: colors.primary, background: colors.primaryLightest,
+            padding: '1px 8px', borderRadius: radius.full, fontWeight: fontWeight.medium,
+          }}>
+            {clientName}
+          </span>
         </div>
-      } />
+        <Badge
+          text={run.status?.replace(/_/g, ' ')}
+          color={STATUS_COLORS[run.status] || colors.textDisabled}
+          bg={(STATUS_COLORS[run.status] || colors.textDisabled) + '18'}
+        />
+        {duration !== null && (
+          <span style={{ fontSize: fontSize.xs, fontFamily: MONO, color: colors.textMuted, minWidth: 48, textAlign: 'right' }}>
+            {formatDuration(duration)}
+          </span>
+        )}
+        <span style={{ fontSize: fontSize.xs, fontFamily: MONO, color: colors.textDisabled, minWidth: 60, textAlign: 'right' }}>
+          {relativeTime(run.created_at)}
+        </span>
+      </div>
 
-      {/* Refresh result banner */}
-      {refreshResult && (
-        <div style={{
-          display: 'flex', alignItems: 'flex-start', gap: spacing.md,
-          background: refreshResult.error ? '#FEE2E2' : '#F0FDF4',
-          border: `1px solid ${refreshResult.error ? '#FECACA' : '#BBF7D0'}`,
-          borderRadius: radius.lg, padding: spacing.lg,
-          marginBottom: spacing.lg, fontSize: fontSize.sm,
-        }}>
-          <div style={{ flex: 1 }}>
-            {refreshResult.error ? (
-              <div style={{ color: '#991B1B' }}>Error: {refreshResult.error}</div>
-            ) : (
-              <>
-                <div style={{ fontWeight: fontWeight.bold, color: '#166534', marginBottom: 4 }}>
-                  ✅ {refreshResult.metrics_updated}/{refreshResult.metrics_checked} metrics updated from live APIs
+      {expanded && (
+        <div style={{ padding: '0 16px 14px 42px' }}>
+          {/* Error section for failed runs */}
+          {isFailed && errorMsg && (
+            <div style={{
+              background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: radius.md,
+              padding: '10px 14px', marginBottom: 10,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                <XCircle size={14} color="#EF4444" style={{ marginTop: 1, flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: fontSize.sm, color: '#991B1B', fontWeight: fontWeight.semibold, marginBottom: 4 }}>
+                    Error
+                  </div>
+                  <pre style={{
+                    fontSize: fontSize.xs, fontFamily: MONO, color: '#7F1D1D',
+                    margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.5,
+                  }}>
+                    {errorMsg}
+                  </pre>
+                  <div style={{
+                    marginTop: 8, fontSize: fontSize.xs, color: '#92400E',
+                    background: '#FEF3C7', borderRadius: radius.sm, padding: '6px 10px',
+                    display: 'flex', alignItems: 'flex-start', gap: 6,
+                  }}>
+                    <AlertTriangle size={12} style={{ marginTop: 1, flexShrink: 0 }} />
+                    <span>{getErrorFix(errorMsg)}</span>
+                  </div>
                 </div>
-                {refreshResult.results?.map((r, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: fontSize.xs, color: r.status === 'ok' ? '#166534' : '#92400E', marginBottom: 2 }}>
-                    <span>{r.status === 'ok' ? '✅' : r.status === 'error' ? '❌' : '⚠️'}</span>
-                    <strong>{r.metric.replace(/_/g, ' ')}</strong>
-                    {r.status === 'ok' ? <span>→ {r.value} (from {r.source})</span> : <span>— {r.detail}</span>}
+              </div>
+            </div>
+          )}
+
+          {/* Parsed output */}
+          {parsed && !isFailed && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {parsed.metrics.length > 0 && (
+                <div style={{
+                  display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+                  gap: 6, marginBottom: 4,
+                }}>
+                  {parsed.metrics.map((m, i) => (
+                    <div key={i} style={{
+                      background: colors.borderLight, borderRadius: radius.sm, padding: '6px 10px',
+                    }}>
+                      <div style={{ fontSize: 9, color: colors.textDisabled, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                        {m.label}
+                      </div>
+                      <div style={{ fontSize: fontSize.sm, fontWeight: fontWeight.semibold, color: colors.text }}>
+                        {m.value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {parsed.findings.map((f, i) => (
+                <div key={i}>
+                  <div style={{ fontSize: fontSize.xs, fontWeight: fontWeight.semibold, color: colors.textSecondary, marginBottom: 3, textTransform: 'capitalize' }}>
+                    {f.label}
                   </div>
-                ))}
-                {refreshResult.missing_credentials?.length > 0 && (
-                  <div style={{ marginTop: 6, fontSize: fontSize.xs, color: '#92400E' }}>
-                    💡 To check more metrics: {refreshResult.missing_credentials.join(' • ')}
+                  {f.items.map((item, j) => (
+                    <div key={j} style={{ fontSize: fontSize.xs, color: colors.textMuted, lineHeight: 1.5, paddingLeft: 8, borderLeft: `2px solid ${colors.borderLight}`, marginBottom: 2 }}>
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              ))}
+
+              {parsed.actions.length > 0 && (
+                <div>
+                  <div style={{ fontSize: fontSize.xs, fontWeight: fontWeight.semibold, color: '#F59E0B', marginBottom: 3 }}>
+                    Action Items
                   </div>
-                )}
-              </>
-            )}
+                  {parsed.actions.map((a, i) => (
+                    <div key={i} style={{ fontSize: fontSize.xs, color: colors.textMuted, lineHeight: 1.5, display: 'flex', gap: 4 }}>
+                      <span style={{ color: '#F59E0B' }}>-</span> {a}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {!parsed.metrics.length && !parsed.findings.length && !parsed.actions.length && (
+                <div style={{ fontSize: fontSize.xs, color: colors.textDisabled, fontStyle: 'italic' }}>
+                  No structured output to display
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button onClick={(e) => { e.stopPropagation(); onRerun(run); }} style={{
+              display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px',
+              borderRadius: radius.sm, border: `1px solid ${colors.border}`, background: colors.surface,
+              fontSize: fontSize.xs, color: colors.textSecondary, cursor: 'pointer', transition: transitions.fast,
+            }}>
+              <RotateCcw size={11} /> Re-run
+            </button>
+            <button onClick={(e) => {
+              e.stopPropagation();
+              window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'runs', runId: run.id } }));
+            }} style={{
+              display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px',
+              borderRadius: radius.sm, border: `1px solid ${colors.border}`, background: colors.surface,
+              fontSize: fontSize.xs, color: colors.textSecondary, cursor: 'pointer', transition: transitions.fast,
+            }}>
+              <Eye size={11} /> View Full Output
+            </button>
           </div>
-          <button onClick={() => setRefreshResult(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280', padding: 2 }}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentCard({ agent, onClick }) {
+  const lastRun = agent.last_run_at || agent.updated_at;
+  const hoursSinceRun = lastRun ? (Date.now() - new Date(lastRun).getTime()) / (1000 * 60 * 60) : Infinity;
+  const lastStatus = agent.last_run_status || agent.status;
+
+  let dotColor = colors.textDisabled; // gray = never run
+  let statusLabel = 'inactive';
+  if (lastStatus === 'failed') { dotColor = '#EF4444'; statusLabel = 'failed'; }
+  else if (lastStatus === 'running') { dotColor = '#3B82F6'; statusLabel = 'running'; }
+  else if (lastStatus === 'success' || lastStatus === 'executed') {
+    if (hoursSinceRun > 48) { dotColor = '#F59E0B'; statusLabel = 'stale'; }
+    else { dotColor = '#10B981'; statusLabel = 'ok'; }
+  }
+  else if (hoursSinceRun > 48 && hoursSinceRun < Infinity) { dotColor = '#F59E0B'; statusLabel = 'stale'; }
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+        borderRadius: radius.md, cursor: 'pointer', transition: transitions.fast,
+        border: `1px solid transparent`,
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = colors.surfaceHover; e.currentTarget.style.borderColor = colors.border; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent'; }}
+    >
+      <span style={{
+        display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+        background: dotColor, flexShrink: 0, boxShadow: `0 0 4px ${dotColor}`,
+      }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: fontSize.xs, fontWeight: fontWeight.medium, color: colors.text,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {agent.name || agent.agent_templates?.name || 'Unnamed'}
+        </div>
+        <div style={{ fontSize: 9, color: colors.textDisabled, fontFamily: MONO }}>
+          {lastRun ? relativeTime(lastRun) : 'never run'}
+        </div>
+      </div>
+      {statusLabel === 'failed' && agent.last_error && (
+        <AlertCircle size={11} color="#EF4444" />
+      )}
+    </div>
+  );
+}
+
+function CredentialBadge({ cred }) {
+  const isHealthy = cred.status === 'active' || cred.status === 'valid' || cred.is_valid;
+  const isWarning = cred.status === 'expiring' || cred.status === 'warning';
+  const color = isHealthy ? '#10B981' : isWarning ? '#F59E0B' : '#EF4444';
+  return (
+    <div
+      onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'credentials', service: cred.service || cred.provider || cred.type } }))}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px',
+        borderRadius: radius.full, border: `1px solid ${color}30`, background: `${color}08`,
+        cursor: 'pointer', transition: transitions.fast,
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = `${color}15`}
+      onMouseLeave={e => e.currentTarget.style.background = `${color}08`}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
+      <span style={{ fontSize: fontSize.xs, color: colors.text, fontWeight: fontWeight.medium }}>
+        {cred.provider || cred.service || cred.type || 'Unknown'}
+      </span>
+    </div>
+  );
+}
+
+function KpiMini({ label, value, target, unit, color, provenance, delta7d }) {
+  const val = value != null ? value : '--';
+  const isGood = target && value != null ? value >= target : null;
+  const prov = provenance || {};
+  const fColor = prov.freshness === 'fresh' ? '#10B981' : prov.freshness === 'aging' ? '#F59E0B' : prov.freshness === 'stale' || prov.freshness === 'critical_stale' ? '#EF4444' : colors.textDisabled;
+  return (
+    <div style={{ textAlign: 'center', minWidth: 60, position: 'relative' }} title={prov.source ? `Source: ${prov.source}\nLast sync: ${prov.last_sync ? new Date(prov.last_sync).toLocaleString() : 'never'}\nFreshness: ${prov.freshness_label || prov.freshness || 'unknown'}` : undefined}>
+      <div style={{
+        fontSize: fontSize.lg, fontWeight: fontWeight.extrabold, fontFamily: MONO,
+        color: color || (isGood === true ? '#10B981' : isGood === false ? '#F59E0B' : colors.text),
+        lineHeight: 1.1,
+      }}>
+        {val}{unit || ''}
+        {delta7d != null && delta7d !== 0 && (
+          <span style={{ fontSize: 9, fontWeight: fontWeight.bold, marginLeft: 2, color: delta7d > 0 ? '#10B981' : '#EF4444' }}>
+            {delta7d > 0 ? '+' : ''}{delta7d}
+          </span>
+        )}
+      </div>
+      <div style={{ fontSize: 9, color: colors.textDisabled, marginTop: 2, lineHeight: 1.1 }}>{label}</div>
+      {target != null && (
+        <div style={{ fontSize: 8, color: colors.textDisabled, marginTop: 1 }}>target: {target}{unit || ''}</div>
+      )}
+      {prov.source && (
+        <div style={{ fontSize: 7, color: fColor, marginTop: 1, fontWeight: fontWeight.bold, direction: 'ltr', unicodeBidi: 'embed' }}>
+          {prov.freshness_label || (prov.age_hours != null ? (prov.age_hours < 1 ? 'Just now' : prov.age_hours < 24 ? `${prov.age_hours}h ago` : `${Math.round(prov.age_hours / 24)}d ago`) : 'Never synced')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientCard({ client, runCount, failCount, agentCount, kpis, isActive, onClick, onRefreshMetrics, refreshingMetrics, onDelete }) {
+  const hasFailures = failCount > 0;
+  const b = kpis || {};
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        padding: '14px 18px', borderRadius: radius.lg,
+        border: `2px solid ${isActive ? colors.primary : hasFailures ? '#FECACA' : colors.border}`,
+        background: isActive ? colors.primaryLightest : colors.surface,
+        cursor: 'pointer', transition: transitions.fast, minWidth: 280, maxWidth: 380,
+        flex: '1 1 300px',
+      }}
+      onMouseEnter={e => { if (!isActive) e.currentTarget.style.borderColor = colors.primaryLighter; }}
+      onMouseLeave={e => { if (!isActive) e.currentTarget.style.borderColor = hasFailures ? '#FECACA' : colors.border; }}
+    >
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <div>
+          <div style={{ fontSize: fontSize.base, fontWeight: fontWeight.bold, color: colors.text }}>
+            {client.name}
+          </div>
+          <div style={{ fontSize: 9, color: colors.textDisabled }}>{client.domain}</div>
+        </div>
+        {onRefreshMetrics && (
+          <button
+            onClick={e => { e.stopPropagation(); onRefreshMetrics(client.id); }}
+            disabled={refreshingMetrics}
+            title="Refresh SEO Metrics"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 3, padding: '3px 8px',
+              borderRadius: radius.sm, border: `1px solid ${colors.border}`,
+              background: 'transparent', fontSize: 9, color: colors.primary,
+              cursor: refreshingMetrics ? 'wait' : 'pointer', opacity: refreshingMetrics ? 0.5 : 1,
+            }}
+          >
+            <RefreshCw size={9} style={{ animation: refreshingMetrics ? 'spin 1s linear infinite' : 'none' }} />
+            Metrics
+          </button>
+        )}
+      </div>
+
+      {/* SEO KPI Row */}
+      <div style={{
+        display: 'flex', gap: 8, justifyContent: 'space-between', padding: '8px 0',
+        borderTop: `1px solid ${colors.borderLight}`, borderBottom: `1px solid ${colors.borderLight}`,
+        marginBottom: 8,
+      }}>
+        <KpiMini label="PageSpeed" value={b.mobile_pagespeed} target={b.mobile_pagespeed_target} provenance={b.mobile_pagespeed_prov} color={b.mobile_pagespeed >= 80 ? '#10B981' : b.mobile_pagespeed >= 50 ? '#F59E0B' : b.mobile_pagespeed ? '#EF4444' : null} />
+        <KpiMini label="Page 1 KWs" value={b.page1_keyword_count} target={b.page1_keyword_count_target} provenance={b.page1_keyword_count_prov} color="#6366F1" />
+        <KpiMini label="Reviews" value={b.google_reviews_count} target={b.google_reviews_count_target} provenance={b.google_reviews_count_prov} />
+        <KpiMini label="DA" value={b.domain_authority} target={b.domain_authority_target} provenance={b.domain_authority_prov} />
+      </div>
+
+      {/* Operational stats */}
+      <div style={{ display: 'flex', gap: 12, fontSize: fontSize.xs }}>
+        <span style={{ color: colors.textMuted }}>
+          <span style={{ fontWeight: fontWeight.bold, color: colors.primary }}>{agentCount}</span> agents
+        </span>
+        <span style={{ color: colors.textMuted }}>
+          <span style={{ fontWeight: fontWeight.bold, color: '#10B981' }}>{runCount}</span> runs today
+        </span>
+        {failCount > 0 && (
+          <span style={{ color: '#EF4444', fontWeight: fontWeight.bold }}>
+            {failCount} failed
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Pulse animation ────────────────────────────────────────────
+const pulseKeyframes = `
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+`;
+
+// ═══════════════════════════════════════════════════════════════════
+// ─── MAIN DASHBOARD COMPONENT ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+export default function Dashboard({ clientId, setClientId, clients }) {
+  // ─── State ──────────────────────────────────────────────────────
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
+
+  // Data
+  const [allRuns, setAllRuns] = useState([]);
+  const [allAgents, setAllAgents] = useState([]);
+  const [clientKpis, setClientKpis] = useState({}); // { clientId: { mobile_pagespeed: X, ... } }
+  const [clientTrends, setClientTrends] = useState({}); // { clientId: [{ metric_name, delta_7d, ... }] }
+  const [refreshingMetrics, setRefreshingMetrics] = useState(null); // clientId being refreshed
+  const [refreshResult, setRefreshResult] = useState(null); // { ok: [...], failed: [...] }
+  const [allCredentials, setAllCredentials] = useState([]);
+  const [clientStats, setClientStats] = useState({});
+
+  // UI
+  const [expandedRun, setExpandedRun] = useState(null);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [clientFilter, setClientFilter] = useState('all');
+  const [agentFilter, setAgentFilter] = useState('all');
+  const [metricFilter, setMetricFilter] = useState(null); // KPI metric key clicked
+  const [clientsExpanded, setClientsExpanded] = useState(true);
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [rerunning, setRerunning] = useState(null);
+
+  // ─── Sync sidebar client selector → dashboard filter ─────────
+  useEffect(() => {
+    if (clientId && clients.some(c => c.id === clientId)) {
+      setClientFilter(clientId);
+    }
+  }, [clientId, clients]);
+
+  // ─── Fetch trends when client filter changes ─────────────────
+  useEffect(() => {
+    if (clientFilter && clientFilter !== 'all' && !clientTrends[clientFilter]) {
+      api(`/clients/${clientFilter}/trends`).then(data => {
+        if (Array.isArray(data)) setClientTrends(prev => ({ ...prev, [clientFilter]: data }));
+      }).catch(() => {});
+    }
+  }, [clientFilter]);
+
+  // ─── Data Fetching ────────────────────────────────────────────
+  const fetchAllData = useCallback(async () => {
+    if (!clients || clients.length === 0) { setLoading(false); return; }
+
+    try {
+      const results = await Promise.allSettled(
+        clients.map(async (client) => {
+          const [runs, agents, credentials, baselines] = await Promise.allSettled([
+            api(`/clients/${client.id}/runs?limit=50`),
+            api(`/clients/${client.id}/agents`),
+            api(`/clients/${client.id}/credentials`),
+            api(`/clients/${client.id}/baselines`),
+          ]);
+          return {
+            clientId: client.id,
+            clientName: client.name,
+            runs: runs.status === 'fulfilled' ? runs.value : [],
+            agents: agents.status === 'fulfilled' ? agents.value : [],
+            credentials: credentials.status === 'fulfilled' ? credentials.value : [],
+            baselines: baselines.status === 'fulfilled' ? baselines.value : [],
+          };
+        })
+      );
+
+      const runsAcc = [];
+      const agentsAcc = [];
+      const credsAcc = [];
+      const statsAcc = {};
+      const kpisAcc = {};
+
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue;
+        const data = r.value;
+        const clientRuns = Array.isArray(data.runs) ? data.runs : [];
+        const clientAgents = Array.isArray(data.agents) ? data.agents : [];
+        const clientCreds = Array.isArray(data.credentials) ? data.credentials : [];
+        const clientBaselines = Array.isArray(data.baselines) ? data.baselines : [];
+
+        clientRuns.forEach(run => {
+          run._clientId = data.clientId;
+          run._clientName = data.clientName;
+        });
+        clientAgents.forEach(agent => {
+          agent._clientId = data.clientId;
+          agent._clientName = data.clientName;
+        });
+        clientCreds.forEach(cred => {
+          cred._clientId = data.clientId;
+          cred._clientName = data.clientName;
+        });
+
+        runsAcc.push(...clientRuns);
+        agentsAcc.push(...clientAgents);
+        credsAcc.push(...clientCreds);
+
+        // Build KPI map from baselines (now includes provenance)
+        const kpiMap = {};
+        clientBaselines.forEach(b => {
+          kpiMap[b.metric_name] = b.metric_value;
+          if (b.target_value != null) kpiMap[b.metric_name + '_target'] = b.target_value;
+          if (b.provenance) kpiMap[b.metric_name + '_prov'] = b.provenance;
+        });
+        kpisAcc[data.clientId] = kpiMap;
+
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const todayRuns = clientRuns.filter(r => new Date(r.created_at) >= todayStart);
+
+        statsAcc[data.clientId] = {
+          runsToday: todayRuns.length,
+          failuresToday: todayRuns.filter(r => r.status === 'failed').length,
+          agentCount: clientAgents.length,
+        };
+      }
+
+      // Sort runs by date descending
+      runsAcc.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+      setAllRuns(runsAcc);
+      setAllAgents(agentsAcc);
+      setAllCredentials(credsAcc);
+      setClientStats(statsAcc);
+      setClientKpis(kpisAcc);
+      setLastRefresh(new Date());
+    } catch (e) {
+      console.error('Dashboard fetch error:', e);
+    }
+    setLoading(false);
+  }, [clients]);
+
+  useEffect(() => { fetchAllData(); }, [fetchAllData]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await fetchAllData();
+    setRefreshing(false);
+  };
+
+  const handleRefreshMetrics = async (cId) => {
+    setRefreshingMetrics(cId);
+    setRefreshResult(null);
+    try {
+      const result = await api(`/clients/${cId}/metrics/refresh-all`, { method: 'POST' });
+      if (result?.results) {
+        const updated = { ...(clientKpis[cId] || {}) };
+        const ok = [], failed = [];
+        result.results.forEach(r => {
+          if (r.status === 'ok' && r.value != null) {
+            updated[r.metric] = r.value;
+            ok.push(r.metric.replace(/_/g, ' '));
+          } else if (r.status !== 'ok') {
+            failed.push({ metric: r.metric.replace(/_/g, ' '), reason: r.detail || r.status });
+          }
+        });
+        setClientKpis(prev => ({ ...prev, [cId]: updated }));
+        setRefreshResult({ ok, failed, time: new Date().toLocaleTimeString() });
+        // Reload baselines to get fresh recorded_at timestamps
+        try {
+          const freshBaselines = await api(`/clients/${cId}/baselines`);
+          const kpiMap = {};
+          (freshBaselines || []).forEach(b => {
+            kpiMap[b.metric_name] = b.metric_value;
+            if (b.target_value) kpiMap[b.metric_name + '_target'] = b.target_value;
+            if (b.provenance) kpiMap[b.metric_name + '_prov'] = b.provenance;
+          });
+          setClientKpis(prev => ({ ...prev, [cId]: kpiMap }));
+        } catch (_) {}
+      }
+    } catch (e) {
+      console.error('Metrics refresh failed:', e);
+      setRefreshResult({ ok: [], failed: [{ metric: 'all', reason: e.message }], time: new Date().toLocaleTimeString() });
+    }
+    setRefreshingMetrics(null);
+  };
+
+  const handleRerun = async (run) => {
+    if (!run._clientId || (!run.agent_template_id && !run.agent_id)) return;
+    setRerunning(run.id);
+    try {
+      await api(`/clients/${run._clientId}/runs`, {
+        method: 'POST',
+        body: { agent_template_id: run.agent_template_id || run.agent_id },
+      });
+      // Refresh after a short delay to pick up the new run
+      setTimeout(fetchAllData, 1500);
+    } catch (e) {
+      console.error('Re-run failed:', e);
+    }
+    setRerunning(null);
+  };
+
+  // ─── Computed Values ──────────────────────────────────────────
+  const todayStart = useMemo(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }, []);
+
+  const todayRuns = useMemo(() =>
+    allRuns.filter(r => new Date(r.created_at) >= todayStart),
+    [allRuns, todayStart]
+  );
+
+  const healthScore = useMemo(() => {
+    if (!allRuns.length && !allCredentials.length) return 0;
+    // Credential health (0-100)
+    const validCreds = allCredentials.filter(c => c.status === 'active' || c.status === 'valid' || c.is_valid);
+    const credScore = allCredentials.length > 0 ? (validCreds.length / allCredentials.length) * 100 : 50;
+    // Agent success rate from recent runs (0-100)
+    const recent = allRuns.slice(0, 100);
+    const completed = recent.filter(r => r.status === 'success' || r.status === 'executed' || r.status === 'failed');
+    const succeeded = completed.filter(r => r.status === 'success' || r.status === 'executed');
+    const successRate = completed.length > 0 ? (succeeded.length / completed.length) * 100 : 50;
+    // Freshness -- what % of agents ran in the last 48h
+    const recentAgents = allAgents.filter(a => {
+      const lastRun = a.last_run_at || a.updated_at;
+      return lastRun && (Date.now() - new Date(lastRun).getTime()) < 48 * 60 * 60 * 1000;
+    });
+    const freshnessScore = allAgents.length > 0 ? (recentAgents.length / allAgents.length) * 100 : 50;
+
+    return Math.round(credScore * 0.3 + successRate * 0.5 + freshnessScore * 0.2);
+  }, [allRuns, allAgents, allCredentials]);
+
+  const failedToday = useMemo(() => todayRuns.filter(r => r.status === 'failed').length, [todayRuns]);
+  const runningNow = useMemo(() => allRuns.filter(r => r.status === 'running').length, [allRuns]);
+  const pendingApprovals = useMemo(() => allRuns.filter(r => r.status === 'pending_approval').length, [allRuns]);
+
+  const brokenCredentials = useMemo(() =>
+    allCredentials.filter(c => c.status !== 'active' && c.status !== 'valid' && !c.is_valid),
+    [allCredentials]
+  );
+
+  // Filtered runs
+  const filteredRuns = useMemo(() => {
+    let filtered = allRuns;
+    if (statusFilter !== 'all') {
+      if (statusFilter === 'failed') filtered = filtered.filter(r => r.status === 'failed');
+      else if (statusFilter === 'success') filtered = filtered.filter(r => r.status === 'success' || r.status === 'executed');
+      else if (statusFilter === 'running') filtered = filtered.filter(r => r.status === 'running');
+    }
+    if (clientFilter !== 'all') {
+      filtered = filtered.filter(r => r._clientId === clientFilter);
+    }
+    if (agentFilter !== 'all') {
+      filtered = filtered.filter(r => (r.agent_templates?.name || r.agent_name) === agentFilter);
+    }
+    // Metric-based filter: show only agents relevant to the clicked KPI
+    if (metricFilter && METRIC_AGENTS[metricFilter]) {
+      const relevantAgents = METRIC_AGENTS[metricFilter];
+      filtered = filtered.filter(r => {
+        const agentName = r.agent_templates?.name || r.agent_name || '';
+        return relevantAgents.some(ra => agentName.includes(ra) || ra.includes(agentName));
+      });
+    }
+    return filtered.slice(0, 100);
+  }, [allRuns, statusFilter, clientFilter, agentFilter, metricFilter]);
+
+  // Agents grouped by lane
+  const agentsByLane = useMemo(() => {
+    const map = {};
+    allAgents.forEach(a => {
+      const lane = a.lane || a.agent_templates?.lane || 'Uncategorized';
+      if (!map[lane]) map[lane] = [];
+      map[lane].push(a);
+    });
+    return map;
+  }, [allAgents]);
+
+  // Unique agent names for filter
+  const agentNames = useMemo(() => {
+    const names = new Set();
+    allRuns.forEach(r => {
+      const name = r.agent_templates?.name || r.agent_name;
+      if (name) names.add(name);
+    });
+    return Array.from(names).sort();
+  }, [allRuns]);
+
+  // ─── Loading State ────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div style={{ padding: spacing.xl }}>
+        <style>{pulseKeyframes}</style>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: spacing.xl }}>
+          <Spin />
+          <span style={{ fontSize: fontSize.lg, color: colors.textSecondary }}>Loading Operations Command Center...</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} style={{ height: 70, borderRadius: radius.lg, background: colors.borderLight, animation: 'pulse 1.5s ease-in-out infinite' }} />
+          ))}
+        </div>
+        <div style={{ height: 400, borderRadius: radius.xl, background: colors.borderLight, animation: 'pulse 1.5s ease-in-out infinite' }} />
+      </div>
+    );
+  }
+
+  // ─── No Clients State ─────────────────────────────────────────
+  if (!clients || clients.length === 0) {
+    return (
+      <div style={{ padding: spacing['3xl'], textAlign: 'center' }}>
+        <Users size={48} color={colors.textDisabled} style={{ marginBottom: 16 }} />
+        <div style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text, marginBottom: 8 }}>
+          No Clients Found
+        </div>
+        <div style={{ fontSize: fontSize.sm, color: colors.textSecondary }}>
+          Create your first client to get started with the Operations Command Center.
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Render ───────────────────────────────────────────────────
+  return (
+    <div style={{ maxWidth: 1440, margin: '0 auto' }}>
+      <style>{pulseKeyframes}</style>
+
+      {/* ─── Section 4: CREDENTIAL HEALTH BAR ────────────────────── */}
+      {brokenCredentials.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px',
+          background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: radius.lg,
+          marginBottom: spacing.md,
+        }}>
+          <AlertTriangle size={16} color="#EF4444" />
+          <span style={{ fontSize: fontSize.sm, color: '#991B1B', fontWeight: fontWeight.semibold, flex: 1 }}>
+            {brokenCredentials.length} credential{brokenCredentials.length !== 1 ? 's' : ''} need attention
+          </span>
+          {brokenCredentials.slice(0, 5).map((c, i) => (
+            <CredentialBadge key={i} cred={c} />
+          ))}
+          <button
+            onClick={() => {
+              const services = brokenCredentials.map(c => c.service || c.provider || c.type).filter(Boolean);
+              window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'credentials', service: services[0], brokenServices: services } }));
+            }}
+            style={{
+              fontSize: fontSize.xs, color: '#EF4444', background: 'none', border: '1px solid #FECACA',
+              borderRadius: radius.sm, padding: '4px 10px', cursor: 'pointer', fontWeight: fontWeight.semibold,
+            }}
+          >
+            Fix Now <ArrowRight size={10} style={{ marginLeft: 2 }} />
+          </button>
         </div>
       )}
 
-      {/* Stale data warning */}
-      {!refreshResult && (() => {
-        const staleMetrics = bl.filter(b => {
-          if (!b.recorded_at) return true;
-          const age = Date.now() - new Date(b.recorded_at).getTime();
-          return age > 7 * 24 * 60 * 60 * 1000;
-        });
-        if (staleMetrics.length === 0) return null;
+      {/* Credential strip (when all healthy) */}
+      {brokenCredentials.length === 0 && allCredentials.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '6px 16px',
+          background: colors.surface, border: `1px solid ${colors.borderLight}`, borderRadius: radius.lg,
+          marginBottom: spacing.md, overflowX: 'auto',
+        }}>
+          <Shield size={12} color="#10B981" style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: fontSize.xs, color: '#10B981', fontWeight: fontWeight.semibold, marginRight: 4, whiteSpace: 'nowrap' }}>
+            All credentials healthy
+          </span>
+          {allCredentials.slice(0, 12).map((c, i) => <CredentialBadge key={i} cred={c} />)}
+        </div>
+      )}
+
+      {/* ─── Section 1: SYSTEM HEALTH TOP BAR ────────────────────── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: spacing.lg, padding: '14px 20px',
+        background: colors.surface, borderRadius: radius.xl, border: `1px solid ${colors.border}`,
+        boxShadow: shadows.sm, marginBottom: spacing.md, flexWrap: 'wrap',
+      }}>
+        {/* Health score */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{
+            width: 44, height: 44, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: healthScore >= 80 ? '#D1FAE5' : healthScore >= 50 ? '#FEF3C7' : '#FEE2E2',
+            border: `2px solid ${healthScore >= 80 ? '#10B981' : healthScore >= 50 ? '#F59E0B' : '#EF4444'}`,
+          }}>
+            <span style={{
+              fontSize: fontSize.lg, fontWeight: fontWeight.extrabold, fontFamily: MONO,
+              color: healthScore >= 80 ? '#065F46' : healthScore >= 50 ? '#92400E' : '#991B1B',
+            }}>
+              {healthScore}
+            </span>
+          </div>
+          <div>
+            <div style={{ fontSize: fontSize.xs, color: colors.textDisabled, lineHeight: 1 }}>System Health</div>
+            <div style={{ fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.text }}>
+              {healthScore >= 80 ? 'Healthy' : healthScore >= 50 ? 'Needs Attention' : 'Critical'}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ width: 1, height: 32, background: colors.borderLight }} />
+
+        {/* Stat pills */}
+        <div style={{ display: 'flex', gap: spacing.lg, flexWrap: 'wrap', flex: 1 }}>
+          <StatPill icon={Users} label="Clients" value={clients.length} color={colors.primary} />
+          <StatPill icon={Activity} label="Runs Today" value={todayRuns.length} color="#10B981" />
+          <StatPill icon={XCircle} label="Failed" value={failedToday} color={failedToday > 0 ? '#EF4444' : colors.textDisabled} alert={failedToday > 0} />
+          <StatPill icon={Zap} label="Running" value={runningNow} color={runningNow > 0 ? '#3B82F6' : colors.textDisabled} />
+          <StatPill icon={Clock} label="Pending" value={pendingApprovals} color={pendingApprovals > 0 ? '#F59E0B' : colors.textDisabled} />
+        </div>
+
+        {/* Refresh */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {lastRefresh && (
+            <span style={{ fontSize: 9, color: colors.textDisabled, fontFamily: MONO }}>
+              {lastRefresh.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px',
+              borderRadius: radius.md, border: `1px solid ${colors.border}`,
+              background: colors.surface, fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
+              color: colors.primary, cursor: refreshing ? 'wait' : 'pointer',
+              transition: transitions.fast, opacity: refreshing ? 0.7 : 1,
+            }}
+          >
+            <RefreshCw size={12} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
+            {refreshing ? 'Refreshing...' : 'Refresh All'}
+          </button>
+        </div>
+      </div>
+
+      {/* ─── Section 5: CLIENT OVERVIEW CARDS (Collapsible) ──────── */}
+      <div style={{
+        background: colors.surface, borderRadius: radius.xl, border: `1px solid ${colors.border}`,
+        marginBottom: spacing.md, overflow: 'hidden',
+      }}>
+        <div
+          onClick={() => setClientsExpanded(!clientsExpanded)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px',
+            cursor: 'pointer', transition: transitions.fast,
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = colors.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          {clientsExpanded ? <ChevronDown size={14} color={colors.textMuted} /> : <ChevronRight size={14} color={colors.textMuted} />}
+          <Users size={14} color={colors.primary} />
+          <span style={{ fontSize: fontSize.sm, fontWeight: fontWeight.semibold, color: colors.text }}>
+            Client Overview
+          </span>
+          <span style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>
+            ({clients.length} client{clients.length !== 1 ? 's' : ''})
+          </span>
+        </div>
+        {clientsExpanded && (
+          <div style={{
+            display: 'flex', gap: 10, padding: '0 20px 14px', overflowX: 'auto',
+            flexWrap: 'wrap',
+          }}>
+            {clients.length > 1 && (
+              <ClientCard
+                client={{ name: 'All Clients', domain: 'show everything' }}
+                runCount={todayRuns.length}
+                failCount={failedToday}
+                agentCount={allAgents.length}
+                isActive={clientFilter === 'all'}
+                onClick={() => { setClientFilter('all'); if (setClientId) setClientId(''); }}
+              />
+            )}
+            {clients.map(c => (
+              <ClientCard
+                key={c.id}
+                client={c}
+                runCount={clientStats[c.id]?.runsToday || 0}
+                failCount={clientStats[c.id]?.failuresToday || 0}
+                agentCount={clientStats[c.id]?.agentCount || 0}
+                kpis={clientKpis[c.id]}
+                isActive={clientFilter === c.id}
+                onClick={() => { const next = clientFilter === c.id ? 'all' : c.id; setClientFilter(next); if (setClientId) setClientId(next === 'all' ? '' : next); }}
+                onRefreshMetrics={handleRefreshMetrics}
+                refreshingMetrics={refreshingMetrics === c.id}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Section 6: SELECTED CLIENT KPI PANEL ─────────────────── */}
+      {clientFilter !== 'all' && (() => {
+        const selClient = clients.find(c => c.id === clientFilter);
+        const kpi = clientKpis[clientFilter] || {};
+        const hasKpis = Object.keys(kpi).length > 0;
         return (
           <div style={{
-            display: 'flex', alignItems: 'center', gap: spacing.sm,
-            background: '#FEF3C7', border: '1px solid #FDE68A',
-            borderRadius: radius.lg, padding: `${spacing.sm}px ${spacing.lg}px`,
-            marginBottom: spacing.lg, fontSize: fontSize.sm, color: '#92400E',
+            background: colors.surface, borderRadius: radius.xl, border: `1px solid ${colors.primary}33`,
+            marginBottom: spacing.md, padding: '16px 24px',
           }}>
-            <AlertTriangle size={14} />
-            <span><strong>{staleMetrics.length} metrics</strong> haven't been updated recently.</span>
-            <Btn small onClick={refreshAllMetrics} disabled={refreshingAll} style={{ marginLeft: 'auto', fontSize: fontSize.xs }} ariaLabel="Refresh all metrics">
-              {refreshingAll ? <Spin /> : <Zap size={11} />} {refreshingAll ? 'Checking...' : 'Refresh All Now'}
-            </Btn>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <TrendingUp size={16} color={colors.primary} />
+                <span style={{ fontSize: fontSize.base, fontWeight: fontWeight.bold, color: colors.text }}>
+                  {selClient?.name} — SEO Growth Dashboard
+                </span>
+                <span style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>{selClient?.domain}</span>
+              </div>
+              <button
+                onClick={() => handleRefreshMetrics(clientFilter)}
+                disabled={refreshingMetrics === clientFilter}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 4, padding: '6px 14px',
+                  borderRadius: radius.md, border: `1px solid ${colors.primary}44`,
+                  background: colors.primaryLightest, fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
+                  color: colors.primary, cursor: refreshingMetrics === clientFilter ? 'wait' : 'pointer',
+                }}
+              >
+                <RefreshCw size={11} style={{ animation: refreshingMetrics === clientFilter ? 'spin 1s linear infinite' : 'none' }} />
+                {refreshingMetrics === clientFilter ? 'Refreshing...' : 'Refresh All Metrics'}
+              </button>
+            </div>
+            {/* Refresh result summary */}
+            {refreshResult && (
+              <div style={{
+                marginBottom: 12, padding: '8px 14px', borderRadius: radius.md,
+                background: refreshResult.failed.length > 0 ? '#FEF3C7' : '#D1FAE5',
+                border: `1px solid ${refreshResult.failed.length > 0 ? '#F59E0B' : '#10B981'}33`,
+                fontSize: fontSize.xs, lineHeight: 1.5,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    {refreshResult.ok.length > 0 && (
+                      <span style={{ color: '#059669' }}>
+                        <CheckCircle size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />
+                        Updated: {refreshResult.ok.join(', ')}
+                      </span>
+                    )}
+                    {refreshResult.failed.length > 0 && (
+                      <div style={{ color: '#B45309', marginTop: refreshResult.ok.length > 0 ? 4 : 0 }}>
+                        <AlertTriangle size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />
+                        Not updated: {refreshResult.failed.map(f => `${f.metric} (${f.reason})`).join(', ')}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => setRefreshResult(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9CA3AF', fontSize: 16 }}>&times;</button>
+                </div>
+              </div>
+            )}
+            {hasKpis ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12 }}>
+                {(() => {
+                  const trends = clientTrends[clientFilter] || [];
+                  const trendMap = {};
+                  trends.forEach(t => { trendMap[t.metric_name] = t; });
+                  return [
+                  { key: 'mobile_pagespeed', label: 'Mobile PageSpeed', unit: '/100', color: kpi.mobile_pagespeed >= 80 ? '#10B981' : kpi.mobile_pagespeed >= 50 ? '#F59E0B' : '#EF4444' },
+                  { key: 'desktop_pagespeed', label: 'Desktop PageSpeed', unit: '/100' },
+                  { key: 'page1_keyword_count', label: 'Page 1 Keywords', color: '#6366F1' },
+                  { key: 'google_reviews_count', label: 'Google Reviews' },
+                  { key: 'google_reviews_rating', label: 'Google Rating', unit: '/5' },
+                  { key: 'domain_authority', label: 'Domain Authority', color: '#8B5CF6' },
+                  { key: 'referring_domains_count', label: 'Referring Domains' },
+                  { key: 'indexed_pages', label: 'Indexed Pages' },
+                  { key: 'local_3pack_present', label: 'Local 3-Pack' },
+                ].filter(m => kpi[m.key] != null).map(m => {
+                  const prov = kpi[m.key + '_prov'];
+                  const trend = trendMap[m.key];
+                  const FRESHNESS_COLORS = { fresh: '#10B981', aging: '#F59E0B', stale: '#F97316', critical_stale: '#EF4444', never_synced: '#9CA3AF' };
+                  return (
+                    <div key={m.key} onClick={() => setMetricFilter(metricFilter === m.key ? null : m.key)} style={{
+                      padding: '12px 14px', borderRadius: radius.lg,
+                      background: metricFilter === m.key ? (colors.primaryLightest || '#EEF2FF') : (colors.backgroundAlt || '#F9FAFB'),
+                      border: `2px solid ${metricFilter === m.key ? colors.primary : prov ? (FRESHNESS_COLORS[prov.freshness] || colors.borderLight) + '33' : colors.borderLight}`,
+                      textAlign: 'center', cursor: 'pointer', transition: transitions.fast,
+                    }}>
+                      <div style={{
+                        fontSize: fontSize.xl, fontWeight: fontWeight.extrabold, fontFamily: MONO,
+                        color: m.color || colors.text, lineHeight: 1.2,
+                      }}>
+                        {m.key === 'local_3pack_present' ? (kpi[m.key] ? 'Yes' : 'No') : kpi[m.key]}{m.unit || ''}
+                      </div>
+                      <div style={{ fontSize: fontSize.xs, color: colors.textMuted, marginTop: 4 }}>{m.label}</div>
+                      {/* Trend indicators */}
+                      {trend && (trend.delta_7d != null || trend.delta_30d != null) && (
+                        <div style={{ display: 'flex', justifyContent: 'center', gap: 6, marginTop: 4, fontSize: 9, fontWeight: 600 }}>
+                          {trend.delta_7d != null && (
+                            <span style={{ color: trend.delta_7d > 0 ? '#10B981' : trend.delta_7d < 0 ? '#EF4444' : '#9CA3AF' }}>
+                              7d: {trend.delta_7d > 0 ? '+' : ''}{trend.delta_7d}{trend.pct_7d != null ? ` (${trend.pct_7d > 0 ? '+' : ''}${trend.pct_7d}%)` : ''}
+                            </span>
+                          )}
+                          {trend.delta_30d != null && (
+                            <span style={{ color: trend.delta_30d > 0 ? '#10B981' : trend.delta_30d < 0 ? '#EF4444' : '#9CA3AF' }}>
+                              30d: {trend.delta_30d > 0 ? '+' : ''}{trend.delta_30d}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {kpi[m.key + '_target'] != null && (
+                        <div style={{ fontSize: 9, color: colors.textDisabled, marginTop: 2 }}>
+                          Target: {kpi[m.key + '_target']}{m.unit || ''}
+                        </div>
+                      )}
+                      {/* Provenance line */}
+                      {prov && (
+                        <div style={{
+                          marginTop: 6, paddingTop: 6, borderTop: `1px solid ${colors.borderLight}`,
+                          fontSize: 9, lineHeight: 1.4, textAlign: 'left', direction: 'ltr',
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <span style={{ color: colors.textDisabled }}>Source</span>
+                            <span style={{ color: colors.textMuted, maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prov.source}</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 1 }}>
+                            <span style={{ color: colors.textDisabled }}>Synced</span>
+                            <span style={{ color: colors.textMuted }}>{prov.age_hours != null ? (prov.age_hours < 1 ? 'Just now' : prov.age_hours < 24 ? `${prov.age_hours}h ago` : `${Math.round(prov.age_hours / 24)} days ago`) : 'Never'}</span>
+                          </div>
+                          <div style={{
+                            display: 'inline-block', marginTop: 3,
+                            padding: '1px 6px', borderRadius: 4,
+                            fontSize: 8, fontWeight: 700,
+                            background: (FRESHNESS_COLORS[prov.freshness] || '#9CA3AF') + '18',
+                            color: FRESHNESS_COLORS[prov.freshness] || '#9CA3AF',
+                          }}>
+                            {prov.freshness_label}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }); })()}
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '20px 0', color: colors.textDisabled, fontSize: fontSize.sm }}>
+                No metrics yet. Click "Refresh All Metrics" to fetch real data from Google, DataForSEO, and other APIs.
+              </div>
+            )}
           </div>
         );
       })()}
 
-      {/* KPI Row 1 */}
-      <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <KpiWithDate baseline={bm.google_reviews_count} label="Google Reviews" color={colors.accent} target />
-        <KpiWithDate baseline={bm.lawreviews_count} label="LawReviews" color={colors.success}
-          sub={bm.lawreviews_rating?.metric_value ? `★ ${bm.lawreviews_rating.metric_value}` : undefined} />
-        <KpiWithDate baseline={bm.mobile_pagespeed} label="Mobile PageSpeed" target
-          color={(bm.mobile_pagespeed?.metric_value || 0) >= 80 ? colors.success : colors.error} suffix="/100" />
-        <KpiWithDate baseline={bm.page1_keyword_count} label="Page 1 Keywords" color={colors.primary} target />
-      </div>
-
-      {/* KPI Row 2 */}
-      <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 20 }}>
-        <KpiCard label="Local 3-Pack" value={bm.local_3pack_present?.metric_value != null ? (bm.local_3pack_present.metric_value === 1 ? '✓ Yes' : '✗ No') : undefined} color={bm.local_3pack_present?.metric_value === 1 ? colors.success : colors.error} />
-        <KpiWithDate baseline={bm.indexed_pages} label="Indexed Pages" color={colors.info} target />
-        <KpiWithDate baseline={bm.referring_domains_count} label="Referring Domains" color="#8B5CF6" target />
-        <KpiWithDate baseline={bm.domain_authority} label="Domain Authority" color="#06B6D4" target />
-      </div>
-
-      {/* Stats Row */}
-      {stats && (
-        <div className="grid-responsive-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 20 }}>
-          <Card style={{ padding: '14px 16px' }}>
-            <div style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>7-Day Runs</div>
-            <div style={{ fontSize: 22, fontWeight: fontWeight.bold }}>{stats.run_stats?.total_runs ?? 0}</div>
-          </Card>
-          <Card style={{ padding: '14px 16px' }}>
-            <div style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>Success Rate</div>
-            <div style={{ fontSize: 22, fontWeight: fontWeight.bold, color: colors.success }}>{stats.run_stats?.success_rate ?? 0}%</div>
-          </Card>
-          <Card style={{ padding: '14px 16px' }}>
-            <div style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>Open Incidents</div>
-            <div style={{ fontSize: 22, fontWeight: fontWeight.bold, color: inc.length > 0 ? colors.error : colors.success }}>{inc.length}</div>
-          </Card>
-          <Card style={{ padding: '14px 16px' }}>
-            <div style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>Memory Items</div>
-            <div style={{ fontSize: 22, fontWeight: fontWeight.bold, color: colors.primary }}>{stats.memory_count ?? 0}</div>
-          </Card>
-        </div>
-      )}
-
-      {/* Quick Actions — Customer Setup Link */}
-      <Card style={{ marginBottom: 20, background: colors.primaryLightest, borderColor: colors.primaryLighter }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.primary, marginBottom: 2 }}>
-              <Send size={14} style={{ marginRight: 6 }} />Customer Setup Link
-            </div>
-            <div style={{ fontSize: fontSize.sm, color: colors.textSecondary }}>
-              Send your client a magic link to connect their Google, Meta, website and other digital assets.
+      {/* ─── Main Content: Activity Feed + Agent Sidebar ─────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: spacing.md, alignItems: 'start' }}>
+        {/* ─── Section 2: RECENT ACTIVITY FEED ─────────────────────── */}
+        <div style={{
+          background: colors.surface, borderRadius: radius.xl, border: `1px solid ${colors.border}`,
+          boxShadow: shadows.sm, overflow: 'hidden', minHeight: 400,
+        }}>
+          {/* Header + Filters */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '14px 20px',
+            borderBottom: `1px solid ${colors.borderLight}`, flexWrap: 'wrap',
+          }}>
+            <Activity size={16} color={colors.primary} />
+            <span style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text }}>
+              Activity Feed
+            </span>
+            <span style={{ fontSize: fontSize.xs, color: colors.textDisabled, fontFamily: MONO }}>
+              {filteredRuns.length} runs
+            </span>
+            <div style={{ flex: 1 }} />
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              <FilterPill label="All" active={statusFilter === 'all'} onClick={() => setStatusFilter('all')} />
+              <FilterPill label="Failed" active={statusFilter === 'failed'} onClick={() => setStatusFilter(statusFilter === 'failed' ? 'all' : 'failed')} />
+              <FilterPill label="Success" active={statusFilter === 'success'} onClick={() => setStatusFilter(statusFilter === 'success' ? 'all' : 'success')} />
+              <FilterPill label="Running" active={statusFilter === 'running'} onClick={() => setStatusFilter(statusFilter === 'running' ? 'all' : 'running')} />
             </div>
           </div>
-          <Btn onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'setup-links' }))} color={colors.primary}>
-            <Link2 size={13} /> Create Setup Link
-          </Btn>
+
+          {/* Client + Agent filters */}
+          {(clients.length > 1 || agentNames.length > 1) && (
+            <div style={{
+              display: 'flex', gap: 8, padding: '8px 20px', borderBottom: `1px solid ${colors.borderLight}`,
+              alignItems: 'center', flexWrap: 'wrap',
+            }}>
+              <Filter size={11} color={colors.textDisabled} />
+              {clients.length > 1 && (
+                <select
+                  value={clientFilter}
+                  onChange={e => { const v = e.target.value === 'all' ? 'all' : e.target.value; setClientFilter(v); if (setClientId) setClientId(v === 'all' ? '' : v); }}
+                  style={{
+                    fontSize: fontSize.xs, padding: '3px 8px', borderRadius: radius.sm,
+                    border: `1px solid ${colors.border}`, background: colors.surface, color: colors.text,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <option value="all">All Clients</option>
+                  {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              )}
+              {agentNames.length > 1 && (
+                <select
+                  value={agentFilter}
+                  onChange={e => setAgentFilter(e.target.value)}
+                  style={{
+                    fontSize: fontSize.xs, padding: '3px 8px', borderRadius: radius.sm,
+                    border: `1px solid ${colors.border}`, background: colors.surface, color: colors.text,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <option value="all">All Agents</option>
+                  {agentNames.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              )}
+              {(clientFilter !== 'all' || agentFilter !== 'all' || statusFilter !== 'all' || metricFilter) && (
+                <button
+                  onClick={() => { setClientFilter('all'); setAgentFilter('all'); setStatusFilter('all'); setMetricFilter(null); }}
+                  style={{
+                    fontSize: fontSize.xs, color: colors.textMuted, background: 'none',
+                    border: 'none', cursor: 'pointer', textDecoration: 'underline',
+                  }}
+                >
+                  Clear filters
+                </button>
+              )}
+              {metricFilter && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '3px 10px', borderRadius: radius.md,
+                  background: colors.primaryLightest, border: `1px solid ${colors.primary}44`,
+                  fontSize: fontSize.xs, color: colors.primary, fontWeight: fontWeight.bold,
+                }}>
+                  Showing agents for: {metricFilter.replace(/_/g, ' ')}
+                  <button onClick={() => setMetricFilter(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: colors.primary, fontWeight: 'bold', fontSize: 14, lineHeight: 1 }}>&times;</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Run list */}
+          <div style={{ maxHeight: 'calc(100vh - 360px)', overflowY: 'auto' }}>
+            {filteredRuns.length === 0 && (
+              <div style={{ padding: spacing['2xl'], textAlign: 'center', color: colors.textDisabled }}>
+                <Activity size={24} style={{ marginBottom: 8, opacity: 0.4 }} />
+                <div style={{ fontSize: fontSize.sm }}>
+                  {statusFilter !== 'all' || clientFilter !== 'all'
+                    ? 'No runs match the current filters'
+                    : 'No agent runs found yet'}
+                </div>
+              </div>
+            )}
+            {filteredRuns.map(run => (
+              <RunRow
+                key={run.id}
+                run={run}
+                clientName={run._clientName}
+                expanded={expandedRun === run.id}
+                onToggle={() => setExpandedRun(expandedRun === run.id ? null : run.id)}
+                onRerun={handleRerun}
+              />
+            ))}
+          </div>
         </div>
-      </Card>
 
-      {/* Two-column: Recent Runs + Open Incidents */}
-      <div className="grid-responsive-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 }}>
-        <Card>
-          <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.semibold, marginBottom: 14 }}>Recent Runs</div>
-          {runs.slice(0, 8).map(r => (
-            <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: `1px solid ${colors.borderLight}` }}>
-              <Dot s={r.status} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: fontSize.sm, fontWeight: fontWeight.semibold, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.agent_templates?.name}</div>
-                <div style={{ fontSize: fontSize.xs, color: colors.textDisabled }}>{new Date(r.created_at).toLocaleString()}</div>
-              </div>
-              <Badge text={r.status} color={colors.status[r.status]} bg={colors.status[r.status] + '22'} />
-            </div>
-          ))}
-          {runs.length === 0 && <div style={{ fontSize: fontSize.sm, color: colors.textDisabled, padding: '10px 0' }}>No runs yet</div>}
-        </Card>
+        {/* ─── Section 3: AGENT STATUS GRID (Sidebar) ────────────── */}
+        <div style={{
+          background: colors.surface, borderRadius: radius.xl, border: `1px solid ${colors.border}`,
+          boxShadow: shadows.sm, overflow: 'hidden',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8, padding: '14px 16px',
+            borderBottom: `1px solid ${colors.borderLight}`,
+          }}>
+            <Layers size={14} color={colors.primary} />
+            <span style={{ fontSize: fontSize.md, fontWeight: fontWeight.bold, color: colors.text }}>
+              Agent Status
+            </span>
+            <span style={{ fontSize: fontSize.xs, color: colors.textDisabled, fontFamily: MONO }}>
+              {allAgents.length}
+            </span>
+          </div>
 
-        <Card>
-          <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.semibold, marginBottom: 14 }}>Open Incidents</div>
-          {inc.slice(0, 6).map(i => (
-            <div key={i.id} style={{ padding: '8px 0', borderBottom: `1px solid ${colors.borderLight}` }}>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <Badge text={i.severity} color={colors.severity[i.severity]?.color} bg={colors.severity[i.severity]?.bg} />
-                <span style={{ fontSize: fontSize.sm, fontWeight: fontWeight.semibold, flex: 1 }}>{i.title}</span>
+          <div style={{ maxHeight: 'calc(100vh - 360px)', overflowY: 'auto', padding: '4px 0' }}>
+            {Object.keys(agentsByLane).length === 0 && (
+              <div style={{ padding: spacing.xl, textAlign: 'center', color: colors.textDisabled, fontSize: fontSize.sm }}>
+                No agents configured
               </div>
-            </div>
-          ))}
-          {inc.length === 0 && <div style={{ fontSize: fontSize.sm, color: colors.success, padding: '10px 0' }}>{'\u2713'} No open incidents</div>}
-        </Card>
+            )}
+            {Object.entries(agentsByLane).map(([lane, agents]) => {
+              const laneColor = LANE_COLORS[lane] || colors.textMuted;
+              return (
+                <div key={lane} style={{ marginBottom: 4 }}>
+                  <div style={{
+                    padding: '6px 16px', fontSize: 9, fontWeight: fontWeight.bold,
+                    color: laneColor, textTransform: 'uppercase', letterSpacing: 0.8,
+                    borderLeft: `3px solid ${laneColor}`, marginLeft: 8,
+                  }}>
+                    {lane}
+                  </div>
+                  {agents.map(agent => (
+                    <AgentCard
+                      key={agent.id}
+                      agent={agent}
+                      onClick={() => {
+                        setSelectedAgent(selectedAgent === agent.id ? null : agent.id);
+                      }}
+                    />
+                  ))}
+                  {/* Expanded agent detail */}
+                  {agents.filter(a => selectedAgent === a.id).map(agent => (
+                    <div key={`detail-${agent.id}`} style={{
+                      margin: '0 8px 8px', padding: '10px 12px', borderRadius: radius.md,
+                      background: colors.surfaceHover, border: `1px solid ${colors.borderLight}`,
+                    }}>
+                      <div style={{ fontSize: fontSize.xs, color: colors.textSecondary, marginBottom: 6 }}>
+                        <strong>{agent.name || agent.agent_templates?.name}</strong>
+                        {agent._clientName && <span style={{ color: colors.textDisabled }}> - {agent._clientName}</span>}
+                      </div>
+                      {agent.description && (
+                        <div style={{ fontSize: fontSize.xs, color: colors.textMuted, marginBottom: 6, lineHeight: 1.4 }}>
+                          {agent.description}
+                        </div>
+                      )}
+                      <div style={{ fontSize: 9, fontFamily: MONO, color: colors.textDisabled, marginBottom: 8 }}>
+                        Last: {relativeTime(agent.last_run_at || agent.updated_at)}
+                        {agent.schedule && <span> | Schedule: {agent.schedule}</span>}
+                      </div>
+                      {agent.last_error && (
+                        <div style={{
+                          fontSize: fontSize.xs, color: '#991B1B', background: '#FEF2F2',
+                          borderRadius: radius.sm, padding: '4px 8px', marginBottom: 6,
+                          fontFamily: MONO, wordBreak: 'break-word',
+                        }}>
+                          {String(agent.last_error).slice(0, 200)}
+                        </div>
+                      )}
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api(`/clients/${agent._clientId}/runs`, {
+                              method: 'POST',
+                              body: { agent_template_id: agent.agent_template_id || agent.id },
+                            });
+                            setTimeout(fetchAllData, 1500);
+                          } catch (e) {
+                            console.error('Trigger run failed:', e);
+                          }
+                        }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px',
+                          borderRadius: radius.sm, border: `1px solid ${colors.primary}`,
+                          background: colors.primaryLightest, color: colors.primary,
+                          fontSize: fontSize.xs, fontWeight: fontWeight.semibold, cursor: 'pointer',
+                          transition: transitions.fast,
+                        }}
+                      >
+                        <Play size={10} /> Trigger Run
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Responsive override for mobile */}
+      <style>{`
+        @media (max-width: 900px) {
+          div[style*="grid-template-columns: 1fr 380px"] {
+            grid-template-columns: 1fr !important;
+          }
+        }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// ─── Small stat pill for top bar ────────────────────────────────
+function StatPill({ icon: Icon, label, value, color, alert }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <Icon size={14} color={color} />
+      <div>
+        <div style={{ fontSize: 9, color: colors.textDisabled, lineHeight: 1 }}>{label}</div>
+        <div style={{
+          fontSize: fontSize.md, fontWeight: fontWeight.extrabold, fontFamily: MONO,
+          color: color, lineHeight: 1.2,
+        }}>
+          {value}
+        </div>
       </div>
     </div>
   );

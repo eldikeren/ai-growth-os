@@ -19,7 +19,7 @@ const FIX_CONFIG = {
   },
   recent_run: {
     label: 'Run Agent Now',
-    description: 'No successful run in 48h. Click to queue a fresh agent run immediately.',
+    description: 'No successful run in 48h. Click to queue a fresh agent run — it will take 1-2 minutes to complete. Check the Runs view for progress. This check will pass once the run finishes successfully.',
     icon: '▶️',
     autoFix: true,
   },

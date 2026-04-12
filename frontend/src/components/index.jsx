@@ -383,7 +383,7 @@ export function SortableTable({ columns, data, onBulkAction, bulkActions = [], e
         </div>
       )}
       <div style={{ overflowX: 'auto' }} role="region" aria-label="Data table" tabIndex={0}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: fontSize.sm }}>
+        <table dir="rtl" style={{ width: '100%', borderCollapse: 'collapse', fontSize: fontSize.sm }}>
           <thead>
             <tr>
               {bulkActions.length > 0 && (
@@ -394,7 +394,7 @@ export function SortableTable({ columns, data, onBulkAction, bulkActions = [], e
               {columns.map(col => (
                 <th key={col.key} onClick={col.sortable !== false ? () => handleSort(col.key) : undefined}
                   style={{
-                    padding: '12px 14px', textAlign: 'left', fontWeight: fontWeight.bold,
+                    padding: '12px 14px', textAlign: 'start', fontWeight: fontWeight.bold,
                     color: colors.textSecondary, borderBottom: `2px solid ${colors.border}`,
                     background: colors.surfaceHover, cursor: col.sortable !== false ? 'pointer' : 'default',
                     userSelect: 'none', whiteSpace: 'nowrap', fontSize: fontSize.xs,

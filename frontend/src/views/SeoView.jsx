@@ -34,8 +34,9 @@ function KeywordsTab({ data }) {
       key: 'keyword',
       label: 'Keyword',
       sortable: true,
+      style: { minWidth: 180, textAlign: 'right' },
       render: (row) => (
-        <span style={{ fontWeight: fontWeight.semibold, direction: 'rtl', display: 'inline-block' }}>
+        <span style={{ fontWeight: fontWeight.semibold, direction: 'rtl', display: 'inline-block', unicodeBidi: 'embed' }}>
           {row.keyword}
         </span>
       ),

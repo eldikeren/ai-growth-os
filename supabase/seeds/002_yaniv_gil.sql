@@ -190,7 +190,8 @@ WHERE slug IN (
   'competitor-intelligence-agent', 'facebook-agent', 'instagram-agent',
   'legal-agent', 'innovation-agent', 'design-enforcement-agent',
   'hebrew-quality-agent', 'regression-agent', 'credential-health-agent',
-  'kpi-integrity-agent', 'report-composer-agent'
+  'kpi-integrity-agent', 'report-composer-agent',
+  'geo-ai-visibility-agent', 'content-distribution-agent'
 );
 
 -- DEFAULT SCHEDULES for key agents
@@ -211,6 +212,8 @@ FROM (VALUES
   ('master-orchestrator', '0 6 * * *', '{"triggered_by": "schedule", "period": "daily"}'),
   ('report-composer-agent', '0 10 1 * *', '{"triggered_by": "schedule", "period": "monthly"}'),
   ('facebook-agent', '0 8 * * 0', '{"triggered_by": "schedule", "period": "weekly"}'),
-  ('instagram-agent', '0 8 * * 0', '{"triggered_by": "schedule", "period": "weekly"}')
+  ('instagram-agent', '0 8 * * 0', '{"triggered_by": "schedule", "period": "weekly"}'),
+  ('geo-ai-visibility-agent', '0 10 * * 3', '{"triggered_by": "schedule", "period": "weekly"}'),
+  ('content-distribution-agent', '0 11 * * 0', '{"triggered_by": "schedule", "period": "weekly"}')
 ) AS s(slug, cron_expr, payload)
 JOIN agent_templates at ON at.slug = s.slug;

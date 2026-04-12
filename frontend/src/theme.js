@@ -62,7 +62,7 @@ export const colors = {
   status: {
     success: '#10B981', failed: '#EF4444', running: '#6366F1',
     pending_approval: '#F59E0B', dry_run: '#8B5CF6', queued: '#6B7280',
-    executed: '#10B981', cancelled: '#9CA3AF', blocked_dependency: '#F97316',
+    partial: '#F97316', executed: '#10B981', cancelled: '#9CA3AF', blocked_dependency: '#F97316',
     open: '#EF4444', investigating: '#F59E0B', resolved: '#10B981',
     dismissed: '#9CA3AF', pending: '#F59E0B', approved: '#10B981', rejected: '#EF4444',
   },
@@ -141,6 +141,7 @@ export const NAV_GROUPS = [
     label: 'Overview',
     items: [
       { id: 'dashboard', label: 'Dashboard', emoji: '📊' },
+      { id: 'system-audit', label: 'System Audit', emoji: '🔬' },
       { id: 'verification', label: 'Verification', emoji: '✅' },
       { id: 'credentials', label: 'Credentials', emoji: '🔑' },
     ],
@@ -174,7 +175,6 @@ export const NAV_GROUPS = [
   {
     label: 'Settings',
     items: [
-      { id: 'connectors', label: 'Connectors', emoji: '🔌' },
       { id: 'website-access', label: 'Website Access', emoji: '🌐' },
       { id: 'setup-links', label: 'Setup Links', emoji: '⚡' },
       { id: 'incidents', label: 'Incidents', emoji: '🚨' },

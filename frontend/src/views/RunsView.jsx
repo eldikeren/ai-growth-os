@@ -120,7 +120,9 @@ function parseAgentOutput(output) {
     'technical_issues', 'issues', 'competitor_analysis', 'competitors', 'methodology',
     'scoring_methodology', 'data_sources', 'changes_made', 'metrics', 'scores', 'score_breakdown',
   ]);
-  const extraKeys = Object.keys(data).filter(k => !knownKeys.has(k));
+  // Filter out internal/system keys and collect extras
+  const internalKeys = new Set(['_truth_gate', '_meta', '_debug', '_raw', '_agent_config']);
+  const extraKeys = Object.keys(data).filter(k => !knownKeys.has(k) && !internalKeys.has(k) && !k.startsWith('_'));
   if (extraKeys.length > 0) {
     sections.extra = {};
     extraKeys.forEach(k => { sections.extra[k] = data[k]; });
@@ -340,24 +342,24 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
                   background: laneColor, display: 'inline-block',
                   boxShadow: `0 0 8px ${laneColor}`,
                 }} />
-                <span style={{ fontSize: fontSize.xs, color: colors.textMuted, fontWeight: fontWeight.medium }}>{agentLane}</span>
+                <span style={{ fontSize: fontSize.xs, color: colors.textSecondary, fontWeight: fontWeight.medium }}>{agentLane}</span>
               </div>
               <h2 style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, color: colors.text, margin: 0 }}>
                 {agentName}
               </h2>
               <div style={{ display: 'flex', gap: spacing.md, marginTop: spacing.sm, flexWrap: 'wrap' }}>
                 <Badge text={run.status} color={colors.status[run.status]} bg={(colors.status[run.status] || colors.textDisabled) + '22'} />
-                <span style={{ fontSize: fontSize.xs, color: colors.textMuted }}>
+                <span style={{ fontSize: fontSize.xs, color: colors.textSecondary }}>
                   <Clock size={11} style={{ verticalAlign: 'middle', marginRight: 3 }} />
                   {new Date(run.created_at).toLocaleString()}
                 </span>
                 {run.duration_ms && (
-                  <span style={{ fontSize: fontSize.xs, color: colors.textMuted }}>
+                  <span style={{ fontSize: fontSize.xs, color: colors.textSecondary }}>
                     Duration: {run.duration_ms > 60000 ? `${Math.round(run.duration_ms / 60000)}m` : `${Math.round(run.duration_ms / 1000)}s`}
                   </span>
                 )}
                 {run.tokens_used && (
-                  <span style={{ fontSize: fontSize.xs, color: colors.textMuted }}>
+                  <span style={{ fontSize: fontSize.xs, color: colors.textSecondary }}>
                     {run.tokens_used.toLocaleString()} tokens
                   </span>
                 )}
@@ -371,6 +373,50 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
               <X size={16} color={colors.textMuted} />
             </button>
           </div>
+
+          {/* Truth Gate — confidence, completeness, missing sources */}
+          {run.output?._truth_gate && (() => {
+            const tg = run.output._truth_gate;
+            const confColor = { high: '#10B981', medium: '#F59E0B', low: '#F97316', very_low: '#EF4444' }[tg.confidence] || '#9CA3AF';
+            const compColor = tg.data_completeness_percent >= 70 ? '#10B981' : tg.data_completeness_percent >= 50 ? '#F59E0B' : '#EF4444';
+            return (
+              <div style={{
+                marginTop: spacing.lg, padding: spacing.md,
+                background: confColor + '0A', border: `1px solid ${confColor}33`,
+                borderRadius: radius.lg,
+              }}>
+                <div style={{ display: 'flex', gap: spacing.lg, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+                  <span style={{
+                    padding: '3px 10px', borderRadius: radius.full, fontSize: 10, fontWeight: 800,
+                    textTransform: 'uppercase', background: confColor + '20', color: confColor,
+                  }}>
+                    {tg.confidence} confidence
+                  </span>
+                  <span style={{ fontSize: 11, color: compColor, fontWeight: 700 }}>
+                    Data: {tg.data_completeness_percent}%
+                  </span>
+                  <span style={{ fontSize: 10, color: colors.textMuted }}>
+                    {tg.measured_findings_count} measured · {tg.inferred_recommendations_count} inferred
+                  </span>
+                  {tg.data_sources_used?.length > 0 && (
+                    <span style={{ fontSize: 10, color: colors.textMuted }}>
+                      Sources: {tg.data_sources_used.map(s => s.source).join(', ')}
+                    </span>
+                  )}
+                </div>
+                {tg.missing_sources?.length > 0 && (
+                  <div style={{ fontSize: 10, color: '#EF4444', marginBottom: 4 }}>
+                    Missing: {tg.missing_sources.map(s => s.source).join(', ')}
+                  </div>
+                )}
+                {tg.why_this_may_be_incomplete?.length > 0 && (
+                  <div style={{ fontSize: 10, color: colors.textMuted, lineHeight: 1.5 }}>
+                    {tg.why_this_may_be_incomplete.map((w, i) => <div key={i}>• {w}</div>)}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Score + summary strip */}
           {sections && (sections.healthScore != null || sections.summary) && (
@@ -418,7 +464,7 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
 
           {!sections && run.output && (
             <div>
-              <div style={{ fontSize: fontSize.md, color: colors.textMuted, marginBottom: spacing.md }}>
+              <div style={{ fontSize: fontSize.md, color: colors.textSecondary, marginBottom: spacing.md }}>
                 No structured data detected. Showing raw output:
               </div>
               <pre style={{
@@ -437,6 +483,24 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
               {/* ─── INSIGHTS TAB ─────────────────────── */}
               {tab === 'insights' && (
                 <div>
+                  {/* Auto-generated overview when no explicit summary */}
+                  {!sections.summary && sections.extra && Object.keys(sections.extra).length > 0 && (
+                    <div style={{
+                      marginBottom: spacing['2xl'], padding: spacing.lg,
+                      background: colors.primaryLightest, borderRadius: radius.lg,
+                      border: `1px solid ${colors.primaryLighter}`,
+                    }}>
+                      <h3 style={{ fontSize: fontSize.md, fontWeight: fontWeight.bold, color: colors.primary, marginBottom: spacing.sm, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Sparkles size={16} /> What This Agent Found
+                      </h3>
+                      <div style={{ fontSize: fontSize.sm, color: colors.textSecondary, lineHeight: 1.6 }}>
+                        This run analyzed <strong>{Object.keys(sections.extra).length} areas</strong>:{' '}
+                        {Object.keys(sections.extra).map(k => FRIENDLY_LABELS[k] || k.replace(/_/g, ' ')).join(', ')}.
+                        {' '}Review each section below for details.
+                      </div>
+                    </div>
+                  )}
+
                   {/* Metrics breakdown */}
                   {sections.metrics && (
                     <div style={{ marginBottom: spacing['2xl'] }}>
@@ -448,7 +512,7 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
                           Object.entries(sections.metrics).map(([key, val]) => (
                             <MetricCard
                               key={key}
-                              label={key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                              label={FRIENDLY_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
                               value={typeof val === 'object' ? (val.score || val.value || 0) : val}
                               detail={typeof val === 'object' ? val.detail || val.description : undefined}
                             />
@@ -502,7 +566,7 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
                   {sections.extra && Object.keys(sections.extra).length > 0 && (
                     <div style={{ marginBottom: spacing['2xl'] }}>
                       <h3 style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text, marginBottom: spacing.md, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <FileText size={18} color={colors.primary} /> Details
+                        <FileText size={18} color={colors.primary} /> Detailed Findings
                       </h3>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: spacing.md }}>
                         {Object.entries(sections.extra).map(([key, val]) => (
@@ -756,14 +820,96 @@ function RunDetail({ run, onClose, onRunAction, clientId }) {
   );
 }
 
+// ─── Friendly label map for common agent output keys ─────────
+const FRIENDLY_LABELS = {
+  cta_audit: 'Call-to-Action Audit',
+  form_audit: 'Form Audit',
+  page_speed: 'Page Speed',
+  pagespeed: 'Page Speed',
+  pagespeed_score: 'Page Speed Score',
+  mobile_score: 'Mobile Score',
+  desktop_score: 'Desktop Score',
+  meta_tags: 'Meta Tags',
+  meta_title: 'Page Title',
+  meta_description: 'Meta Description',
+  h1_tags: 'H1 Headings',
+  h2_tags: 'H2 Headings',
+  schema_markup: 'Schema Markup',
+  structured_data: 'Structured Data',
+  internal_links: 'Internal Links',
+  external_links: 'External Links',
+  broken_links: 'Broken Links',
+  redirect_chains: 'Redirect Chains',
+  canonical_issues: 'Canonical Issues',
+  indexability: 'Indexability',
+  crawl_errors: 'Crawl Errors',
+  robots_txt: 'Robots.txt',
+  sitemap: 'XML Sitemap',
+  ssl_status: 'SSL Certificate',
+  https_status: 'HTTPS Status',
+  core_web_vitals: 'Core Web Vitals',
+  lcp: 'Largest Contentful Paint (LCP)',
+  fid: 'First Input Delay (FID)',
+  cls: 'Cumulative Layout Shift (CLS)',
+  ttfb: 'Time to First Byte (TTFB)',
+  gbp_status: 'Google Business Profile',
+  gbp_reviews: 'Google Reviews',
+  review_count: 'Review Count',
+  average_rating: 'Average Rating',
+  nap_consistency: 'NAP Consistency',
+  citation_count: 'Citations Found',
+  domain_authority: 'Domain Authority',
+  domain_rating: 'Domain Rating',
+  referring_domains: 'Referring Domains',
+  trust_flow: 'Trust Flow',
+  citation_flow: 'Citation Flow',
+  organic_traffic: 'Organic Traffic',
+  organic_keywords: 'Organic Keywords',
+  top_pages: 'Top Performing Pages',
+  conversion_rate: 'Conversion Rate',
+  bounce_rate: 'Bounce Rate',
+  avg_session_duration: 'Avg Session Duration',
+  total_clicks: 'Total Clicks',
+  total_impressions: 'Total Impressions',
+  avg_position: 'Average Position',
+  avg_ctr: 'Average Click-Through Rate',
+  social_profiles: 'Social Profiles',
+  content_analysis: 'Content Analysis',
+  word_count: 'Word Count',
+  readability_score: 'Readability Score',
+  keyword_density: 'Keyword Density',
+  images_without_alt: 'Images Without Alt Text',
+  missing_alt_tags: 'Missing Alt Tags',
+  duplicate_content: 'Duplicate Content',
+  thin_content: 'Thin Content Pages',
+  local_rankings: 'Local Rankings',
+  map_pack_presence: 'Map Pack Presence',
+  competitor_gap: 'Competitor Gap Analysis',
+  link_opportunities: 'Link Opportunities',
+  toxic_links: 'Toxic Links',
+  disavow_candidates: 'Disavow Candidates',
+  status_code: 'HTTP Status Code',
+  response_time: 'Response Time',
+  total_pages: 'Total Pages',
+  indexed_pages: 'Indexed Pages',
+  error_pages: 'Error Pages',
+  warnings: 'Warnings',
+  findings: 'Key Findings',
+  audit_results: 'Audit Results',
+  performance_score: 'Performance Score',
+  accessibility_score: 'Accessibility Score',
+  best_practices_score: 'Best Practices Score',
+  seo_score: 'SEO Score',
+};
+
 // ─── Extra Data Card (for any unrecognized fields) ───────────
 function ExtraDataCard({ label, value }) {
-  const displayLabel = label.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  const displayLabel = FRIENDLY_LABELS[label] || label.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
   if (typeof value === 'boolean') {
     return (
       <div style={{ padding: spacing.lg, background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: radius.lg }}>
-        <div style={{ fontSize: fontSize.xs, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{displayLabel}</div>
+        <div style={{ fontSize: fontSize.xs, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: fontWeight.semibold, marginBottom: 4 }}>{displayLabel}</div>
         <div style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: value ? colors.success : colors.error }}>
           {value ? '✓ Yes' : '✗ No'}
         </div>
@@ -774,7 +920,7 @@ function ExtraDataCard({ label, value }) {
   if (typeof value === 'number') {
     return (
       <div style={{ padding: spacing.lg, background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: radius.lg }}>
-        <div style={{ fontSize: fontSize.xs, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{displayLabel}</div>
+        <div style={{ fontSize: fontSize.xs, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: fontWeight.semibold, marginBottom: 4 }}>{displayLabel}</div>
         <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, color: colors.text }}>{value.toLocaleString()}</div>
       </div>
     );
@@ -783,7 +929,7 @@ function ExtraDataCard({ label, value }) {
   if (typeof value === 'string' && value.length < 200) {
     return (
       <div style={{ padding: spacing.lg, background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: radius.lg }}>
-        <div style={{ fontSize: fontSize.xs, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{displayLabel}</div>
+        <div style={{ fontSize: fontSize.xs, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: fontWeight.semibold, marginBottom: 4 }}>{displayLabel}</div>
         <div style={{ fontSize: fontSize.md, color: colors.text, lineHeight: 1.5 }}>{value}</div>
       </div>
     );
@@ -791,7 +937,7 @@ function ExtraDataCard({ label, value }) {
 
   return (
     <div style={{ padding: spacing.lg, background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: radius.lg }}>
-      <div style={{ fontSize: fontSize.xs, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 }}>{displayLabel}</div>
+      <div style={{ fontSize: fontSize.xs, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: fontWeight.semibold, marginBottom: 4 }}>{displayLabel}</div>
       <RenderStructuredData data={value} />
     </div>
   );
@@ -834,8 +980,8 @@ function RenderStructuredData({ data }) {
             {typeof item === 'object' ? (
               Object.entries(item).map(([k, v]) => (
                 <div key={k} style={{ display: 'flex', gap: spacing.sm, marginBottom: 2 }}>
-                  <span style={{ fontSize: fontSize.xs, color: colors.textMuted, fontWeight: fontWeight.bold, minWidth: 100 }}>
-                    {k.replace(/_/g, ' ')}:
+                  <span style={{ fontSize: fontSize.xs, color: colors.textSecondary, fontWeight: fontWeight.bold, minWidth: 100 }}>
+                    {FRIENDLY_LABELS[k] || k.replace(/_/g, ' ')}:
                   </span>
                   <span style={{ fontSize: fontSize.sm, color: colors.text }}>
                     {typeof v === 'object' ? JSON.stringify(v) : String(v)}
@@ -861,10 +1007,10 @@ function RenderStructuredData({ data }) {
             borderBottom: `1px solid ${colors.borderLight}`, alignItems: 'flex-start',
           }}>
             <span style={{
-              fontSize: fontSize.xs, color: colors.textMuted, fontWeight: fontWeight.bold,
+              fontSize: fontSize.xs, color: colors.textSecondary, fontWeight: fontWeight.bold,
               minWidth: 120, textTransform: 'uppercase', letterSpacing: 0.3, paddingTop: 2,
             }}>
-              {k.replace(/_/g, ' ')}
+              {FRIENDLY_LABELS[k] || k.replace(/_/g, ' ')}
             </span>
             <div style={{ flex: 1 }}>
               {typeof v === 'object' ? <RenderStructuredData data={v} /> : (
@@ -968,7 +1114,7 @@ function RunListItem({ run, isSelected, onClick }) {
         }}>
           {run.agent_templates?.name}
         </div>
-        <div style={{ fontSize: fontSize.xs, color: colors.textDisabled, display: 'flex', gap: spacing.sm, marginTop: 2 }}>
+        <div style={{ fontSize: fontSize.xs, color: colors.textSecondary, display: 'flex', gap: spacing.sm, marginTop: 2 }}>
           <span>{new Date(run.created_at).toLocaleString()}</span>
           {run.tokens_used ? <span>{run.tokens_used} tok</span> : null}
           {run.duration_ms ? <span>{run.duration_ms > 60000 ? `${Math.round(run.duration_ms / 60000)}m` : `${Math.round(run.duration_ms / 1000)}s`}</span> : null}
@@ -976,7 +1122,18 @@ function RunListItem({ run, isSelected, onClick }) {
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-        <Badge text={run.status} color={colors.status[run.status]} bg={(colors.status[run.status] || colors.textDisabled) + '22'} />
+        <Badge text={run.status} color={colors.status[run.status] || colors.status.partial || colors.textDisabled} bg={(colors.status[run.status] || colors.textDisabled) + '22'} />
+        {run.output?._truth_gate?.confidence && (() => {
+          const conf = run.output._truth_gate.confidence;
+          const c = { high: '#10B981', medium: '#F59E0B', low: '#F97316', very_low: '#EF4444' }[conf] || '#9CA3AF';
+          return <span style={{ fontSize: 8, fontWeight: 700, padding: '2px 5px', borderRadius: 3, background: c + '18', color: c, textTransform: 'uppercase' }}>{conf}</span>;
+        })()}
+        {run.false_success && (
+          <span title={`False success: ${(run.false_success_flags || []).join(', ')}`} style={{
+            fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+            background: '#FEF3C7', color: '#92400E', border: '1px solid #F59E0B44',
+          }}>FAKE?</span>
+        )}
         {hasOutput && <ChevronRight size={14} color={colors.textMuted} />}
       </div>
     </button>
@@ -984,7 +1141,7 @@ function RunListItem({ run, isSelected, onClick }) {
 }
 
 // ─── Main View ───────────────────────────────────────────────
-export default function RunsView({ clientId }) {
+export default function RunsView({ clientId, focusRunId, onFocusConsumed }) {
   const [agents, setAgents] = useState({});
   const [runs, setRuns] = useState([]);
   const [selAgent, setSelAgent] = useState('');
@@ -1010,6 +1167,17 @@ export default function RunsView({ clientId }) {
       .catch(console.error)
       .finally(() => setLoading(false));
   }, [clientId]);
+
+  // Auto-open a specific run when navigated from Dashboard
+  useEffect(() => {
+    if (focusRunId && runs.length > 0) {
+      const target = runs.find(r => r.id === focusRunId);
+      if (target) {
+        setSelRun(target);
+        if (onFocusConsumed) onFocusConsumed();
+      }
+    }
+  }, [focusRunId, runs]);
 
   const refreshRuns = async () => {
     try {
@@ -1208,7 +1376,7 @@ export default function RunsView({ clientId }) {
                     border: 'none', cursor: 'pointer',
                     fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
                     background: filterStatus === status ? colors.primary : colors.surfaceHover,
-                    color: filterStatus === status ? '#fff' : colors.textMuted,
+                    color: filterStatus === status ? '#fff' : colors.textSecondary,
                     transition: transitions.fast,
                   }}
                 >

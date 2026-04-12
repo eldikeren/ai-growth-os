@@ -133,6 +133,22 @@ export default function QueueView({ clientId }) {
                 }}
               >
                 <Dot s={item.status} />
+                {/* Priority score badge */}
+                {(item.priority_score != null || item.task_payload?.priority_scoring) && (() => {
+                  const score = item.priority_score ?? item.task_payload?.priority_scoring?.computed_score;
+                  if (score == null) return null;
+                  const scoreColor = score >= 8 ? '#EF4444' : score >= 6 ? '#F59E0B' : score >= 4 ? '#6366F1' : '#9CA3AF';
+                  return (
+                    <div style={{
+                      minWidth: 36, height: 36, borderRadius: radius.md,
+                      background: scoreColor + '15', border: `1.5px solid ${scoreColor}44`,
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: scoreColor, lineHeight: 1 }}>{score}</span>
+                      <span style={{ fontSize: 7, color: scoreColor, fontWeight: 600, textTransform: 'uppercase' }}>pri</span>
+                    </div>
+                  );
+                })()}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div
                     style={{
@@ -148,7 +164,21 @@ export default function QueueView({ clientId }) {
                   </div>
                   <div style={{ fontSize: fontSize.xs, color: colors.textMuted }}>
                     {new Date(item.created_at).toLocaleString()} · by {item.queued_by}
+                    {item.task_payload?.reason && (
+                      <span style={{ color: colors.textSecondary }}> · {item.task_payload.reason}</span>
+                    )}
                   </div>
+                  {item.task_payload?.priority_scoring && (
+                    <div style={{ fontSize: 9, color: colors.textDisabled, marginTop: 2, display: 'flex', gap: 8 }}>
+                      <span>Impact: {item.task_payload.priority_scoring.impact}</span>
+                      <span>Urgency: {item.task_payload.priority_scoring.urgency}</span>
+                      <span>Confidence: {item.task_payload.priority_scoring.confidence}</span>
+                      <span>Effort: {item.task_payload.priority_scoring.effort}</span>
+                      {item.task_payload.priority_scoring.business_goal && (
+                        <span>Goal: {item.task_payload.priority_scoring.business_goal}</span>
+                      )}
+                    </div>
+                  )}
                   {item.error && (
                     <div style={{ fontSize: fontSize.xs, color: colors.error, marginTop: 2 }}>
                       {item.error}

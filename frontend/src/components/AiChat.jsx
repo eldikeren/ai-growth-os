@@ -1,7 +1,7 @@
 // ─── AI Growth OS — In-App AI Chat Assistant ────────────────────
 // Connected to OpenAI, Supabase, all app data. Can edit prompts, query data, etc.
 import { useState, useRef, useEffect } from 'react';
-import { MessageCircle, X, Send, Sparkles, Bot, User, Loader, Minimize2, Maximize2 } from 'lucide-react';
+import { MessageCircle, X, Send, Sparkles, Bot, User, Loader, Minimize2, Maximize2, Trash2 } from 'lucide-react';
 import { api } from '../hooks/useApi.js';
 import { colors, spacing, radius, fontSize, fontWeight, shadows, transitions } from '../theme.js';
 
@@ -141,7 +141,7 @@ export default function AiChat({ clientId }) {
         onClick={() => setOpen(true)}
         aria-label="Open AI Assistant"
         style={{
-          position: 'fixed', bottom: 24, right: 24, zIndex: 1000,
+          position: 'fixed', bottom: 48, right: 24, zIndex: 1000,
           width: 56, height: 56, borderRadius: '50%',
           background: colors.primaryGradient,
           border: 'none', cursor: 'pointer',
@@ -163,7 +163,7 @@ export default function AiChat({ clientId }) {
 
   return (
     <div style={{
-      position: 'fixed', bottom: 24, right: 24, zIndex: 1000,
+      position: 'fixed', bottom: 48, right: 24, zIndex: 1000,
       width: chatWidth, maxWidth: 'calc(100vw - 48px)',
       height: chatHeight, maxHeight: 'calc(100vh - 48px)',
       display: 'flex', flexDirection: 'column',
@@ -192,6 +192,15 @@ export default function AiChat({ clientId }) {
           <div style={{ fontWeight: fontWeight.bold, fontSize: fontSize.md }}>AI Assistant</div>
           <div style={{ fontSize: fontSize.micro, opacity: 0.8 }}>Edit prompts, query data, make changes</div>
         </div>
+        {messages.length > 0 && (
+          <button onClick={() => setMessages([])} title="Clear chat" style={{
+            background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: 6,
+            width: 28, height: 28, cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Trash2 size={13} color="#fff" />
+          </button>
+        )}
         <button onClick={() => setExpanded(!expanded)} style={{
           background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: 6,
           width: 28, height: 28, cursor: 'pointer', display: 'flex',

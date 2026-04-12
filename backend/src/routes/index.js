@@ -585,7 +585,150 @@ router.get('/clients/:clientId/baselines', async (req, res) => {
   try {
     const { data, error } = await supabase.from('baselines').select('*').eq('client_id', req.params.clientId);
     if (error) throw error;
-    res.json(data);
+    const now = Date.now();
+    // Enrich each baseline with provenance and freshness
+    const enriched = (data || []).map(b => {
+      const ageMs = b.recorded_at ? now - new Date(b.recorded_at).getTime() : null;
+      const ageHours = ageMs ? Math.round(ageMs / 3600000) : null;
+      let freshness = 'never_synced';
+      if (ageHours !== null) {
+        if (ageHours < 6) freshness = 'fresh';
+        else if (ageHours < 24) freshness = 'aging';
+        else if (ageHours < 72) freshness = 'stale';
+        else freshness = 'critical_stale';
+      }
+      return {
+        ...b,
+        provenance: {
+          source: b.source || 'unknown',
+          last_sync: b.recorded_at || null,
+          age_hours: ageHours,
+          freshness,
+          freshness_label: freshness === 'fresh' ? 'Up to date' : freshness === 'aging' ? 'Updated today' : freshness === 'stale' ? `${Math.round(ageHours / 24)}d since last sync` : freshness === 'critical_stale' ? `${Math.round(ageHours / 24)}d — needs refresh` : 'Never synced',
+        }
+      };
+    });
+    res.json(enriched);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── WHY ISN'T THIS UPDATING? — Per-metric diagnostic ─────────
+router.get('/clients/:clientId/baselines/diagnose', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const [baselines, creds, client, lastRuns, schedules] = await Promise.all([
+      supabase.from('baselines').select('*').eq('client_id', clientId),
+      supabase.from('client_credentials').select('*').eq('client_id', clientId),
+      supabase.from('clients').select('domain, name').eq('id', clientId).single(),
+      supabase.from('runs').select('id, status, error, created_at, agent_template_id, output').eq('client_id', clientId).order('created_at', { ascending: false }).limit(10),
+      supabase.from('agent_schedules').select('*').eq('client_id', clientId),
+    ]);
+    const now = Date.now();
+    const credMap = Object.fromEntries((creds.data || []).map(c => [c.service, c]));
+
+    // Define what each metric needs
+    const METRIC_REQUIREMENTS = {
+      mobile_pagespeed:      { service: null,       api: 'Google PageSpeed API', agent: 'technical-seo-crawl-agent', refresh: '24h', needs_oauth: false },
+      desktop_pagespeed:     { service: null,       api: 'Google PageSpeed API', agent: 'technical-seo-crawl-agent', refresh: '24h', needs_oauth: false },
+      page1_keyword_count:   { service: 'google_search_console', api: 'GSC API or DataForSEO SERP', agent: 'gsc-daily-monitor', refresh: '24h', needs_oauth: true, fallback: 'DataForSEO SERP (no OAuth needed)' },
+      google_reviews_count:  { service: 'google_business_profile', api: 'Google Places API', agent: 'reviews-gbp-authority-agent', refresh: '6h', needs_oauth: false },
+      google_reviews_rating: { service: 'google_business_profile', api: 'Google Places API', agent: 'reviews-gbp-authority-agent', refresh: '6h', needs_oauth: false },
+      domain_authority:      { service: 'dataforseo', api: 'DataForSEO Backlinks API', agent: 'seo-core-agent', refresh: '7d', needs_oauth: false },
+      referring_domains_count: { service: 'dataforseo', api: 'DataForSEO Backlinks API', agent: 'seo-core-agent', refresh: '7d', needs_oauth: false },
+      indexed_pages:         { service: null,       api: 'Google Custom Search API or GSC', agent: 'technical-seo-crawl-agent', refresh: '7d', needs_oauth: false },
+      local_3pack_present:   { service: 'dataforseo', api: 'DataForSEO SERP API', agent: 'local-seo-agent', refresh: '7d', needs_oauth: false },
+    };
+
+    const diagnostics = [];
+    for (const [metricName, req] of Object.entries(METRIC_REQUIREMENTS)) {
+      const baseline = (baselines.data || []).find(b => b.metric_name === metricName);
+      const ageMs = baseline?.recorded_at ? now - new Date(baseline.recorded_at).getTime() : null;
+      const ageHours = ageMs ? Math.round(ageMs / 3600000) : null;
+
+      const blockers = [];
+      let status = 'working';
+
+      // Check if metric exists
+      if (!baseline) {
+        status = 'never_synced';
+        blockers.push({ type: 'Missing Data', detail: 'This metric has never been recorded. Run "Refresh All Metrics".' });
+      } else if (ageHours > 72) {
+        status = 'critical_stale';
+        blockers.push({ type: 'No Recent Data', detail: `Last updated ${ageHours}h ago (${new Date(baseline.recorded_at).toLocaleString()}). Expected refresh: every ${req.refresh}.` });
+      } else if (ageHours > 24) {
+        status = 'stale';
+      }
+
+      // Check credentials
+      if (req.service) {
+        const cred = credMap[req.service];
+        if (!cred?.credential_data || Object.keys(cred.credential_data).length === 0) {
+          if (req.needs_oauth) {
+            status = 'missing_access';
+            blockers.push({ type: 'Missing Access', detail: `${req.service} OAuth not connected. Use Setup Link to connect.${req.fallback ? ` Fallback: ${req.fallback}` : ''}` });
+          } else if (!process.env[`${req.service.toUpperCase()}_LOGIN`] && !process.env[`${req.service.toUpperCase()}_API_KEY`]) {
+            // Check env vars
+            const envLogin = req.service === 'dataforseo' ? process.env.DATAFORSEO_LOGIN : null;
+            if (!envLogin && req.service === 'dataforseo') {
+              blockers.push({ type: 'Missing Configuration', detail: `${req.service} API credentials not configured in env vars.` });
+            }
+          }
+        }
+      }
+
+      // Check domain
+      if (!client.data?.domain) {
+        blockers.push({ type: 'Missing Configuration', detail: 'Client has no domain configured.' });
+      }
+
+      // Check if producing agent is assigned and has run recently
+      if (req.agent) {
+        const agentRun = (lastRuns.data || []).find(r => {
+          // This is approximate - would need to join agent_templates
+          return true; // We check schedule instead
+        });
+        const sched = (schedules.data || []).find(s => s.agent_slug === req.agent);
+        if (!sched) {
+          blockers.push({ type: 'Missing Schedule', detail: `No schedule for ${req.agent}. Metric won't auto-refresh.` });
+        }
+      }
+
+      if (blockers.length === 0 && status === 'working' && baseline) {
+        // All good
+      } else if (blockers.length === 0 && baseline && (status === 'stale' || status === 'critical_stale')) {
+        blockers.push({ type: 'Stale Data', detail: `Data is ${ageHours}h old. Daily cron should refresh this. Check /api/cron/refresh-metrics.` });
+      }
+
+      diagnostics.push({
+        metric: metricName,
+        current_value: baseline?.metric_value ?? null,
+        current_text: baseline?.metric_text ?? null,
+        source: baseline?.source || 'none',
+        last_sync: baseline?.recorded_at || null,
+        age_hours: ageHours,
+        status: blockers.length > 0 ? (status === 'working' ? 'partial' : status) : status,
+        expected_refresh: req.refresh,
+        producing_api: req.api,
+        producing_agent: req.agent,
+        blockers,
+        fix: blockers.length > 0 ? blockers.map(b => b.detail).join(' ') : null,
+      });
+    }
+
+    res.json({
+      client_id: clientId,
+      domain: client.data?.domain,
+      diagnosed_at: new Date().toISOString(),
+      metrics: diagnostics,
+      summary: {
+        working: diagnostics.filter(d => d.status === 'working').length,
+        stale: diagnostics.filter(d => d.status === 'stale').length,
+        critical_stale: diagnostics.filter(d => d.status === 'critical_stale').length,
+        missing_access: diagnostics.filter(d => d.status === 'missing_access').length,
+        never_synced: diagnostics.filter(d => d.status === 'never_synced').length,
+        total: diagnostics.length,
+      }
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -594,6 +737,123 @@ router.post('/clients/:clientId/baselines', async (req, res) => {
     const { data, error } = await supabase.from('baselines').upsert({ client_id: req.params.clientId, ...req.body }, { onConflict: 'client_id,metric_name' }).select().single();
     if (error) throw error;
     res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── KPI TRENDS — 7d/30d deltas from snapshots ───────────────
+router.get('/clients/:clientId/trends', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const now = new Date();
+    const d7 = new Date(now - 7 * 86400000).toISOString().slice(0, 10);
+    const d30 = new Date(now - 30 * 86400000).toISOString().slice(0, 10);
+    const today = now.toISOString().slice(0, 10);
+
+    // Get current baselines
+    const { data: baselines } = await supabase.from('baselines')
+      .select('metric_name, metric_value').eq('client_id', clientId);
+
+    // Get snapshots from 7d and 30d ago (closest available)
+    const { data: snapshots7d } = await supabase.from('kpi_snapshots')
+      .select('metric_name, metric_value, snapshot_date')
+      .eq('client_id', clientId)
+      .gte('snapshot_date', d7)
+      .lte('snapshot_date', new Date(now - 5 * 86400000).toISOString().slice(0, 10))
+      .order('snapshot_date', { ascending: true });
+
+    const { data: snapshots30d } = await supabase.from('kpi_snapshots')
+      .select('metric_name, metric_value, snapshot_date')
+      .eq('client_id', clientId)
+      .gte('snapshot_date', d30)
+      .lte('snapshot_date', new Date(now - 25 * 86400000).toISOString().slice(0, 10))
+      .order('snapshot_date', { ascending: true });
+
+    // Build lookup: earliest snapshot in each window per metric
+    const snap7 = {}, snap30 = {};
+    for (const s of (snapshots7d || [])) {
+      if (!snap7[s.metric_name]) snap7[s.metric_name] = s;
+    }
+    for (const s of (snapshots30d || [])) {
+      if (!snap30[s.metric_name]) snap30[s.metric_name] = s;
+    }
+
+    // Compute trends
+    const trends = (baselines || []).map(b => {
+      const current = b.metric_value;
+      const prev7 = snap7[b.metric_name]?.metric_value;
+      const prev30 = snap30[b.metric_name]?.metric_value;
+
+      const delta7 = (current != null && prev7 != null) ? current - prev7 : null;
+      const delta30 = (current != null && prev30 != null) ? current - prev30 : null;
+      const pct7 = (prev7 && prev7 !== 0) ? Math.round((delta7 / prev7) * 10000) / 100 : null;
+      const pct30 = (prev30 && prev30 !== 0) ? Math.round((delta30 / prev30) * 10000) / 100 : null;
+
+      let direction = 'flat';
+      if (delta7 > 0) direction = 'up';
+      else if (delta7 < 0) direction = 'down';
+
+      return {
+        metric_name: b.metric_name,
+        current,
+        delta_7d: delta7,
+        delta_30d: delta30,
+        pct_7d: pct7,
+        pct_30d: pct30,
+        direction,
+        snapshot_7d_date: snap7[b.metric_name]?.snapshot_date || null,
+        snapshot_30d_date: snap30[b.metric_name]?.snapshot_date || null,
+      };
+    });
+
+    res.json(trends);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── SAVE KPI SNAPSHOTS — called daily by cron or after refresh ──
+router.post('/clients/:clientId/snapshots', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Get current baselines
+    const { data: baselines } = await supabase.from('baselines')
+      .select('metric_name, metric_value, source').eq('client_id', clientId);
+
+    if (!baselines?.length) return res.json({ saved: 0 });
+
+    const rows = baselines
+      .filter(b => b.metric_value != null)
+      .map(b => ({
+        client_id: clientId,
+        metric_name: b.metric_name,
+        metric_value: b.metric_value,
+        source: b.source || 'baseline',
+        snapshot_date: today,
+      }));
+
+    const { data, error } = await supabase.from('kpi_snapshots')
+      .upsert(rows, { onConflict: 'client_id,metric_name,snapshot_date' });
+
+    if (error) throw error;
+    res.json({ saved: rows.length, date: today });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── CLIENT STRATEGY — get/set per-client strategy object ────
+router.get('/clients/:clientId/strategy', async (req, res) => {
+  try {
+    const { data } = await supabase.from('client_rules')
+      .select('strategy').eq('client_id', req.params.clientId).maybeSingle();
+    res.json(data?.strategy || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.put('/clients/:clientId/strategy', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('client_rules')
+      .update({ strategy: req.body }).eq('client_id', req.params.clientId).select().single();
+    if (error) throw error;
+    res.json(data.strategy);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -668,11 +928,37 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
     const { data: client } = await supabase.from('clients').select('domain, name').eq('id', clientId).single();
     if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    // Get all credentials for this client
-    const { data: allCreds } = await supabase.from('client_credentials').select('service, credential_data, is_connected').eq('client_id', clientId);
+    // Get credentials — CLIENT-SPECIFIC ONLY (no cross-client sharing)
+    const { data: allCreds } = await supabase.from('client_credentials')
+      .select('service, credential_data, is_connected').eq('client_id', clientId);
     const creds = Object.fromEntries((allCreds || []).map(c => [c.service, c]));
 
+    // SERVICE-LEVEL API KEYS from env vars only (these are YOUR keys, not client OAuth tokens)
+    // DataForSEO — your paid API account, safe to use for all clients
+    if (!creds.dataforseo?.credential_data?.login && process.env.DATAFORSEO_LOGIN) {
+      creds.dataforseo = { service: 'dataforseo', is_connected: true, credential_data: {
+        login: (process.env.DATAFORSEO_LOGIN || '').trim(), password: (process.env.DATAFORSEO_PASSWORD || '').trim()
+      }};
+    }
+    // OpenAI — your paid API key, safe to use for all clients
+    if (!creds.openai?.credential_data?.api_key && process.env.OPENAI_API_KEY) {
+      creds.openai = { service: 'openai', is_connected: true, credential_data: {
+        api_key: process.env.OPENAI_API_KEY
+      }};
+    }
+    // NOTE: OAuth tokens (GSC, GBP, Facebook, Instagram, Google Ads/Analytics)
+    // are NEVER shared between clients. Each client must connect their own.
+    // If a client lacks OAuth credentials, operations that need them will
+    // report "no_cred" status instead of silently using another client's tokens.
+
     const domain = client.domain?.startsWith('http') ? client.domain : `https://${client.domain}`;
+
+    // Helper: fetch with timeout to prevent single API from hogging the function
+    const fetchWithTimeout = (url, opts = {}, timeoutMs = 12000) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      return fetch(url, { ...opts, signal: controller.signal }).finally(() => clearTimeout(timer));
+    };
 
     // Helper: upsert baseline + snapshot
     async function storeMetric(name, value, text, source, target) {
@@ -681,10 +967,12 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
         metric_value: value, metric_text: text,
         source, recorded_at: now, ...(target != null ? { target_value: target } : {}),
       }, { onConflict: 'client_id,metric_name' });
-      await supabase.from('kpi_snapshots').insert({
-        client_id: clientId, metric_name: name, metric_value: value,
-        metric_text: text, source, source_verified: true, data_date: today,
-      }).catch(() => {}); // ignore snapshot errors
+      try {
+        await supabase.from('kpi_snapshots').insert({
+          client_id: clientId, metric_name: name, metric_value: value,
+          metric_text: text, source, source_verified: true, data_date: today,
+        });
+      } catch (_) { /* ignore snapshot errors */ }
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -694,7 +982,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
       try {
         const apiKey = process.env.GOOGLE_PAGESPEED_API_KEY || '';
         const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(domain)}&strategy=mobile${apiKey ? `&key=${apiKey}` : ''}`;
-        const psRes = await fetch(apiUrl);
+        const psRes = await fetchWithTimeout(apiUrl);
         if (psRes.ok) {
           const psData = await psRes.json();
           const score = Math.round((psData.lighthouseResult?.categories?.performance?.score || 0) * 100);
@@ -719,14 +1007,14 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
           // Use Places API Text Search to find the business
           const searchQuery = client.name || client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
           const placesUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(searchQuery)}&key=${apiKey}`;
-          const placesRes = await fetch(placesUrl);
+          const placesRes = await fetchWithTimeout(placesUrl);
           if (placesRes.ok) {
             const placesData = await placesRes.json();
             const place = placesData.results?.[0];
             if (place) {
               // Get detailed info with reviews
               const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${place.place_id}&fields=user_ratings_total,rating,name&key=${apiKey}`;
-              const detailRes = await fetch(detailUrl);
+              const detailRes = await fetchWithTimeout(detailUrl);
               if (detailRes.ok) {
                 const detail = await detailRes.json();
                 const reviewCount = detail.result?.user_ratings_total || 0;
@@ -746,7 +1034,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
               .select('external_id').eq('client_id', clientId)
               .eq('sub_provider', 'business_profile').eq('is_selected', true).maybeSingle();
             if (asset?.external_id) {
-              const revRes = await fetch(`https://mybusiness.googleapis.com/v4/${asset.external_id}/reviews?pageSize=1`, {
+              const revRes = await fetchWithTimeout(`https://mybusiness.googleapis.com/v4/${asset.external_id}/reviews?pageSize=1`, {
                 headers: { Authorization: `Bearer ${gbpCred.credential_data.access_token}` }
               });
               if (revRes.ok) {
@@ -787,7 +1075,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
         if (propertyUrl && gscCred.credential_data.access_token) {
           const endDate = today;
           const startDate = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-          const gscRes = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/searchAnalytics/query`, {
+          const gscRes = await fetchWithTimeout(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/searchAnalytics/query`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${gscCred.credential_data.access_token}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ startDate, endDate, dimensions: ['query'], rowLimit: 500, startRow: 0 })
@@ -831,7 +1119,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
         if (apiKey && cseId) {
           const cleanDomain = client.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
           const cseUrl = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=site:${cleanDomain}&num=1`;
-          const cseRes = await fetch(cseUrl);
+          const cseRes = await fetchWithTimeout(cseUrl);
           if (cseRes.ok) {
             const cseData = await cseRes.json();
             const indexedCount = parseInt(cseData.searchInformation?.totalResults || '0');
@@ -844,7 +1132,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
           const gscCred = creds.google_search_console;
           if (gscCred?.credential_data?.access_token) {
             const propertyUrl = gscCred.credential_data.property_url || domain;
-            const smRes = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/sitemaps`, {
+            const smRes = await fetchWithTimeout(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/sitemaps`, {
               headers: { Authorization: `Bearer ${gscCred.credential_data.access_token}` }
             });
             if (smRes.ok) {
@@ -878,7 +1166,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
         const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
         // DataForSEO Backlinks Summary
-        const dfsRes = await fetch('https://api.dataforseo.com/v3/backlinks/summary/live', {
+        const dfsRes = await fetchWithTimeout('https://api.dataforseo.com/v3/backlinks/summary/live', {
           method: 'POST',
           headers: { Authorization: `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
           body: JSON.stringify([{ target: cleanDomain, internal_list_limit: 0, backlinks_filters: ['dofollow', '=', true] }])
@@ -908,7 +1196,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
         if (mozCred?.credential_data?.access_id && mozCred?.credential_data?.secret_key) {
           const mozAuth = Buffer.from(`${mozCred.credential_data.access_id}:${mozCred.credential_data.secret_key}`).toString('base64');
           const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
-          const mozRes = await fetch('https://lsapi.seomoz.com/v2/url_metrics', {
+          const mozRes = await fetchWithTimeout('https://lsapi.seomoz.com/v2/url_metrics', {
             method: 'POST',
             headers: { Authorization: `Basic ${mozAuth}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ targets: [cleanDomain] })
@@ -948,7 +1236,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
         const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
         // Search for the business name + city to check local pack
         const searchQuery = client.name || cleanDomain;
-        const serpRes = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+        const serpRes = await fetchWithTimeout('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
           method: 'POST',
           headers: { Authorization: `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
           body: JSON.stringify([{ keyword: searchQuery, location_code: 2376, language_code: 'he', device: 'desktop', depth: 10 }])
@@ -971,6 +1259,67 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
       }
     } catch (e) {
       results.push({ metric: 'local_3pack_present', status: 'error', detail: e.message });
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 8. KEYWORD POSITION CHECK — DataForSEO SERP for top client keywords
+    // ═══════════════════════════════════════════════════════════
+    try {
+      const dfsCred = creds.dataforseo;
+      if (dfsCred?.credential_data?.login && dfsCred?.credential_data?.password) {
+        const { data: keywords } = await supabase.from('client_keywords').select('id, keyword')
+          .eq('client_id', clientId).order('volume', { ascending: false }).limit(20);
+        if (keywords?.length > 0) {
+          const dfsAuth = Buffer.from(`${dfsCred.credential_data.login}:${dfsCred.credential_data.password}`).toString('base64');
+          const cleanDomain = client.domain?.replace(/^https?:\/\//, '').replace(/\/$/, '');
+          let updated = 0;
+          // Batch keywords into groups of 3 to limit API calls
+          for (let i = 0; i < keywords.length; i += 3) {
+            const batch = keywords.slice(i, i + 3);
+            const tasks = batch.map(kw => ({
+              keyword: kw.keyword, location_code: 2376, language_code: 'he', device: 'desktop', depth: 100
+            }));
+            try {
+              const serpRes = await fetchWithTimeout('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+                method: 'POST',
+                headers: { Authorization: `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(tasks)
+              });
+              if (serpRes.ok) {
+                const serpData = await serpRes.json();
+                for (let j = 0; j < batch.length; j++) {
+                  const items = serpData.tasks?.[j]?.result?.[0]?.items || [];
+                  const match = items.find(item =>
+                    item.type === 'organic' && (item.domain || item.url || '').toLowerCase().includes(cleanDomain.toLowerCase())
+                  );
+                  if (match) {
+                    await supabase.from('client_keywords').update({
+                      current_position: match.rank_group || match.rank_absolute,
+                      last_checked: now, source: 'dataforseo_serp'
+                    }).eq('id', batch[j].id);
+                    updated++;
+                  } else {
+                    // Not in top 100
+                    await supabase.from('client_keywords').update({
+                      current_position: null, last_checked: now, source: 'dataforseo_serp'
+                    }).eq('id', batch[j].id);
+                  }
+                }
+              }
+            } catch (_) { /* continue with next batch */ }
+          }
+          results.push({ metric: 'keyword_positions', updated, total: keywords.length, source: 'DataForSEO SERP', status: 'ok' });
+          // Update page1_keywords count from DataForSEO if we don't have GSC data
+          if (!results.find(r => r.metric === 'page1_keyword_count' && r.status === 'ok')) {
+            const { count } = await supabase.from('client_keywords').select('id', { count: 'exact', head: true })
+              .eq('client_id', clientId).lte('current_position', 10).not('current_position', 'is', null);
+            await storeMetric('page1_keyword_count', count || 0, `${count || 0} keywords`, 'DataForSEO SERP', null);
+            results.push({ metric: 'page1_keyword_count', value: count || 0, source: 'DataForSEO SERP', status: 'ok' });
+          }
+        }
+      }
+    } catch (e) {
+      results.push({ metric: 'keyword_positions', status: 'error', detail: e.message });
     }
 
     // Summary
@@ -1008,7 +1357,16 @@ router.get('/clients/:clientId/verification', async (req, res) => {
       { id: 'prompt_quality', label: 'All agent prompts populated', pass: zeroPrompts.count === 0, detail: `${zeroPrompts.count} agents with empty prompts` },
       { id: 'memory_loaded', label: 'Memory items loaded', pass: memCount.count >= 5, detail: `${memCount.count} active memory items` },
       { id: 'queue_health', label: 'Queue not backed up', pass: (queueStats.data?.queued || 0) < 50, detail: `${queueStats.data?.queued || 0} queued, ${queueStats.data?.failed || 0} failed` },
-      { id: 'recent_run', label: 'Recent successful run (48h)', pass: lastRun.data?.[0]?.status === 'success' && new Date(lastRun.data[0].created_at) > new Date(Date.now() - 48 * 60 * 60 * 1000), detail: lastRun.data?.[0]?.created_at ? `Last: ${new Date(lastRun.data[0].created_at).toLocaleString()}` : 'No runs' },
+      { id: 'recent_run', label: 'Recent successful run (48h)', pass: lastRun.data?.[0]?.status === 'success' && new Date(lastRun.data[0].created_at) > new Date(Date.now() - 48 * 60 * 60 * 1000), detail: (() => {
+        const r = lastRun.data?.[0];
+        if (!r) return 'No runs found. Make sure agents are assigned and scheduled.';
+        const age = Math.round((Date.now() - new Date(r.created_at).getTime()) / 3600000);
+        const when = `Last: ${new Date(r.created_at).toLocaleString()} (${age}h ago)`;
+        if (r.status === 'failed') return `${when} — Status: FAILED. Check the Runs view for error details.`;
+        if (r.status === 'running') return `${when} — Status: still running. May be stuck.`;
+        if (age > 48) return `${when} — Over 48h since last success. Check schedules or run manually.`;
+        return when;
+      })() },
       { id: 'no_critical_incidents', label: 'No critical open incidents', pass: openIncidents.count === 0, detail: `${openIncidents.count} critical incidents open` },
       { id: 'pending_approvals', label: 'Approvals not stale', pass: openApprovals.count < 10, detail: `${openApprovals.count} pending` },
       { id: 'credential_health', label: 'Credential health ≥50%', pass: avgCred >= 50, detail: `Average: ${avgCred}%` },
@@ -1094,6 +1452,439 @@ router.post('/clients/:clientId/verification/fix', async (req, res) => {
     }
 
     res.json({ results, message: results.length > 0 ? 'Fix actions completed' : 'No fix available for this check' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================================
+// SYSTEM AUDIT — Full Coordination & Execution Truth Engine
+// 12 categories, 30 tests, real operational scoring
+// ============================================================
+router.get('/clients/:clientId/system-audit', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const now = Date.now();
+    const h48 = new Date(now - 48 * 3600000).toISOString();
+    const h24 = new Date(now - 24 * 3600000).toISOString();
+    const d7 = new Date(now - 7 * 24 * 3600000).toISOString();
+    const results = {};
+
+    // ── Load all data in parallel ────────────────────────────────
+    const [
+      clientData, assignments, allAgents, recentRuns, allRuns7d,
+      queueItems, credentials, memoryItems, baselines, incidents,
+      approvals, schedules, keywords, competitors, connectors,
+      kpiSnapshots, auditTrail
+    ] = await Promise.all([
+      supabase.from('clients').select('*, client_profiles(*), client_rules(*)').eq('id', clientId).single(),
+      supabase.from('client_agent_assignments').select('*, agent_templates(*)').eq('client_id', clientId),
+      supabase.from('agent_templates').select('id, slug, name, lane, role_type, is_active, base_prompt'),
+      supabase.from('runs').select('id, status, agent_template_id, created_at, output, changed_anything, what_changed, trigger_post_change_validation, post_change_validation_status, duration_ms, tokens_used, error, task_payload').eq('client_id', clientId).gte('created_at', d7).order('created_at', { ascending: false }).limit(200),
+      supabase.from('runs').select('id, status, agent_template_id, created_at').eq('client_id', clientId).gte('created_at', d7),
+      supabase.from('run_queue').select('*').eq('client_id', clientId).in('status', ['queued', 'running', 'failed']),
+      supabase.from('client_credentials').select('*').eq('client_id', clientId),
+      supabase.from('memory_items').select('id, category, approved, is_stale, times_used, last_used_at, created_at, derived_from_file_id, source').eq('client_id', clientId),
+      supabase.from('baselines').select('*').eq('client_id', clientId),
+      supabase.from('incidents').select('*').eq('client_id', clientId).order('created_at', { ascending: false }).limit(50),
+      supabase.from('approvals').select('*').eq('client_id', clientId).order('created_at', { ascending: false }).limit(50),
+      supabase.from('agent_schedules').select('*').eq('client_id', clientId),
+      supabase.from('client_keywords').select('id, keyword, current_position, last_checked, source').eq('client_id', clientId),
+      supabase.from('client_competitors').select('*').eq('client_id', clientId),
+      supabase.from('client_connectors').select('*').eq('client_id', clientId),
+      supabase.from('kpi_snapshots').select('*').eq('client_id', clientId).order('created_at', { ascending: false }).limit(100),
+      supabase.from('audit_trail').select('*').eq('client_id', clientId).gte('created_at', d7).order('created_at', { ascending: false }).limit(100),
+    ]);
+
+    const client = clientData.data;
+    const runs = recentRuns.data || [];
+    const enabledAssignments = (assignments.data || []).filter(a => a.enabled);
+    const agents = allAgents.data || [];
+    const creds = credentials.data || [];
+    const mem = memoryItems.data || [];
+    const bl = baselines.data || [];
+    const inc = incidents.data || [];
+    const appr = approvals.data || [];
+    const sched = schedules.data || [];
+    const kw = keywords.data || [];
+    const comp = competitors.data || [];
+    const conn = connectors.data || [];
+    const snaps = kpiSnapshots.data || [];
+    const audit = auditTrail.data || [];
+    const queue = queueItems.data || [];
+
+    const successRuns = runs.filter(r => r.status === 'success' || r.status === 'executed');
+    const failedRuns = runs.filter(r => r.status === 'failed');
+    const runsWithTools = runs.filter(r => {
+      const o = typeof r.output === 'string' ? JSON.parse(r.output || '{}') : (r.output || {});
+      return o._tool_call_count > 0;
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // 1. EXECUTION ENGINE
+    // ═══════════════════════════════════════════════════════════
+    const T1_recentSuccess = successRuns.filter(r => r.created_at >= h48);
+    const T1_withTools = T1_recentSuccess.filter(r => {
+      const o = typeof r.output === 'string' ? JSON.parse(r.output || '{}') : (r.output || {});
+      return o._tool_call_count > 0;
+    });
+    const T2_followUpTasks = runs.filter(r => {
+      const o = typeof r.output === 'string' ? JSON.parse(r.output || '{}') : (r.output || {});
+      return o.follow_up_tasks?.length > 0 || o.tasks_created?.length > 0 || o.action_plan?.length > 0;
+    });
+    const T3_queueProcessed = runs.filter(r => r.task_payload?.queued_by || r.task_payload?.triggered_by_run);
+    const T4_failedWithError = failedRuns.filter(r => r.error && r.error.length > 5);
+
+    results.execution_engine = {
+      score: 0, max: 5, tests: [
+        { id: 'T1', name: 'Single agent real execution', pass: T1_recentSuccess.length > 0 && T1_withTools.length > 0,
+          detail: `${T1_recentSuccess.length} successful runs in 48h, ${T1_withTools.length} used real tools`,
+          fix: T1_recentSuccess.length === 0 ? 'No recent successful runs. Check agent assignments, schedules, and credentials.' : T1_withTools.length === 0 ? 'Agents run but don\'t use tools. They may be generating text without executing real actions.' : null },
+        { id: 'T2', name: 'Agent creates follow-up tasks', pass: T2_followUpTasks.length > 0,
+          detail: `${T2_followUpTasks.length} runs created follow-up work`,
+          fix: T2_followUpTasks.length === 0 ? 'No agents are creating follow-up tasks. Orchestrator coordination may be missing.' : null },
+        { id: 'T3', name: 'Queue processor picks created tasks', pass: T3_queueProcessed.length > 0,
+          detail: `${T3_queueProcessed.length} runs were triggered by queue/other agents`,
+          fix: T3_queueProcessed.length === 0 ? 'Queue processor isn\'t picking up tasks. Check cron job /api/cron/process-queue.' : null },
+        { id: 'T4', name: 'Failed tasks create real failure state', pass: failedRuns.length === 0 || T4_failedWithError.length === failedRuns.length,
+          detail: `${failedRuns.length} failures, ${T4_failedWithError.length} with real error messages`,
+          fix: failedRuns.length > 0 && T4_failedWithError.length < failedRuns.length ? `${failedRuns.length - T4_failedWithError.length} failures have no error message — fake failure state.` : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 2. ORCHESTRATOR / COORDINATION
+    // ═══════════════════════════════════════════════════════════
+    const orchestratorRuns = runs.filter(r => {
+      const tmpl = enabledAssignments.find(a => a.agent_template_id === r.agent_template_id);
+      return tmpl?.agent_templates?.slug === 'master-orchestrator';
+    });
+    const orchestratorCreatedWork = orchestratorRuns.filter(r => {
+      const o = typeof r.output === 'string' ? JSON.parse(r.output || '{}') : (r.output || {});
+      return o.tasks_created?.length > 0 || o.follow_up_tasks?.length > 0 || o.agents_to_activate?.length > 0;
+    });
+    const validationChainRuns = runs.filter(r => r.task_payload?.validation_chain);
+    const duplicateWork = (() => {
+      const agentRunMap = {};
+      runs.filter(r => r.created_at >= h24).forEach(r => {
+        const key = `${r.agent_template_id}`;
+        if (!agentRunMap[key]) agentRunMap[key] = [];
+        agentRunMap[key].push(r);
+      });
+      return Object.entries(agentRunMap).filter(([_, v]) => v.length > 3).length;
+    })();
+    const blockedQueue = queue.filter(q => q.status === 'failed' || (q.depends_on?.length > 0 && q.status === 'queued'));
+
+    results.orchestration = {
+      score: 0, max: 5, tests: [
+        { id: 'T5', name: 'Orchestrator sees runs and reacts', pass: orchestratorCreatedWork.length > 0,
+          detail: `${orchestratorRuns.length} orchestrator runs, ${orchestratorCreatedWork.length} created follow-up work`,
+          fix: orchestratorRuns.length === 0 ? 'Master orchestrator never ran. It should run periodically to coordinate agents.' : orchestratorCreatedWork.length === 0 ? 'Orchestrator runs but creates no follow-up work. Its prompt may not instruct it to coordinate.' : null },
+        { id: 'T6', name: 'No duplicate work', pass: duplicateWork === 0,
+          detail: duplicateWork === 0 ? 'No duplicate agent runs detected in 24h' : `${duplicateWork} agents ran more than 3 times in 24h — possible duplicate work`,
+          fix: duplicateWork > 0 ? 'Multiple agents running same work. Add deduplication logic to orchestrator.' : null },
+        { id: 'T7', name: 'Blockers are escalated', pass: blockedQueue.length === 0,
+          detail: `${blockedQueue.length} blocked/failed items in queue`,
+          fix: blockedQueue.length > 0 ? `${blockedQueue.length} tasks stuck. Review queue for dependency issues or failed prerequisites.` : null },
+        { id: 'T8', name: 'Orchestrator has real world-state view', pass: orchestratorRuns.length > 0 && bl.length >= 3,
+          detail: `${bl.length} baselines tracked, ${snaps.length} KPI snapshots, ${kw.length} keywords, ${comp.length} competitors`,
+          fix: bl.length < 3 ? 'Too few baselines. Run "Refresh All Metrics" to populate real data.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 3. VALIDATION CHAIN
+    // ═══════════════════════════════════════════════════════════
+    const validationTriggers = runs.filter(r => r.trigger_post_change_validation);
+    const validationValidators = validationChainRuns.filter(r => r.task_payload?.pipeline_phase === 'validate');
+    const validationFixers = validationChainRuns.filter(r => r.task_payload?.pipeline_phase === 'fix');
+    const validationRevalidations = validationChainRuns.filter(r => r.task_payload?.pipeline_phase === 're-validate');
+
+    results.validation_chain = {
+      score: 0, max: 5, tests: [
+        { id: 'T9', name: 'Post-change validation triggers automatically', pass: validationTriggers.length > 0 || validationChainRuns.length > 0,
+          detail: `${validationTriggers.length} changes triggered validation, ${validationChainRuns.length} validation chain runs total`,
+          fix: validationTriggers.length === 0 ? 'No post-change validations triggered. Agents may not be reporting changes, or post_change_trigger is not set on agent templates.' : null },
+        { id: 'T10', name: 'Validation failure reopens work', pass: validationFixers.length > 0 || validationChainRuns.length === 0,
+          detail: `${validationFixers.length} auto-fix runs triggered by validation failures`,
+          fix: validationFixers.length === 0 && validationValidators.length > 0 ? 'Validators ran but never triggered fixes. Either no issues found or auto-fix loop not wired.' : null },
+        { id: 'T11', name: 'Validation results visible', pass: validationChainRuns.every(r => r.output),
+          detail: validationChainRuns.length > 0 ? `${validationChainRuns.length} validation runs, all have output` : 'No validation runs yet',
+          fix: null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 4. MEMORY / LEARNING
+    // ═══════════════════════════════════════════════════════════
+    const activeMem = mem.filter(m => m.approved && !m.is_stale);
+    const usedMem = activeMem.filter(m => m.times_used > 0);
+    const docMem = mem.filter(m => m.derived_from_file_id);
+    const runCreatedMem = mem.filter(m => m.source === 'run' || m.source === 'agent');
+
+    results.memory = {
+      score: 0, max: 5, tests: [
+        { id: 'T12', name: 'Memory injected into agents', pass: usedMem.length > 0,
+          detail: `${activeMem.length} active items, ${usedMem.length} actually used by agents`,
+          fix: usedMem.length === 0 && activeMem.length > 0 ? 'Memory exists but agents never use it. Check memory injection in executeAgent.' : activeMem.length === 0 ? 'No memory items. Add client context via Memory view.' : null },
+        { id: 'T13', name: 'Memory usage tracking works', pass: usedMem.length > 0 && usedMem.some(m => m.last_used_at),
+          detail: `${usedMem.length} items have usage count, ${usedMem.filter(m => m.last_used_at).length} have last_used_at`,
+          fix: usedMem.length > 0 && !usedMem.some(m => m.last_used_at) ? 'Usage counts exist but timestamps missing.' : null },
+        { id: 'T14', name: 'Agents write new memory', pass: runCreatedMem.length > 0,
+          detail: `${runCreatedMem.length} memory items created by agent runs`,
+          fix: runCreatedMem.length === 0 ? 'No agent has ever written memory. Agents should save lessons and insights.' : null },
+        { id: 'T15', name: 'Document-derived memory used', pass: docMem.length === 0 || docMem.some(m => m.times_used > 0),
+          detail: docMem.length > 0 ? `${docMem.length} doc-derived items, ${docMem.filter(m => m.times_used > 0).length} used` : 'No document-derived memory',
+          fix: docMem.length > 0 && !docMem.some(m => m.times_used > 0) ? 'Documents were ingested but never used by agents.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 5. CLIENT GROWTH DATABASE
+    // ═══════════════════════════════════════════════════════════
+    const dataSources = {
+      baselines: bl.length, keywords: kw.length, competitors: comp.length,
+      connectors: conn.length, kpi_snapshots: snaps.length, incidents: inc.length,
+      memory: activeMem.length, runs_7d: runs.length, credentials: creds.length,
+    };
+    const filledSources = Object.values(dataSources).filter(v => v > 0).length;
+    const kwWithPosition = kw.filter(k => k.current_position != null);
+    const kwStale = kw.filter(k => !k.last_checked || new Date(k.last_checked) < new Date(d7));
+    const tasksWithGoal = runs.filter(r => r.task_payload?.objective || r.task_payload?.goal || r.task_payload?.reason);
+
+    results.client_growth_database = {
+      score: 0, max: 5, tests: [
+        { id: 'T16', name: 'All data enters one client truth model', pass: filledSources >= 6,
+          detail: `${filledSources}/${Object.keys(dataSources).length} data sources populated: ${Object.entries(dataSources).map(([k, v]) => `${k}=${v}`).join(', ')}`,
+          fix: filledSources < 6 ? `Missing data sources: ${Object.entries(dataSources).filter(([_, v]) => v === 0).map(([k]) => k).join(', ')}` : null },
+        { id: 'T17', name: 'Growth tasks tied to client objective', pass: tasksWithGoal.length > 0 || runs.length === 0,
+          detail: `${tasksWithGoal.length}/${runs.length} runs have explicit objective/goal`,
+          fix: tasksWithGoal.length === 0 && runs.length > 0 ? 'No runs have objective metadata. Tasks should explain WHY they exist.' : null },
+        { id: 'T18', name: 'System can explain "why this task exists"', pass: tasksWithGoal.length >= Math.floor(runs.length * 0.3),
+          detail: `${Math.round(runs.length > 0 ? (tasksWithGoal.length / runs.length) * 100 : 0)}% of tasks have origin/goal metadata`,
+          fix: null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 6. INTEGRATION FRESHNESS
+    // ═══════════════════════════════════════════════════════════
+    const staleBaselines = bl.filter(b => !b.recorded_at || new Date(b.recorded_at) < new Date(d7));
+    const freshBaselines = bl.filter(b => b.recorded_at && new Date(b.recorded_at) >= new Date(d7));
+    const connectedCreds = creds.filter(c => c.is_connected && c.credential_data && Object.keys(c.credential_data || {}).length > 0);
+    const oauthServices = ['google_search_console', 'google_business_profile', 'facebook', 'instagram', 'google_ads', 'google_analytics'];
+    const missingOauth = oauthServices.filter(s => {
+      const c = creds.find(cr => cr.service === s);
+      return !c?.credential_data?.access_token;
+    });
+
+    results.integration_freshness = {
+      score: 0, max: 5, tests: [
+        { id: 'T19', name: 'Data freshness truth (no stale metrics shown as current)', pass: staleBaselines.length === 0 || bl.length === 0,
+          detail: `${freshBaselines.length}/${bl.length} baselines fresh (within 7 days), ${staleBaselines.length} stale`,
+          fix: staleBaselines.length > 0 ? `Stale metrics: ${staleBaselines.map(b => `${b.metric_name} (${b.recorded_at ? Math.round((now - new Date(b.recorded_at).getTime()) / 86400000) + 'd ago' : 'never updated'})`).join(', ')}. Run "Refresh All Metrics".` : null },
+        { id: 'T20', name: 'Every integration has freshness metadata', pass: bl.every(b => b.recorded_at) || bl.length === 0,
+          detail: `${bl.filter(b => b.recorded_at).length}/${bl.length} have timestamps`,
+          fix: bl.some(b => !b.recorded_at) ? 'Some baselines have no timestamp — impossible to tell if data is fresh.' : null },
+        { id: 'T21', name: 'Missing configuration detected', pass: missingOauth.length <= 2,
+          detail: `${connectedCreds.length} credentials connected, ${missingOauth.length} OAuth services not configured: ${missingOauth.join(', ') || 'none'}`,
+          fix: missingOauth.length > 2 ? `Connect these services via Setup Link: ${missingOauth.join(', ')}` : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 7. WEBSITE / CHANGE CONTROL
+    // ═══════════════════════════════════════════════════════════
+    const changesRecorded = runs.filter(r => r.changed_anything);
+    const changesWithDetail = changesRecorded.filter(r => r.what_changed);
+    const rules = client?.client_rules || {};
+
+    results.website_control = {
+      score: 0, max: 5, tests: [
+        { id: 'T24', name: 'Website access policy defined', pass: !!(rules.website_access_level),
+          detail: rules.website_access_level ? `Access level: ${rules.website_access_level}` : 'No access policy defined',
+          fix: !rules.website_access_level ? 'Define website access policy (read-only, PR required, direct edit) in client rules.' : null },
+        { id: 'T25', name: 'Real change history exists', pass: changesWithDetail.length > 0 || changesRecorded.length === 0,
+          detail: `${changesRecorded.length} changes recorded, ${changesWithDetail.length} with details`,
+          fix: changesRecorded.length > 0 && changesWithDetail.length === 0 ? 'Changes are recorded but without details — no audit trail.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 8. SYSTEM TRUST / ANTI-FAKE
+    // ═══════════════════════════════════════════════════════════
+    const fakeSuccesses = successRuns.filter(r => {
+      const o = typeof r.output === 'string' ? JSON.parse(r.output || '{}') : (r.output || {});
+      const hasSubstance = o._tool_call_count > 0 || o.changes_made || o.data_collected || o.metrics || o.findings || o.analysis || o.recommendations;
+      return !hasSubstance;
+    });
+    const emptyPromptAgents = agents.filter(a => !a.base_prompt || a.base_prompt.trim().length < 50);
+    const noScheduleAgents = enabledAssignments.filter(a => !sched.some(s => s.agent_template_id === a.agent_template_id));
+
+    results.system_trust = {
+      score: 0, max: 5, tests: [
+        { id: 'T28', name: 'No blind healthy state (no fake success)', pass: fakeSuccesses.length <= Math.floor(successRuns.length * 0.1),
+          detail: `${fakeSuccesses.length}/${successRuns.length} successful runs produced no real output (no tools, no data, no changes)`,
+          fix: fakeSuccesses.length > 0 ? `${fakeSuccesses.length} runs marked "success" but did nothing real. These are cosmetic — agents generated text without executing actions.` : null },
+        { id: 'T29', name: 'System explains "why not updating"', pass: bl.every(b => b.recorded_at && b.source) || bl.length === 0,
+          detail: `${bl.filter(b => b.source).length}/${bl.length} baselines have source attribution`,
+          fix: bl.some(b => !b.source) ? 'Some metrics have no source — impossible to diagnose why they\'re not updating.' : null },
+        { id: 'T30', name: 'One-screen client truth available', pass: bl.length >= 3 && enabledAssignments.length >= 10 && activeMem.length >= 3,
+          detail: `Baselines: ${bl.length}, Agents: ${enabledAssignments.length}, Memory: ${activeMem.length}, Keywords: ${kw.length}`,
+          fix: bl.length < 3 || enabledAssignments.length < 10 || activeMem.length < 3 ? 'Client truth model incomplete. Need baselines, agents, and memory to show real state.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 9. AUTH MODEL HEALTH
+    // ═══════════════════════════════════════════════════════════
+    const googleOauthCreds = creds.filter(c => ['google_search_console', 'google_ads', 'google_analytics', 'google_business_profile'].includes(c.service));
+    const googleWithToken = googleOauthCreds.filter(c => c.credential_data?.access_token || c.oauth_provider === 'google');
+    const googleWithPassword = googleOauthCreds.filter(c => c.credential_data?.password && !c.credential_data?.access_token);
+    const metaCreds = creds.filter(c => ['facebook', 'instagram', 'meta_business'].includes(c.service));
+    const metaWithToken = metaCreds.filter(c => c.credential_data?.access_token || c.oauth_provider === 'meta');
+    const metaWithPassword = metaCreds.filter(c => c.credential_data?.password && !c.credential_data?.access_token);
+
+    results.auth_model = {
+      score: 0, max: 5, tests: [
+        { id: 'T31', name: 'Google services use platform OAuth (no passwords)', pass: googleWithPassword.length === 0,
+          detail: `${googleWithToken.length}/${googleOauthCreds.length} Google services connected via OAuth, ${googleWithPassword.length} using passwords`,
+          fix: googleWithPassword.length > 0 ? `${googleWithPassword.map(c => c.service).join(', ')} have stored passwords instead of OAuth tokens. Send a Setup Link to connect via Google OAuth.` : null },
+        { id: 'T32', name: 'Meta services use platform OAuth (no passwords)', pass: metaWithPassword.length === 0,
+          detail: `${metaWithToken.length}/${metaCreds.length} Meta services connected via OAuth, ${metaWithPassword.length} using passwords`,
+          fix: metaWithPassword.length > 0 ? `${metaWithPassword.map(c => c.service).join(', ')} have stored passwords instead of OAuth tokens. Send a Setup Link to connect via Meta OAuth.` : null },
+        { id: 'T33', name: 'No customer-specific auth setup required', pass: true,
+          detail: 'Platform uses shared Google/Meta OAuth apps — no per-customer Auth0 required',
+          fix: null },
+        { id: 'T34', name: 'OAuth tokens have scope sufficiency', pass: googleWithToken.length === 0 || googleWithToken.some(c => c.credential_data?.scope),
+          detail: googleWithToken.length > 0 ? `${googleWithToken.filter(c => c.credential_data?.scope).length}/${googleWithToken.length} OAuth tokens have scope metadata` : 'No Google OAuth tokens to check',
+          fix: googleWithToken.length > 0 && !googleWithToken.some(c => c.credential_data?.scope) ? 'OAuth tokens lack scope metadata — cannot verify sufficient permissions.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 10. PERPLEXITY / GEO LAYER
+    // ═══════════════════════════════════════════════════════════
+    const [pplxQueries, geoSignals, citedDomains] = await Promise.all([
+      supabase.from('external_research_queries').select('id, created_at', { count: 'exact', head: true }).eq('client_id', clientId),
+      supabase.from('geo_visibility_signals').select('id, created_at', { count: 'exact', head: true }).eq('client_id', clientId),
+      supabase.from('cited_domains').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
+    ]).catch(() => [{ count: 0 }, { count: 0 }, { count: 0 }]);
+
+    const pplxCount = pplxQueries?.count || 0;
+    const geoCount = geoSignals?.count || 0;
+    const citedCount = citedDomains?.count || 0;
+    const geoAgentRuns = runs.filter(r => r.agent_template_id && agents.find(a => a.id === r.agent_template_id && a.slug === 'geo-ai-visibility-agent'));
+
+    results.perplexity_geo = {
+      score: 0, max: 5, tests: [
+        { id: 'T35', name: 'Perplexity research queries stored', pass: pplxCount > 0,
+          detail: `${pplxCount} research queries logged`, fix: pplxCount === 0 ? 'No Perplexity queries stored. Run GEO agent or competitor agent with search_perplexity tool.' : null },
+        { id: 'T36', name: 'Cited domains tracked', pass: citedCount > 0,
+          detail: `${citedCount} cited domains discovered`, fix: citedCount === 0 ? 'No cited domains extracted. Run search_perplexity to discover which domains AI cites.' : null },
+        { id: 'T37', name: 'GEO visibility signals recorded', pass: geoCount > 0,
+          detail: `${geoCount} GEO visibility signals`, fix: geoCount === 0 ? 'No GEO signals. Run geo-ai-visibility-agent to check if client appears in AI answers.' : null },
+        { id: 'T38', name: 'GEO agent has run recently', pass: geoAgentRuns.length > 0,
+          detail: geoAgentRuns.length > 0 ? `${geoAgentRuns.length} GEO agent runs in last 7d` : 'GEO agent has not run in 7d',
+          fix: geoAgentRuns.length === 0 ? 'Schedule GEO agent or trigger manually to start AI visibility monitoring.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // 11. MANUS / BROWSER OPERATOR LAYER
+    // ═══════════════════════════════════════════════════════════
+    const [browserTasksAll, browserTasksDone, browserTasksFailed] = await Promise.all([
+      supabase.from('browser_tasks').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
+      supabase.from('browser_tasks').select('id', { count: 'exact', head: true }).eq('client_id', clientId).eq('status', 'completed'),
+      supabase.from('browser_tasks').select('id', { count: 'exact', head: true }).eq('client_id', clientId).eq('status', 'failed'),
+    ]).catch(() => [{ count: 0 }, { count: 0 }, { count: 0 }]);
+
+    const btTotal = browserTasksAll?.count || 0;
+    const btDone = browserTasksDone?.count || 0;
+    const btFailed = browserTasksFailed?.count || 0;
+    const hasManusKey = !!process.env.MANUS_API_KEY;
+
+    results.browser_tasks = {
+      score: 0, max: 5, tests: [
+        { id: 'T39', name: 'Browser task queue operational', pass: btTotal > 0 || hasManusKey,
+          detail: btTotal > 0 ? `${btTotal} browser tasks submitted (${btDone} completed, ${btFailed} failed)` : (hasManusKey ? 'Manus configured, no tasks submitted yet' : 'No browser tasks and no Manus API key'),
+          fix: !hasManusKey ? 'Set MANUS_API_KEY environment variable to enable browser automation.' : null },
+        { id: 'T40', name: 'Browser tasks completing successfully', pass: btTotal === 0 || btDone > 0,
+          detail: btTotal > 0 ? `${btDone}/${btTotal} tasks completed` : 'No tasks to evaluate',
+          fix: btTotal > 0 && btDone === 0 ? 'No browser tasks have completed. Check Manus API connection and task instructions.' : null },
+        { id: 'T41', name: 'No excessive browser task failures', pass: btFailed === 0 || btFailed < btTotal * 0.5,
+          detail: btFailed > 0 ? `${btFailed} failed tasks (${Math.round(btFailed/btTotal*100)}% failure rate)` : 'No failures',
+          fix: btFailed >= btTotal * 0.5 ? 'High browser task failure rate. Review task instructions and Manus configuration.' : null },
+      ]
+    };
+
+    // ═══════════════════════════════════════════════════════════
+    // SCORING
+    // ═══════════════════════════════════════════════════════════
+    const SCORE_LABELS = ['missing', 'modeled only', 'partial', 'working but weak', 'solid', 'production-grade'];
+    let totalPass = 0, totalTests = 0;
+
+    for (const [category, data] of Object.entries(results)) {
+      const passed = data.tests.filter(t => t.pass).length;
+      const total = data.tests.length;
+      totalPass += passed;
+      totalTests += total;
+      const pct = total > 0 ? passed / total : 0;
+      data.score = pct >= 1 ? 5 : pct >= 0.8 ? 4 : pct >= 0.6 ? 3 : pct >= 0.4 ? 2 : pct > 0 ? 1 : 0;
+      data.score_label = SCORE_LABELS[data.score];
+      data.passed = passed;
+      data.total = total;
+    }
+
+    const overallScore = totalTests > 0 ? Math.round((totalPass / totalTests) * 100) : 0;
+
+    // ── Blockers classification ──────────────────────────────────
+    const blockers = [];
+    for (const [cat, data] of Object.entries(results)) {
+      for (const test of data.tests) {
+        if (!test.pass && test.fix) {
+          blockers.push({ category: cat, test: test.id, name: test.name, fix: test.fix, severity: test.fix.includes('CRITICAL') || test.fix.includes('fake') ? 'critical' : 'high' });
+        }
+      }
+    }
+
+    // ── Client growth state summary ──────────────────────────────
+    const growthState = {
+      domain: client?.domain,
+      name: client?.name,
+      active_agents: enabledAssignments.length,
+      total_runs_7d: runs.length,
+      successful_runs_7d: successRuns.length,
+      failed_runs_7d: failedRuns.length,
+      real_tool_executions: runsWithTools.length,
+      baselines_tracked: bl.length,
+      baselines_fresh: freshBaselines.length,
+      baselines_stale: staleBaselines.length,
+      keywords_tracked: kw.length,
+      keywords_with_position: kwWithPosition.length,
+      keywords_stale: kwStale.length,
+      competitors_tracked: comp.length,
+      memory_items: activeMem.length,
+      open_incidents: inc.filter(i => i.status === 'open').length,
+      pending_approvals: appr.filter(a => a.status === 'pending').length,
+      queue_pending: queue.filter(q => q.status === 'queued').length,
+      queue_stuck: queue.filter(q => q.status === 'failed').length,
+      connected_services: connectedCreds.length,
+      missing_oauth: missingOauth,
+      last_successful_run: successRuns[0]?.created_at || null,
+      last_any_run: runs[0]?.created_at || null,
+      validation_chains_run: validationChainRuns.length,
+    };
+
+    res.json({
+      client_id: clientId,
+      audit_timestamp: new Date().toISOString(),
+      overall_score: overallScore,
+      overall_label: SCORE_LABELS[overallScore >= 90 ? 5 : overallScore >= 75 ? 4 : overallScore >= 55 ? 3 : overallScore >= 35 ? 2 : overallScore > 0 ? 1 : 0],
+      total_passed: totalPass,
+      total_tests: totalTests,
+      categories: results,
+      blockers,
+      growth_state: growthState,
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

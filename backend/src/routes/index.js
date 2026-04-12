@@ -63,6 +63,14 @@ router.delete('/clients/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+router.patch('/clients/:id/rules', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('client_rules').update(req.body).eq('client_id', req.params.id).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/clients/:id/stats', async (req, res) => {
   try {
     const clientId = req.params.id;

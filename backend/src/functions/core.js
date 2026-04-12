@@ -511,7 +511,18 @@ FINAL OUTPUT RULES:
 
     // 21. CENTRAL COORDINATION — React to agent output and create follow-up work
     try {
-      await coordinatePostRun(clientId, run.id, agent, output, taskPayload);
+      const coordResult = await coordinatePostRun(clientId, run.id, agent, output, taskPayload);
+      // Write coordination results back to run output so audit can see tasks_created
+      if (coordResult?.follow_ups > 0) {
+        const coordMeta = {
+          tasks_created: coordResult.agents_activated?.map(slug => ({ agent_slug: slug })) || [],
+          follow_up_tasks: coordResult.agents_activated?.map(slug => ({ agent_slug: slug, action: 'queued' })) || [],
+          agents_to_activate: coordResult.agents_activated || [],
+        };
+        await supabase.from('runs').update({
+          output: { ...output, ...coordMeta, _coordination: coordResult },
+        }).eq('id', run.id);
+      }
     } catch (coordErr) {
       console.error('[COORDINATION]', coordErr.message);
     }

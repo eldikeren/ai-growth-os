@@ -672,8 +672,8 @@ export async function processRunQueue() {
   }
 
   for (const item of queueItems) {
-    // Time budget: stop processing 8s before Vercel timeout (60s)
-    if (Date.now() - startTime > 50000) {
+    // Time budget: only process ONE item per cron tick (agent execution takes ~40-50s)
+    if (processed > 0 || Date.now() - startTime > 45000) {
       console.log(`[QUEUE] Time budget exhausted after ${processed} processed, stopping`);
       break;
     }

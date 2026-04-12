@@ -15,7 +15,7 @@ const supabase = createClient(
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const MAX_TOOL_ITERATIONS = 12; // Max tool call rounds per agent execution
+const MAX_TOOL_ITERATIONS = 8; // Max tool call rounds per agent execution (keep under 300s Vercel limit)
 
 // ── JSON REPAIR — fix common LLM output issues ──────────────
 function repairAndParseJSON(text) {
@@ -959,6 +959,7 @@ function estimateFollowUpPriority(sourceAgent, targetSlug, issues, output) {
 // Detect false successes: agent said "success" but didn't actually do anything
 function detectFalseSuccess(run, output) {
   const flags = [];
+  const didToolWork = run.tool_calls_count > 0;
 
   // 1. No tool calls made
   if (!run.tool_calls_count || run.tool_calls_count === 0) {
@@ -971,26 +972,34 @@ function detectFalseSuccess(run, output) {
     flags.push('minimal_output');
   }
 
-  // 3. No concrete actions listed
+  // 3. No concrete actions listed — only flag if agent also used no tools
+  // Audit/monitoring agents return issues+recommendations, not actions_taken
   const hasActions = output?.actions_taken?.length > 0 || output?.changes_made?.length > 0 ||
     output?.fixes_applied?.length > 0 || output?.updates?.length > 0 || output?.results?.length > 0;
-  if (!hasActions && !output?.metrics && !output?.issues && !output?.recommendations) {
+  const hasFindings = output?.metrics || output?.issues || output?.recommendations ||
+    output?.rankings || output?.findings || output?.audit_results;
+  if (!hasActions && !hasFindings && !didToolWork) {
     flags.push('no_concrete_actions');
   }
 
   // 4. Output just echoes instructions back
   if (output?.summary && /will monitor|will check|will review|no issues found|everything looks good/i.test(output.summary)) {
-    if (!hasActions) flags.push('passive_summary_only');
+    if (!hasActions && !hasFindings) flags.push('passive_summary_only');
   }
 
-  // 5. Output contains failure keywords in Hebrew or English — agent tried but failed
-  const failurePatterns = /נכשל|חוסר ב|לא נמצא|לא זמין|אין גישה|שגיאה|failed|error|not found|unavailable|no access|missing credential|not connected|could not fetch|unable to|blocked|unauthorized|denied|no data available/i;
-  if (failurePatterns.test(outputStr)) {
-    flags.push('output_contains_failure');
+  // 5. Output contains failure keywords — only flag if agent also used NO tools.
+  // If agent used tools and still got failures, that's a real failure (missing credentials etc),
+  // not a fake success — the run status will already reflect that.
+  if (!didToolWork) {
+    const failurePatterns = /נכשל|חוסר ב|לא נמצא|לא זמין|אין גישה|שגיאה|failed|error|not found|unavailable|no access|missing credential|not connected|could not fetch|unable to|blocked|unauthorized|denied|no data available/i;
+    if (failurePatterns.test(outputStr)) {
+      flags.push('output_contains_failure');
+    }
   }
 
-  // 6. changed_anything is false — the agent didn't actually change anything
-  if (run.changed_anything === false) {
+  // 6. changed_anything is false — only penalize if agent ALSO used no tools.
+  // Monitoring/audit agents are supposed to observe, not mutate.
+  if (run.changed_anything === false && !didToolWork) {
     flags.push('changed_nothing');
   }
 

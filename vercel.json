@@ -31,6 +31,6 @@
     { "path": "/api/cron/audit-snapshot", "schedule": "0 5 * * *" }
   ],
   "functions": {
-    "api/index.mjs": { "maxDuration": 60 }
+    "api/index.mjs": { "maxDuration": 300 }
   }
 }

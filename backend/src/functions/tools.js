@@ -5,11 +5,101 @@
 // ============================================================
 
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
+
+// ============================================================
+// GOOGLE TOKEN HELPER — auto-refresh before every API call
+// Google access tokens expire in 1 hour. This function always
+// returns a valid token, refreshing silently if needed.
+// ============================================================
+async function getValidGoogleToken(clientId) {
+  const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
+  if (!ENC_KEY || !clientId) return null;
+
+  // Load the Google OAuth credential for this client
+  const { data: cred } = await supabase.from('oauth_credentials')
+    .select('id, access_token_encrypted, refresh_token_encrypted, encryption_iv, expires_at, status')
+    .eq('client_id', clientId)
+    .eq('provider', 'google')
+    .order('connected_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!cred) return null;
+
+  // Check if the access token is still valid (with 5-minute buffer)
+  const isExpired = !cred.expires_at || new Date(cred.expires_at).getTime() < Date.now() + 5 * 60 * 1000;
+
+  if (!isExpired && cred.status === 'active') {
+    // Token is valid — just decrypt and return
+    try {
+      const ivParts = (cred.encryption_iv || '').split(':');
+      const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(ivParts[0], 'hex'));
+      let token = decipher.update(cred.access_token_encrypted, 'hex', 'utf8');
+      token += decipher.final('utf8');
+      return token;
+    } catch { return null; }
+  }
+
+  // Token is expired or expiring — refresh it now
+  if (!cred.refresh_token_encrypted) {
+    // No refresh token — mark as expired, must reconnect
+    await supabase.from('oauth_credentials').update({ status: 'expired', last_error: 'No refresh token available' }).eq('id', cred.id);
+    return null;
+  }
+
+  try {
+    const ivParts = (cred.encryption_iv || '').split(':');
+    if (ivParts.length < 2) return null;
+    const refreshDecipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(ivParts[1], 'hex'));
+    let refreshToken = refreshDecipher.update(cred.refresh_token_encrypted, 'hex', 'utf8');
+    refreshToken += refreshDecipher.final('utf8');
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: (process.env.GOOGLE_CLIENT_ID || '').trim(),
+        client_secret: (process.env.GOOGLE_CLIENT_SECRET || '').trim(),
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const tokens = await tokenRes.json();
+    if (!tokens.access_token) {
+      await supabase.from('oauth_credentials').update({ status: 'expired', last_error: tokens.error_description || tokens.error || 'Refresh failed' }).eq('id', cred.id);
+      return null;
+    }
+
+    // Encrypt and save the new access token
+    const newIv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), newIv);
+    let encAccess = cipher.update(tokens.access_token, 'utf8', 'hex');
+    encAccess += cipher.final('hex');
+    const newExpiry = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+
+    await supabase.from('oauth_credentials').update({
+      access_token_encrypted: encAccess,
+      encryption_iv: newIv.toString('hex') + ':' + ivParts[1],
+      expires_at: newExpiry,
+      status: 'active',
+      last_refresh_at: new Date().toISOString(),
+      last_error: null,
+    }).eq('client_id', clientId).eq('provider', 'google');
+
+    console.log(`[TOKEN_AUTO_REFRESH] Refreshed Google token for client ${clientId}, expires ${newExpiry}`);
+    return tokens.access_token;
+  } catch (e) {
+    console.error(`[TOKEN_AUTO_REFRESH] Failed for client ${clientId}:`, e.message);
+    await supabase.from('oauth_credentials').update({ status: 'expired', last_error: e.message }).eq('id', cred.id);
+    return null;
+  }
+}
 
 // ============================================================
 // TOOL DEFINITIONS — OpenAI function calling format
@@ -669,7 +759,7 @@ export async function executeTool(toolName, args, clientId, runId) {
         if (clientId) {
           try {
             // 1. Log the research query
-            await supabase.from('external_research_queries').insert({
+            const { error: researchErr } = await supabase.from('external_research_queries').insert({
               client_id: clientId,
               run_id: runId || null,
               agent_slug: args._agent_slug || null,
@@ -679,22 +769,25 @@ export async function executeTool(toolName, args, clientId, runId) {
               citations: result.citations,
               raw_response: { model: data.model, usage: data.usage },
               tokens_used: data.usage?.total_tokens || null
-            }).catch(() => {});
+            });
+            if (researchErr) console.error('[PERPLEXITY_STORE] external_research_queries insert failed:', researchErr.message);
 
             // 2. Extract and upsert cited domains
             const citedUrls = citations.filter(c => typeof c === 'string');
             for (const url of citedUrls) {
               try {
                 const domain = new URL(url).hostname.replace(/^www\./, '');
-                await supabase.from('cited_domains').upsert({
+                const { error: domainErr } = await supabase.from('cited_domains').upsert({
                   client_id: clientId,
                   domain,
                   citation_count: 1,
                   contexts: [args.query.slice(0, 200)],
                   last_seen: new Date().toISOString(),
                 }, { onConflict: 'client_id,domain' });
+                if (domainErr) console.error('[PERPLEXITY_STORE] cited_domains upsert failed:', domainErr.message);
                 // Increment count for existing
-                await supabase.rpc('increment_citation_count', { p_client_id: clientId, p_domain: domain, p_context: args.query.slice(0, 200) }).catch(() => {});
+                const { error: rpcErr } = await supabase.rpc('increment_citation_count', { p_client_id: clientId, p_domain: domain, p_context: args.query.slice(0, 200) });
+                if (rpcErr) console.error('[PERPLEXITY_STORE] increment_citation_count failed:', rpcErr.message);
               } catch {}
             }
             // 3. Extract entities (brands, companies, people) from answer
@@ -721,14 +814,15 @@ export async function executeTool(toolName, args, clientId, runId) {
             }
             if (entities.size > 0) {
               for (const entity of entities) {
-                await supabase.from('repeated_entities').upsert({
+                const { error: entityErr } = await supabase.from('repeated_entities').upsert({
                   client_id: clientId,
                   entity_name: entity.slice(0, 100),
                   entity_type: 'brand_or_org',
                   mention_count: 1,
                   source_queries: [args.query.slice(0, 200)],
                   last_seen: new Date().toISOString(),
-                }, { onConflict: 'client_id,entity_name' }).catch(() => {});
+                }, { onConflict: 'client_id,entity_name' });
+                if (entityErr) console.error('[PERPLEXITY_STORE] repeated_entities upsert failed:', entityErr.message);
               }
             }
           } catch (e) { console.error('Perplexity structured storage error:', e.message); }
@@ -742,13 +836,62 @@ export async function executeTool(toolName, args, clientId, runId) {
       // ========================================
       case 'fetch_google_reviews': {
         const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-        if (!apiKey) return { error: 'Google Places API key not configured' };
+
+        // ── Strategy 1: Use GBP OAuth to fetch reviews (auto-refreshes if expired) ──
+        if (clientId) {
+          try {
+            const accessToken = await getValidGoogleToken(clientId);
+
+            if (accessToken) {
+                  // Try GBP API — list accounts, then get location reviews
+                  const acctResp = await fetch('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', {
+                    headers: { 'Authorization': `Bearer ${accessToken}` }
+                  });
+                  const acctData = await acctResp.json();
+                  if (acctData.accounts?.length) {
+                    const accountName = acctData.accounts[0].name;
+                    // List locations
+                    const locResp = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,metadata`, {
+                      headers: { 'Authorization': `Bearer ${accessToken}` }
+                    });
+                    const locData = await locResp.json();
+                    if (locData.locations?.length) {
+                      const location = locData.locations[0];
+                      // Get reviews
+                      const reviewResp = await fetch(`https://mybusiness.googleapis.com/v4/${location.name}/reviews`, {
+                        headers: { 'Authorization': `Bearer ${accessToken}` }
+                      });
+                      const reviewData = await reviewResp.json();
+                      return {
+                        business_name: location.title || args.business_name,
+                        total_reviews: reviewData.totalReviewCount || 0,
+                        rating: reviewData.averageRating || null,
+                        recent_reviews: (reviewData.reviews || []).slice(0, 5).map(r => ({
+                          author: r.reviewer?.displayName,
+                          rating: r.starRating === 'FIVE' ? 5 : r.starRating === 'FOUR' ? 4 : r.starRating === 'THREE' ? 3 : r.starRating === 'TWO' ? 2 : 1,
+                          text: r.comment?.slice(0, 300),
+                          time: r.createTime
+                        })),
+                        fetched_at: new Date().toISOString(),
+                        source: 'gbp_oauth_api'
+                      };
+                    }
+                  }
+            }
+          } catch (gbpErr) {
+            console.error('[GBP_OAUTH]', gbpErr.message);
+          }
+        }
+
+        // ── Strategy 2: Google Places API (requires billing) ──
+        if (!apiKey) return { error: 'Google Places API key not configured and GBP OAuth unavailable' };
 
         let placeId = args.place_id;
 
         if (!placeId) {
-          // Search for the business — try multiple queries for better match
+          // Search for the business — try multiple queries including Hebrew
           const queries = [args.business_name];
+          if (args.business_name_he) queries.push(args.business_name_he);
           if (args.location) queries.push(`${args.business_name} ${args.location}`);
           if (args.domain) queries.push(args.domain);
 
@@ -777,7 +920,7 @@ export async function executeTool(toolName, args, clientId, runId) {
                 search_method: 'text_search',
               };
             }
-            return { error: `Business not found with any method. Tried: ${queries.join(', ')}`, api_status: searchData?.status };
+            return { error: `Business not found. Tried: ${queries.join(', ')}`, api_status: searchData?.status, hint: searchData?.status === 'REQUEST_DENIED' ? 'Google Places API billing not enabled' : 'Try providing place_id directly or business_name_he in Hebrew' };
           }
 
           placeId = searchData.candidates[0].place_id;
@@ -1130,6 +1273,18 @@ export async function executeTool(toolName, args, clientId, runId) {
       // create_incident
       // ========================================
       case 'create_incident': {
+        // Deduplication: check if a similar open incident already exists (same title or similar description)
+        const { data: existing } = await supabase.from('incidents')
+          .select('id, title, created_at')
+          .eq('client_id', clientId)
+          .in('status', ['open', 'investigating'])
+          .ilike('title', `%${args.title.slice(0, 60)}%`)
+          .limit(1);
+
+        if (existing && existing.length > 0) {
+          return { created: false, duplicate: true, existing_incident_id: existing[0].id, title: existing[0].title, message: 'Similar incident already open — not creating duplicate.' };
+        }
+
         const { data, error } = await supabase.from('incidents').insert({
           client_id: clientId,
           run_id: runId,

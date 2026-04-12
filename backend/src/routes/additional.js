@@ -667,24 +667,26 @@ router.get('/cron/geo-sweep', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── TOKEN REFRESH CRON — runs every 6 hours ─────────────────
+// ── TOKEN REFRESH CRON — runs every 30 minutes ──────────────
+// Refreshes BOTH token stores:
+//   1. client_credentials (unencrypted refresh_token in credential_data JSONB)
+//   2. oauth_credentials  (encrypted tokens from onboarding OAuth flow)
 router.get('/cron/refresh-tokens', async (req, res) => {
+  const results = [];
+  const refreshWindow = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // Refresh anything expiring within 1h
+
+  // ── PART 1: client_credentials table (legacy unencrypted store) ──
   try {
-    // Find OAuth credentials with refresh tokens that expire within 24h or are already expired
     const { data: creds } = await supabase.from('client_credentials')
       .select('id, client_id, service, credential_data, oauth_provider')
       .not('oauth_provider', 'is', null)
       .not('credential_data', 'is', null);
 
-    const results = [];
     for (const cred of (creds || [])) {
       const data = cred.credential_data;
       if (!data?.refresh_token) continue;
-
-      // Check if access token expires within 30 minutes
       const expiresAt = data.expires_at ? new Date(data.expires_at).getTime() : 0;
-      const thirtyMinFromNow = Date.now() + 30 * 60 * 1000;
-      if (expiresAt > thirtyMinFromNow) continue; // Still valid
+      if (expiresAt > Date.now() + 60 * 60 * 1000) continue; // Still valid for >1h
 
       try {
         let newTokens;
@@ -704,32 +706,118 @@ router.get('/cron/refresh-tokens', async (req, res) => {
           const tokenRes = await fetch(`https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${(process.env.META_APP_ID || '').trim()}&client_secret=${(process.env.META_APP_SECRET || '').trim()}&fb_exchange_token=${data.access_token}`);
           newTokens = await tokenRes.json();
         }
-
         if (newTokens?.access_token) {
-          const updated = {
-            ...data,
-            access_token: newTokens.access_token,
-            expires_at: newTokens.expires_in
-              ? new Date(Date.now() + newTokens.expires_in * 1000).toISOString()
-              : data.expires_at,
-          };
           await supabase.from('client_credentials').update({
-            credential_data: updated, is_connected: true, error: null,
+            credential_data: { ...data, access_token: newTokens.access_token, expires_at: newTokens.expires_in ? new Date(Date.now() + newTokens.expires_in * 1000).toISOString() : data.expires_at },
+            is_connected: true, error: null,
           }).eq('id', cred.id);
-          results.push({ service: cred.service, client_id: cred.client_id, status: 'refreshed' });
+          results.push({ table: 'client_credentials', service: cred.service, client_id: cred.client_id, status: 'refreshed' });
         } else {
           const errMsg = newTokens?.error_description || newTokens?.error || 'Unknown refresh error';
-          await supabase.from('client_credentials').update({
-            error: `Token refresh failed: ${errMsg}`, is_connected: false,
-          }).eq('id', cred.id);
-          results.push({ service: cred.service, client_id: cred.client_id, status: 'failed', error: errMsg });
+          await supabase.from('client_credentials').update({ error: `Token refresh failed: ${errMsg}`, is_connected: false }).eq('id', cred.id);
+          results.push({ table: 'client_credentials', service: cred.service, client_id: cred.client_id, status: 'failed', error: errMsg });
         }
       } catch (e) {
-        results.push({ service: cred.service, client_id: cred.client_id, status: 'error', error: e.message });
+        results.push({ table: 'client_credentials', service: cred.service, client_id: cred.client_id, status: 'error', error: e.message });
       }
     }
-    res.json({ token_refreshes: results.length, results });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) {
+    console.error('[REFRESH_CRON] client_credentials sweep failed:', e.message);
+  }
+
+  // ── PART 2: oauth_credentials table (encrypted tokens from onboarding) ──
+  // This is the PRIMARY token store — tokens expire every hour and MUST be refreshed.
+  try {
+    const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
+    if (!ENC_KEY) throw new Error('CREDENTIAL_ENCRYPTION_KEY not set');
+
+    // Find all Google OAuth creds that expire within 1h OR are already marked expired
+    const { data: oauthCreds } = await supabase.from('oauth_credentials')
+      .select('id, client_id, provider, sub_provider, refresh_token_encrypted, access_token_encrypted, encryption_iv, expires_at, status')
+      .eq('provider', 'google')
+      .not('refresh_token_encrypted', 'is', null)
+      .or(`expires_at.lte.${refreshWindow},status.eq.expired`);
+
+    // Group by client_id — one refresh per client (same refresh_token shared across sub_providers)
+    const clientsSeen = new Set();
+
+    for (const oauthCred of (oauthCreds || [])) {
+      const key = oauthCred.client_id;
+      if (clientsSeen.has(key)) continue; // Already refreshed this client's Google token
+      clientsSeen.add(key);
+
+      try {
+        // Decrypt the refresh token
+        const ivParts = (oauthCred.encryption_iv || '').split(':');
+        if (ivParts.length < 2) throw new Error('Invalid encryption_iv format — need access:refresh');
+        const refreshIvHex = ivParts[1];
+        const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(refreshIvHex, 'hex'));
+        let refreshToken = decipher.update(oauthCred.refresh_token_encrypted, 'hex', 'utf8');
+        refreshToken += decipher.final('utf8');
+
+        // Call Google token endpoint
+        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: (process.env.GOOGLE_CLIENT_ID || '').trim(),
+            client_secret: (process.env.GOOGLE_CLIENT_SECRET || '').trim(),
+            refresh_token: refreshToken,
+            grant_type: 'refresh_token',
+          }),
+        });
+        const tokens = await tokenRes.json();
+
+        if (!tokens.access_token) {
+          const errMsg = tokens.error_description || tokens.error || 'No access_token returned';
+          // Mark ALL sub_providers for this client as expired
+          await supabase.from('oauth_credentials')
+            .update({ status: 'expired', last_error: errMsg, updated_at: new Date().toISOString() })
+            .eq('client_id', oauthCred.client_id).eq('provider', 'google');
+          results.push({ table: 'oauth_credentials', client_id: oauthCred.client_id, provider: 'google', status: 'failed', error: errMsg });
+          continue;
+        }
+
+        // Encrypt the new access token
+        const newAccessIv = crypto.randomBytes(16);
+        const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), newAccessIv);
+        let encNewAccess = cipher.update(tokens.access_token, 'utf8', 'hex');
+        encNewAccess += cipher.final('hex');
+        const newExpiresAt = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+
+        // Update ALL sub_provider rows for this client — they share the same access scope
+        const { data: allRows } = await supabase.from('oauth_credentials')
+          .select('id, encryption_iv')
+          .eq('client_id', oauthCred.client_id).eq('provider', 'google');
+
+        for (const row of (allRows || [])) {
+          const rowIvParts = (row.encryption_iv || '').split(':');
+          const refreshIv = rowIvParts[1] || refreshIvHex; // preserve each row's refresh token IV
+          await supabase.from('oauth_credentials').update({
+            access_token_encrypted: encNewAccess,
+            encryption_iv: newAccessIv.toString('hex') + ':' + refreshIv,
+            expires_at: newExpiresAt,
+            status: 'active',
+            last_refresh_at: new Date().toISOString(),
+            last_error: null,
+            updated_at: new Date().toISOString(),
+          }).eq('id', row.id);
+        }
+
+        results.push({ table: 'oauth_credentials', client_id: oauthCred.client_id, provider: 'google', sub_providers_updated: allRows?.length || 0, status: 'refreshed', new_expires_at: newExpiresAt });
+      } catch (e) {
+        await supabase.from('oauth_credentials')
+          .update({ status: 'expired', last_error: e.message, updated_at: new Date().toISOString() })
+          .eq('client_id', oauthCred.client_id).eq('provider', 'google');
+        results.push({ table: 'oauth_credentials', client_id: oauthCred.client_id, provider: 'google', status: 'error', error: e.message });
+      }
+    }
+  } catch (e) {
+    console.error('[REFRESH_CRON] oauth_credentials sweep failed:', e.message);
+    results.push({ table: 'oauth_credentials', status: 'sweep_error', error: e.message });
+  }
+
+  res.json({ token_refreshes: results.length, results, ran_at: new Date().toISOString() });
 });
 
 // ── MANUS BROWSER TASK WORKER — runs every 10 min ───────────

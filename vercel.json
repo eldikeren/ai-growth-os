@@ -26,7 +26,7 @@
     { "path": "/api/cron/refresh-metrics", "schedule": "0 6 * * *" },
     { "path": "/api/cron/orchestrator", "schedule": "0 */3 * * *" },
     { "path": "/api/cron/geo-sweep", "schedule": "0 */12 * * *" },
-    { "path": "/api/cron/refresh-tokens", "schedule": "0 */6 * * *" },
+    { "path": "/api/cron/refresh-tokens", "schedule": "*/30 * * * *" },
     { "path": "/api/cron/process-browser-tasks", "schedule": "*/10 * * * *" },
     { "path": "/api/cron/audit-snapshot", "schedule": "0 5 * * *" }
   ],

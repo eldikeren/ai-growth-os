@@ -71,6 +71,19 @@ router.patch('/clients/:id/rules', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Debug: manually fix a stuck run's status
+router.patch('/runs/:id/fix', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('runs')
+      .update({ status: req.body.status || 'failed', completed_at: new Date().toISOString(), error: req.body.error || 'Manually fixed' })
+      .eq('id', req.params.id)
+      .select('id, status, completed_at')
+      .single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/clients/:id/stats', async (req, res) => {
   try {
     const clientId = req.params.id;

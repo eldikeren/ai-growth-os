@@ -975,7 +975,7 @@ router.get('/cron/self-heal', async (req, res) => {
         .lt('created_at', new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()).limit(200);
       const allToClose = [...new Set([...resolvedIds, ...(oldIncidents?.map(i => i.id) || [])])];
       if (allToClose.length) {
-        await supabase.from('incidents').update({ status: 'resolved', resolved_at: new Date().toISOString(), resolution_note: 'Auto-resolved by self-heal cron' }).in('id', allToClose);
+        await supabase.from('incidents').update({ status: 'resolved', resolved_at: new Date().toISOString(), resolution_notes: 'Auto-resolved by self-heal cron' }).in('id', allToClose);
         fixes.push({ action: 'resolve_incidents', count: allToClose.length });
       }
     }

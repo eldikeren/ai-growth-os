@@ -1125,8 +1125,23 @@ function RunListItem({ run, isSelected, onClick }) {
         <Badge text={run.status} color={colors.status[run.status] || colors.status.partial || colors.textDisabled} bg={(colors.status[run.status] || colors.textDisabled) + '22'} />
         {run.output?._truth_gate?.confidence && (() => {
           const conf = run.output._truth_gate.confidence;
+          const tg = run.output._truth_gate;
+          const missing = tg.missing_sources?.filter(s => s.critical).map(s => s.source) || [];
+          const isLow = conf === 'low' || conf === 'very_low';
+          const label = { high: '✓ High confidence', medium: '~ Partial data', low: '⚠ Limited data', very_low: '⚠ Missing data' }[conf] || conf;
           const c = { high: '#10B981', medium: '#F59E0B', low: '#F97316', very_low: '#EF4444' }[conf] || '#9CA3AF';
-          return <span style={{ fontSize: 8, fontWeight: 700, padding: '2px 5px', borderRadius: 3, background: c + '18', color: c, textTransform: 'uppercase' }}>{conf}</span>;
+          const tooltip = isLow && missing.length > 0
+            ? `Missing: ${missing.join(', ')} → Connect in Credentials to improve`
+            : isLow ? `Data completeness: ${tg.data_completeness_percent || 0}% — connect more integrations`
+            : 'Agent had sufficient data';
+          return (
+            <span
+              title={tooltip}
+              style={{ fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 3, background: c + '18', color: c, textTransform: 'none', cursor: 'help', whiteSpace: 'nowrap' }}
+            >
+              {label}
+            </span>
+          );
         })()}
         {run.false_success && (
           <span title={`False success: ${(run.false_success_flags || []).join(', ')}`} style={{
@@ -1137,6 +1152,59 @@ function RunListItem({ run, isSelected, onClick }) {
         {hasOutput && <ChevronRight size={14} color={colors.textMuted} />}
       </div>
     </button>
+  );
+}
+
+// ─── Mission Banner ───────────────────────────────────────────
+function MissionBanner({ clientId }) {
+  const [keywords, setKeywords] = useState([]);
+  useEffect(() => {
+    if (!clientId) return;
+    api(`/clients/${clientId}/keywords?limit=5`).then(d => setKeywords(d || [])).catch(() => {});
+  }, [clientId]);
+
+  const top3 = keywords.filter(k => k.current_position <= 3).length;
+  const top10 = keywords.filter(k => k.current_position <= 10 && k.current_position > 3).length;
+  const outside = keywords.filter(k => !k.current_position || k.current_position > 10).length;
+
+  return (
+    <div style={{
+      background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #1e40af 100%)',
+      borderRadius: radius.xl, padding: `${spacing.lg}px ${spacing.xl}px`,
+      marginBottom: spacing.xl, color: '#fff',
+      display: 'flex', alignItems: 'center', gap: spacing.xl, flexWrap: 'wrap',
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: fontSize.xs, color: '#a5b4fc', fontWeight: fontWeight.semibold, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+          Mission
+        </div>
+        <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, lineHeight: 1.2 }}>
+          🎯 Get Clients to Top 3
+        </div>
+        <div style={{ fontSize: fontSize.sm, color: '#c7d2fe', marginTop: 4 }}>
+          Every agent action is measured against ranking improvement
+        </div>
+      </div>
+      {keywords.length > 0 && (
+        <div style={{ display: 'flex', gap: spacing.lg }}>
+          {[
+            { label: 'Top 3', count: top3, color: '#10B981', icon: '🥇' },
+            { label: 'Top 10', count: top10, color: '#F59E0B', icon: '📈' },
+            { label: 'Outside 10', count: outside, color: '#F87171', icon: '⚠️' },
+          ].map(({ label, count, color, icon }) => (
+            <div key={label} style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, color }}>{count}</div>
+              <div style={{ fontSize: fontSize.xs, color: '#c7d2fe' }}>{icon} {label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {keywords.length === 0 && (
+        <div style={{ fontSize: fontSize.sm, color: '#a5b4fc' }}>
+          Run SEO Core Agent to track keyword positions →
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1253,6 +1321,7 @@ export default function RunsView({ clientId, focusRunId, onFocusConsumed }) {
 
   return (
     <div>
+      <MissionBanner clientId={clientId} />
       <SH
         title="Run Control"
         sub="Execute agents individually, by lane, or all at once"

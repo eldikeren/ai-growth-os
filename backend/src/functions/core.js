@@ -440,7 +440,9 @@ FINAL OUTPUT RULES:
     output._iterations = iteration;
 
     // 11. Determine next actions
-    const changedAnything = !!(output?.changed_anything || output?.changes_made || output?.change_verified === true);
+    // Also treat propose_website_change calls as "changed something" so validation triggers
+    const proposedChanges = toolCallLog.filter(t => t.tool === 'propose_website_change').length;
+    const changedAnything = !!(output?.changed_anything || output?.changes_made || output?.change_verified === true || proposedChanges > 0);
     const triggerValidation = changedAnything && agent.post_change_trigger && rules.post_change_validation_mandatory;
     const needsApproval = agent.action_mode_default === 'approve_then_act' && !approved && output?.what_needs_approval;
 
@@ -1176,9 +1178,11 @@ function computeDataCompleteness(output, toolCallLog, agentSlug) {
   const measured = extractMeasuredFindings(output);
   if (measured.length > 0) score += 15;
 
-  // 15% — actions or follow-up tasks
+  // 15% — actions or follow-up tasks (including propose_website_change tool calls)
+  const proposedInTools = toolCallLog.filter(t => t.tool === 'propose_website_change').length;
   const hasActions = (output?.actions_taken?.length > 0) || (output?.follow_up_tasks?.length > 0) ||
-    (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0);
+    (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0) ||
+    (output?.total_fixes_proposed > 0) || (output?.fixes_proposed > 0) || proposedInTools > 0;
   if (hasActions) score += 15;
 
   return score;
@@ -1263,6 +1267,33 @@ function extractMeasuredFindings(output) {
   if (output?.regressions?.length) {
     output.regressions.forEach(r => findings.push({ title: 'Regression', evidence: JSON.stringify(r), severity: 'high' }));
   }
+  // Technical SEO crawl agent bucket format
+  const buckets = ['bucket_1_indexing', 'bucket_3_schema', 'bucket_4_technical_debt', 'bucket_5_robots_sitemap'];
+  for (const bucket of buckets) {
+    if (Array.isArray(output?.[bucket]) && output[bucket].length > 0) {
+      output[bucket].forEach(item => findings.push({
+        title: item.issue || item.verdict || bucket,
+        evidence: JSON.stringify(item),
+        severity: item.severity || 'medium',
+      }));
+    }
+  }
+  if (output?.bucket_2_pagespeed?.opportunities?.length > 0) {
+    output.bucket_2_pagespeed.opportunities.forEach(o => findings.push({
+      title: o.title || o.opportunity || 'PageSpeed opportunity',
+      evidence: JSON.stringify(o),
+      severity: 'medium',
+    }));
+  }
+  if (typeof output?.total_issues_found === 'number' && output.total_issues_found > 0) {
+    findings.push({ title: 'Total issues found', evidence: `${output.total_issues_found} issues found`, metric_name: 'total_issues_found', metric_value: output.total_issues_found });
+  }
+  if (typeof output?.non_indexed_pages_count === 'number') {
+    findings.push({ title: 'Non-indexed pages', evidence: `${output.non_indexed_pages_count} pages not indexed`, metric_name: 'non_indexed_pages_count', metric_value: output.non_indexed_pages_count });
+  }
+  if (typeof output?.indexed_pages_count === 'number') {
+    findings.push({ title: 'Indexed pages', evidence: `${output.indexed_pages_count} pages indexed`, metric_name: 'indexed_pages_count', metric_value: output.indexed_pages_count });
+  }
   return findings;
 }
 
@@ -1316,8 +1347,10 @@ function enforceTruthGate(output, agentSlug, toolCallLog) {
   const realSourceCount = dataSources.filter(s => s.freshness_state !== 'unknown').length;
   const criticalMissing = missingSources.filter(s => s.critical).length;
   const staleCount = dataSources.filter(s => s.freshness_state === 'stale').length;
+  const proposedChangesCount = toolCallLog.filter(t => t.tool === 'propose_website_change').length;
   const hasActions = (output?.actions_taken?.length > 0) || (output?.follow_up_tasks?.length > 0) ||
-    (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0);
+    (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0) ||
+    (output?.total_fixes_proposed > 0) || (output?.fixes_proposed > 0) || proposedChangesCount > 0;
 
   // Determine confidence
   let confidence = 'high';

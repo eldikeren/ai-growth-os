@@ -595,16 +595,32 @@ export function getToolDefinitions(agentSlug, clientId) {
       type: 'function',
       function: {
         name: 'fetch_gsc_url_inspection',
-        description: 'Inspect a specific URL in Google Search Console — returns indexing status, coverage state, last crawl time, robots.txt status, and rich results. Use to check if key pages are indexed.',
+        description: 'Inspect a specific URL in Google Search Console — returns indexing status, coverage state, last crawl time, robots.txt status, and rich results. Use to check if key pages are indexed. Returns verdict: PASS (indexed) or FAIL (not indexed) with the exact reason.',
         parameters: {
           type: 'object',
           properties: {
-            url: { type: 'string', description: 'Full URL to inspect (e.g. https://yanivgil.co.il/divorce-guide)' }
+            url: { type: 'string', description: 'Full URL to inspect (e.g. https://example.com/page)' }
           },
           required: ['url']
         }
       },
-      allowed_agents: ['seo-core-agent','gsc-daily-monitor','technical-seo-crawl-agent','master-orchestrator']
+      allowed_agents: ['seo-core-agent','gsc-daily-monitor','technical-seo-crawl-agent','master-orchestrator','website-content-agent','kpi-integrity-agent']
+    },
+    // --- SUBMIT SITEMAP TO GSC ---
+    {
+      type: 'function',
+      function: {
+        name: 'submit_sitemap_to_gsc',
+        description: 'Submit or re-submit a sitemap URL to Google Search Console. Use this after fixing indexing issues or adding new pages to force Google to re-crawl. Always call after propose_website_change fixes that affect page availability.',
+        parameters: {
+          type: 'object',
+          properties: {
+            sitemap_url: { type: 'string', description: 'Full sitemap URL to submit (e.g. https://example.com/sitemap.xml)' }
+          },
+          required: ['sitemap_url']
+        }
+      },
+      allowed_agents: ['technical-seo-crawl-agent','seo-core-agent','gsc-daily-monitor','master-orchestrator']
     }
   ];
 
@@ -2028,6 +2044,46 @@ export async function executeTool(toolName, args, clientId, runId) {
           rich_results_types: (rich.detectedItems || []).map(i => i.richResultType),
           fetched_at: new Date().toISOString()
         };
+      }
+
+      // ========================================
+      // submit_sitemap_to_gsc
+      // ========================================
+      case 'submit_sitemap_to_gsc': {
+        const token = await getValidGoogleToken(clientId);
+        if (!token) return { error: 'Google OAuth token unavailable.' };
+
+        const { data: asset } = await supabase.from('integration_assets')
+          .select('external_id')
+          .eq('client_id', clientId)
+          .eq('sub_provider', 'search_console')
+          .eq('is_selected', true)
+          .maybeSingle()
+          .then(r => r.data ? r : supabase.from('integration_assets').select('external_id').eq('client_id', clientId).eq('sub_provider', 'search_console').maybeSingle());
+
+        if (!asset?.external_id) return { error: 'No GSC property selected.' };
+
+        const siteUrl = encodeURIComponent(asset.external_id);
+        const feedpath = encodeURIComponent(args.sitemap_url);
+
+        const resp = await fetchWithTimeout(
+          `https://www.googleapis.com/webmasters/v3/sites/${siteUrl}/sitemaps/${feedpath}`,
+          { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
+          20000
+        );
+
+        if (resp.status === 204 || resp.ok) {
+          return {
+            success: true,
+            sitemap_url: args.sitemap_url,
+            gsc_property: asset.external_id,
+            submitted_at: new Date().toISOString(),
+            message: 'Sitemap submitted to Google Search Console. Google will re-crawl and index pages from this sitemap.'
+          };
+        }
+
+        const err = await resp.json().catch(() => ({}));
+        return { error: `GSC Sitemap API error ${resp.status}: ${err?.error?.message || resp.statusText}` };
       }
 
       default:

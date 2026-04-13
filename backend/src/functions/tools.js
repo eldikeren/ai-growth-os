@@ -531,6 +531,42 @@ export function getToolDefinitions(agentSlug, clientId) {
         }
       },
       allowed_agents: ['seo-core-agent','technical-seo-crawl-agent','website-content-agent','cro-agent','local-seo-agent','master-orchestrator','hebrew-quality-agent']
+    },
+    // --- GSC SEARCH ANALYTICS ---
+    {
+      type: 'function',
+      function: {
+        name: 'fetch_gsc_search_analytics',
+        description: 'Fetch real Google Search Console search analytics — queries, pages, clicks, impressions, CTR, average position. ALWAYS call this first when you need SEO performance data. Returns actual data from the connected GSC property.',
+        parameters: {
+          type: 'object',
+          properties: {
+            dimensions: { type: 'array', items: { type: 'string', enum: ['query','page','country','device','date'] }, description: 'Group by dimensions. Use ["query"] for top queries, ["page"] for top pages, ["date"] for trend. Default: ["query"]' },
+            date_range_days: { type: 'integer', description: 'Days to look back. Default: 28. Use 90 for trend analysis.' },
+            row_limit: { type: 'integer', description: 'Rows to return. Default: 50, max 100.' },
+            filter_dimension: { type: 'string', enum: ['query','page','country','device'], description: 'Optional: filter to rows matching filter_value' },
+            filter_value: { type: 'string', description: 'Value to filter by (e.g. a specific keyword or page URL)' }
+          },
+          required: []
+        }
+      },
+      allowed_agents: ['seo-core-agent','gsc-daily-monitor','technical-seo-crawl-agent','competitor-intelligence-agent','report-composer-agent','master-orchestrator','website-content-agent']
+    },
+    // --- GSC URL INSPECTION ---
+    {
+      type: 'function',
+      function: {
+        name: 'fetch_gsc_url_inspection',
+        description: 'Inspect a specific URL in Google Search Console — returns indexing status, coverage state, last crawl time, robots.txt status, and rich results. Use to check if key pages are indexed.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'Full URL to inspect (e.g. https://yanivgil.co.il/divorce-guide)' }
+          },
+          required: ['url']
+        }
+      },
+      allowed_agents: ['seo-core-agent','gsc-daily-monitor','technical-seo-crawl-agent','master-orchestrator']
     }
   ];
 
@@ -1655,6 +1691,128 @@ export async function executeTool(toolName, args, clientId, runId) {
           message: platform === 'manual'
             ? 'Change staged. No platform connector configured — requires manual implementation.'
             : `Change staged for ${platform}. Platform connector found but execution pending approval.`,
+        };
+      }
+
+      // ========================================
+      // fetch_gsc_search_analytics
+      // ========================================
+      case 'fetch_gsc_search_analytics': {
+        const token = await getValidGoogleToken(clientId);
+        if (!token) return { error: 'Google OAuth token unavailable. Check Credentials page.' };
+
+        const { data: asset } = await supabase.from('integration_assets')
+          .select('property_id')
+          .eq('client_id', clientId)
+          .eq('sub_provider', 'search_console')
+          .maybeSingle();
+
+        if (!asset?.property_id) return { error: 'No GSC property selected. Go to Credentials and select a Search Console property.' };
+
+        const siteUrl = asset.property_id;
+        const days = Math.min(args.date_range_days || 28, 90);
+        const endDate = new Date();
+        const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
+        const dims = args.dimensions || ['query'];
+
+        const body = {
+          startDate: startDate.toISOString().split('T')[0],
+          endDate: endDate.toISOString().split('T')[0],
+          dimensions: dims,
+          rowLimit: Math.min(args.row_limit || 50, 100),
+          searchType: 'web',
+          orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }]
+        };
+
+        if (args.filter_dimension && args.filter_value) {
+          body.dimensionFilterGroups = [{
+            filters: [{ dimension: args.filter_dimension, operator: 'contains', expression: args.filter_value }]
+          }];
+        }
+
+        const resp = await fetchWithTimeout(
+          `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
+          { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+          20000
+        );
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          return { error: `GSC API error ${resp.status}: ${err?.error?.message || resp.statusText}` };
+        }
+
+        const data = await resp.json();
+        const rows = (data.rows || []).map(row => {
+          const result = { clicks: row.clicks, impressions: row.impressions, ctr: parseFloat((row.ctr * 100).toFixed(2)), position: parseFloat(row.position.toFixed(1)) };
+          if (row.keys) dims.forEach((dim, i) => { result[dim] = row.keys[i]; });
+          return result;
+        });
+
+        // Aggregate totals
+        const totals = rows.reduce((acc, r) => ({ clicks: acc.clicks + r.clicks, impressions: acc.impressions + r.impressions }), { clicks: 0, impressions: 0 });
+        const avgCtr = totals.impressions > 0 ? parseFloat(((totals.clicks / totals.impressions) * 100).toFixed(2)) : 0;
+        const avgPos = rows.length > 0 ? parseFloat((rows.reduce((a, r) => a + r.position, 0) / rows.length).toFixed(1)) : 0;
+
+        // Flag high-opportunity rows: position 4-20, impressions > 50, CTR < 5%
+        const opportunities = rows.filter(r => r.position >= 4 && r.position <= 20 && r.impressions >= 50 && r.ctr < 5);
+
+        return {
+          site_url: siteUrl,
+          date_range: { start: body.startDate, end: body.endDate, days },
+          dimensions: dims,
+          total_rows: rows.length,
+          summary: { total_clicks: totals.clicks, total_impressions: totals.impressions, avg_ctr_percent: avgCtr, avg_position: avgPos },
+          rows,
+          opportunities: opportunities.slice(0, 10),
+          fetched_at: new Date().toISOString()
+        };
+      }
+
+      // ========================================
+      // fetch_gsc_url_inspection
+      // ========================================
+      case 'fetch_gsc_url_inspection': {
+        const token = await getValidGoogleToken(clientId);
+        if (!token) return { error: 'Google OAuth token unavailable.' };
+
+        const { data: asset } = await supabase.from('integration_assets')
+          .select('property_id')
+          .eq('client_id', clientId)
+          .eq('sub_provider', 'search_console')
+          .maybeSingle();
+
+        if (!asset?.property_id) return { error: 'No GSC property selected.' };
+
+        const resp = await fetchWithTimeout(
+          'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect',
+          { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ inspectionUrl: args.url, siteUrl: asset.property_id }) },
+          20000
+        );
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          return { error: `GSC Inspect API error ${resp.status}: ${err?.error?.message || resp.statusText}` };
+        }
+
+        const data = await resp.json();
+        const idx = data.inspectionResult?.indexStatusResult || {};
+        const rich = data.inspectionResult?.richResultsResult || {};
+
+        return {
+          url: args.url,
+          verdict: idx.verdict,
+          coverage_state: idx.coverageState,
+          indexing_state: idx.indexingState,
+          robots_txt_state: idx.robotsTxtState,
+          page_fetch_state: idx.pageFetchState,
+          last_crawl_time: idx.lastCrawlTime,
+          crawled_as: idx.crawledAs,
+          referring_urls: (idx.referringUrls || []).slice(0, 5),
+          in_sitemap: (idx.sitemap || []).length > 0,
+          rich_results_verdict: rich.verdict,
+          rich_results_types: (rich.detectedItems || []).map(i => i.richResultType),
+          fetched_at: new Date().toISOString()
         };
       }
 

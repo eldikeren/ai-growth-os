@@ -140,7 +140,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['url']
         }
       },
-      allowed_agents: ['technical-seo-crawl-agent', 'seo-core-agent', 'website-qa-agent', 'regression-agent', 'master-orchestrator', 'credential-health-agent']
+      allowed_agents: ['technical-seo-crawl-agent', 'seo-core-agent', 'website-qa-agent', 'regression-agent', 'master-orchestrator', 'credential-health-agent', 'report-composer-agent', 'cro-agent']
     },
     {
       type: 'function',
@@ -158,7 +158,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['keyword']
         }
       },
-      allowed_agents: ['seo-core-agent', 'technical-seo-crawl-agent', 'gsc-daily-monitor', 'competitor-intelligence-agent', 'local-seo-agent', 'geo-ai-visibility-agent']
+      allowed_agents: ['seo-core-agent', 'technical-seo-crawl-agent', 'gsc-daily-monitor', 'competitor-intelligence-agent', 'local-seo-agent', 'geo-ai-visibility-agent', 'regression-agent', 'report-composer-agent', 'reviews-gbp-authority-agent', 'master-orchestrator']
     },
     {
       type: 'function',
@@ -174,7 +174,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['domain']
         }
       },
-      allowed_agents: ['seo-core-agent', 'competitor-intelligence-agent']
+      allowed_agents: ['seo-core-agent', 'competitor-intelligence-agent', 'report-composer-agent', 'master-orchestrator']
     },
     {
       type: 'function',
@@ -190,7 +190,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['query']
         }
       },
-      allowed_agents: ['competitor-intelligence-agent', 'seo-core-agent', 'innovation-agent', 'geo-ai-visibility-agent', 'local-seo-agent', 'content-distribution-agent', 'website-content-agent']
+      allowed_agents: ['competitor-intelligence-agent', 'seo-core-agent', 'innovation-agent', 'geo-ai-visibility-agent', 'local-seo-agent', 'content-distribution-agent', 'website-content-agent', 'master-orchestrator', 'report-composer-agent', 'technical-seo-crawl-agent', 'regression-agent', 'reviews-gbp-authority-agent', 'facebook-agent', 'instagram-agent', 'cro-agent']
     },
     {
       type: 'function',
@@ -208,7 +208,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['business_name']
         }
       },
-      allowed_agents: ['reviews-gbp-authority-agent', 'local-seo-agent', 'master-orchestrator']
+      allowed_agents: ['reviews-gbp-authority-agent', 'local-seo-agent', 'master-orchestrator', 'report-composer-agent']
     },
     {
       type: 'function',
@@ -225,7 +225,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['keyword', 'business_name']
         }
       },
-      allowed_agents: ['local-seo-agent', 'seo-core-agent', 'competitor-intelligence-agent']
+      allowed_agents: ['local-seo-agent', 'seo-core-agent', 'competitor-intelligence-agent', 'reviews-gbp-authority-agent', 'report-composer-agent', 'master-orchestrator']
     },
 
     // --- DATABASE QUERY TOOLS ---
@@ -258,7 +258,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           }
         }
       },
-      allowed_agents: ['seo-core-agent', 'gsc-daily-monitor', 'technical-seo-crawl-agent', 'competitor-intelligence-agent', 'report-composer-agent', 'master-orchestrator', 'geo-ai-visibility-agent']
+      allowed_agents: ['seo-core-agent', 'gsc-daily-monitor', 'technical-seo-crawl-agent', 'competitor-intelligence-agent', 'report-composer-agent', 'master-orchestrator', 'geo-ai-visibility-agent', 'regression-agent', 'website-content-agent', 'local-seo-agent', 'reviews-gbp-authority-agent', 'facebook-agent', 'instagram-agent', 'content-distribution-agent', 'cro-agent', 'analytics-conversion-integrity-agent', 'google-ads-campaign-agent']
     },
     {
       type: 'function',
@@ -272,7 +272,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           }
         }
       },
-      allowed_agents: ['competitor-intelligence-agent', 'seo-core-agent', 'innovation-agent', 'geo-ai-visibility-agent']
+      allowed_agents: ['competitor-intelligence-agent', 'seo-core-agent', 'innovation-agent', 'geo-ai-visibility-agent', 'master-orchestrator', 'report-composer-agent', 'local-seo-agent', 'reviews-gbp-authority-agent', 'website-content-agent', 'content-distribution-agent']
     },
     {
       type: 'function',
@@ -288,7 +288,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           }
         }
       },
-      allowed_agents: ['master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent', 'regression-agent']
+      allowed_agents: ['master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent', 'regression-agent', 'seo-core-agent', 'gsc-daily-monitor', 'technical-seo-crawl-agent', 'website-content-agent', 'google-ads-campaign-agent', 'analytics-conversion-integrity-agent', 'local-seo-agent', 'competitor-intelligence-agent']
     },
     {
       type: 'function',
@@ -303,7 +303,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           }
         }
       },
-      allowed_agents: ['master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent']
+      allowed_agents: ['master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent', 'seo-core-agent', 'gsc-daily-monitor', 'website-content-agent', 'technical-seo-crawl-agent']
     },
 
     // --- ACTION TOOLS ---
@@ -323,7 +323,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['metric_name', 'value', 'source']
         }
       },
-      allowed_agents: ['technical-seo-crawl-agent', 'gsc-daily-monitor', 'seo-core-agent', 'local-seo-agent', 'reviews-gbp-authority-agent', 'credential-health-agent', 'analytics-conversion-integrity-agent']
+      allowed_agents: ['technical-seo-crawl-agent', 'gsc-daily-monitor', 'seo-core-agent', 'local-seo-agent', 'reviews-gbp-authority-agent', 'credential-health-agent', 'analytics-conversion-integrity-agent', 'google-ads-campaign-agent', 'competitor-intelligence-agent', 'report-composer-agent']
     },
     {
       type: 'function',
@@ -340,7 +340,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['keyword', 'position']
         }
       },
-      allowed_agents: ['seo-core-agent', 'gsc-daily-monitor']
+      allowed_agents: ['seo-core-agent', 'gsc-daily-monitor', 'technical-seo-crawl-agent']
     },
     {
       type: 'function',
@@ -357,7 +357,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['metric_name', 'value']
         }
       },
-      allowed_agents: ['master-orchestrator', 'seo-core-agent', 'kpi-integrity-agent', 'analytics-conversion-integrity-agent']
+      allowed_agents: ['master-orchestrator', 'seo-core-agent', 'kpi-integrity-agent', 'analytics-conversion-integrity-agent', 'gsc-daily-monitor', 'technical-seo-crawl-agent', 'google-ads-campaign-agent', 'report-composer-agent']
     },
     {
       type: 'function',
@@ -374,7 +374,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['agent_slug', 'task_payload']
         }
       },
-      allowed_agents: ['master-orchestrator', 'seo-core-agent', 'innovation-agent']
+      allowed_agents: ['master-orchestrator', 'seo-core-agent', 'innovation-agent', 'gsc-daily-monitor', 'technical-seo-crawl-agent', 'website-content-agent', 'cro-agent', 'regression-agent', 'google-ads-campaign-agent', 'analytics-conversion-integrity-agent', 'competitor-intelligence-agent', 'local-seo-agent', 'reviews-gbp-authority-agent', 'facebook-agent', 'instagram-agent', 'content-distribution-agent', 'report-composer-agent', 'geo-ai-visibility-agent']
     },
     {
       type: 'function',
@@ -427,7 +427,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['incident_id', 'resolution']
         }
       },
-      allowed_agents: ['master-orchestrator', 'website-qa-agent', 'regression-agent', 'credential-health-agent']
+      allowed_agents: ['master-orchestrator', 'website-qa-agent', 'regression-agent', 'credential-health-agent', 'seo-core-agent', 'technical-seo-crawl-agent', 'gsc-daily-monitor', 'google-ads-campaign-agent', 'analytics-conversion-integrity-agent']
     },
     // --- GEO VISIBILITY TRACKING ---
     {
@@ -486,7 +486,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['url']
         }
       },
-      allowed_agents: ['technical-seo-crawl-agent', 'website-content-agent', 'cro-agent', 'design-consistency-agent', 'website-qa-agent', 'design-enforcement-agent', 'hebrew-quality-agent', 'seo-core-agent', 'local-seo-agent', 'master-orchestrator']
+      allowed_agents: ['technical-seo-crawl-agent', 'website-content-agent', 'cro-agent', 'design-consistency-agent', 'website-qa-agent', 'design-enforcement-agent', 'hebrew-quality-agent', 'seo-core-agent', 'local-seo-agent', 'master-orchestrator', 'regression-agent', 'competitor-intelligence-agent', 'report-composer-agent', 'legal-agent', 'facebook-agent', 'instagram-agent', 'content-distribution-agent']
     },
     // --- BROWSER TASK SUBMISSION (MANUS) ---
     {
@@ -505,7 +505,7 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['task_type', 'instructions']
         }
       },
-      allowed_agents: ['master-orchestrator', 'reviews-gbp-authority-agent', 'local-seo-agent', 'credential-health-agent', 'facebook-agent', 'instagram-agent']
+      allowed_agents: ['master-orchestrator', 'reviews-gbp-authority-agent', 'local-seo-agent', 'credential-health-agent', 'facebook-agent', 'instagram-agent', 'content-distribution-agent', 'seo-core-agent', 'website-content-agent']
     },
     // --- PROPOSE WEBSITE CHANGE ---
     {
@@ -530,7 +530,45 @@ export function getToolDefinitions(agentSlug, clientId) {
           required: ['page_url', 'change_type', 'proposed_value', 'reason']
         }
       },
-      allowed_agents: ['seo-core-agent','technical-seo-crawl-agent','website-content-agent','cro-agent','local-seo-agent','master-orchestrator','hebrew-quality-agent']
+      allowed_agents: ['seo-core-agent','technical-seo-crawl-agent','website-content-agent','cro-agent','local-seo-agent','master-orchestrator','hebrew-quality-agent','gsc-daily-monitor','website-qa-agent','design-enforcement-agent','regression-agent','legal-agent','google-ads-campaign-agent','competitor-intelligence-agent','geo-ai-visibility-agent']
+    },
+    // --- GOOGLE ADS DATA ---
+    {
+      type: 'function',
+      function: {
+        name: 'fetch_google_ads_data',
+        description: 'Fetch Google Ads campaign performance, search terms, or keyword data. Requires Google Ads connected via OAuth. Use to analyze campaign ROI, find wasted spend, and identify high-performing keywords.',
+        parameters: {
+          type: 'object',
+          properties: {
+            report_type: { type: 'string', enum: ['campaign_performance', 'search_terms', 'keywords', 'ad_groups', 'ads'], description: 'Type of report. campaign_performance = top-level stats, search_terms = actual queries triggering ads, keywords = bid keywords' },
+            date_range_days: { type: 'integer', description: 'Days to look back. Default: 30' },
+            include_zero_impressions: { type: 'boolean', description: 'Include keywords/ads with zero impressions. Default: false' }
+          },
+          required: ['report_type']
+        }
+      },
+      allowed_agents: ['google-ads-campaign-agent', 'analytics-conversion-integrity-agent', 'master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent']
+    },
+    // --- GA4 REPORTING ---
+    {
+      type: 'function',
+      function: {
+        name: 'fetch_ga4_report',
+        description: 'Fetch Google Analytics 4 data — traffic, users, sessions, conversions, bounce rate by any dimension. Requires GA4 connected via OAuth.',
+        parameters: {
+          type: 'object',
+          properties: {
+            metrics: { type: 'array', items: { type: 'string' }, description: 'GA4 metric names. Common: ["sessions","users","newUsers","bounceRate","conversions","engagementRate","averageSessionDuration"]' },
+            dimensions: { type: 'array', items: { type: 'string' }, description: 'GA4 dimension names. Common: ["date","sessionDefaultChannelGroup","landingPage","deviceCategory","country","eventName"]' },
+            date_range_days: { type: 'integer', description: 'Days to look back. Default: 30. Use 7 for weekly, 90 for quarterly.' },
+            row_limit: { type: 'integer', description: 'Max rows to return. Default: 50.' },
+            order_by_metric: { type: 'string', description: 'Metric to sort by descending. Default: sessions.' }
+          },
+          required: ['metrics', 'dimensions']
+        }
+      },
+      allowed_agents: ['analytics-conversion-integrity-agent', 'google-ads-campaign-agent', 'master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent', 'cro-agent']
     },
     // --- GSC SEARCH ANALYTICS ---
     {
@@ -1695,21 +1733,197 @@ export async function executeTool(toolName, args, clientId, runId) {
       }
 
       // ========================================
+      // fetch_google_ads_data
+      // ========================================
+      case 'fetch_google_ads_data': {
+        const token = await getValidGoogleToken(clientId);
+        if (!token) return { error: 'Google OAuth token unavailable. Check Credentials page.' };
+
+        // Get the stored Google Ads customer ID — prefer selected, fallback to first available
+        let { data: asset } = await supabase.from('integration_assets')
+          .select('external_id, label')
+          .eq('client_id', clientId).eq('sub_provider', 'ads').eq('is_selected', true).maybeSingle();
+        if (!asset?.external_id) {
+          const { data: fallback } = await supabase.from('integration_assets')
+            .select('external_id, label').eq('client_id', clientId).eq('sub_provider', 'ads')
+            .order('created_at', { ascending: true }).limit(1).maybeSingle();
+          asset = fallback;
+        }
+        if (!asset?.external_id) return { error: 'No Google Ads account found. Connect Google Ads in Credentials and ensure the account has been discovered.' };
+
+        const customerId = asset.external_id.replace(/-/g, '');
+        const days = args.date_range_days || 30;
+        const endDate = new Date().toISOString().split('T')[0];
+        const startDate = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+
+        const reportType = args.report_type || 'campaign_performance';
+
+        // Build GAQL query based on report type
+        const queries = {
+          campaign_performance: `SELECT campaign.name, campaign.status, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.ctr, metrics.average_cpc FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' AND campaign.status = 'ENABLED' ORDER BY metrics.cost_micros DESC LIMIT 50`,
+          search_terms: `SELECT search_term_view.search_term, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.ctr FROM search_term_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.cost_micros DESC LIMIT 100`,
+          keywords: `SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.average_cpc, ad_group_criterion.quality_info.quality_score FROM ad_group_criterion WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' AND ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.status = 'ENABLED' ORDER BY metrics.impressions DESC LIMIT 100`,
+          ad_groups: `SELECT ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM ad_group WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' AND ad_group.status = 'ENABLED' ORDER BY metrics.cost_micros DESC LIMIT 50`,
+          ads: `SELECT ad_group_ad.ad.final_urls, ad_group_ad.ad.text_ad.headline, ad_group_ad.ad.responsive_search_ad.headlines, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions FROM ad_group_ad WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' AND ad_group_ad.status = 'ENABLED' ORDER BY metrics.impressions DESC LIMIT 50`
+        };
+
+        const resp = await fetchWithTimeout(
+          `https://googleads.googleapis.com/v16/customers/${customerId}/googleAds:search`,
+          { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '' },
+            body: JSON.stringify({ query: queries[reportType] }) },
+          20000
+        );
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          const errMsg = err?.error?.message || err?.error?.details?.[0]?.errors?.[0]?.message || resp.statusText;
+          // Common errors: developer token not approved, customer not linked
+          if (resp.status === 403) return { error: `Google Ads API access denied. Check GOOGLE_ADS_DEVELOPER_TOKEN env var and customer access. Detail: ${errMsg}` };
+          return { error: `Google Ads API error ${resp.status}: ${errMsg}` };
+        }
+
+        const data = await resp.json();
+        const results = data.results || [];
+
+        if (reportType === 'campaign_performance') {
+          const campaigns = results.map(r => ({
+            name: r.campaign?.name,
+            status: r.campaign?.status,
+            impressions: r.metrics?.impressions || 0,
+            clicks: r.metrics?.clicks || 0,
+            cost: parseFloat(((r.metrics?.costMicros || 0) / 1e6).toFixed(2)),
+            conversions: parseFloat((r.metrics?.conversions || 0).toFixed(2)),
+            ctr: parseFloat(((r.metrics?.ctr || 0) * 100).toFixed(2)),
+            avg_cpc: parseFloat(((r.metrics?.averageCpc || 0) / 1e6).toFixed(2))
+          }));
+          const totals = campaigns.reduce((a, c) => ({ cost: a.cost + c.cost, clicks: a.clicks + c.clicks, conversions: a.conversions + c.conversions, impressions: a.impressions + c.impressions }), { cost: 0, clicks: 0, conversions: 0, impressions: 0 });
+          return { report_type: reportType, date_range: { start: startDate, end: endDate }, totals, campaigns, fetched_at: new Date().toISOString() };
+        }
+
+        if (reportType === 'search_terms') {
+          const terms = results.map(r => ({
+            term: r.searchTermView?.searchTerm,
+            impressions: r.metrics?.impressions || 0,
+            clicks: r.metrics?.clicks || 0,
+            cost: parseFloat(((r.metrics?.costMicros || 0) / 1e6).toFixed(2)),
+            conversions: parseFloat((r.metrics?.conversions || 0).toFixed(2)),
+            ctr: parseFloat(((r.metrics?.ctr || 0) * 100).toFixed(2))
+          }));
+          const wasted = terms.filter(t => t.conversions === 0 && t.cost > 0).sort((a, b) => b.cost - a.cost);
+          return { report_type: reportType, date_range: { start: startDate, end: endDate }, total_terms: terms.length, terms: terms.slice(0, 50), wasted_spend_terms: wasted.slice(0, 20), total_wasted_cost: wasted.reduce((a, t) => a + t.cost, 0).toFixed(2), fetched_at: new Date().toISOString() };
+        }
+
+        if (reportType === 'keywords') {
+          const keywords = results.map(r => ({
+            keyword: r.adGroupCriterion?.keyword?.text,
+            match_type: r.adGroupCriterion?.keyword?.matchType,
+            quality_score: r.adGroupCriterion?.qualityInfo?.qualityScore || null,
+            impressions: r.metrics?.impressions || 0,
+            clicks: r.metrics?.clicks || 0,
+            cost: parseFloat(((r.metrics?.costMicros || 0) / 1e6).toFixed(2)),
+            conversions: parseFloat((r.metrics?.conversions || 0).toFixed(2)),
+            avg_cpc: parseFloat(((r.metrics?.averageCpc || 0) / 1e6).toFixed(2))
+          }));
+          const lowQs = keywords.filter(k => k.quality_score !== null && k.quality_score < 6);
+          return { report_type: reportType, date_range: { start: startDate, end: endDate }, total_keywords: keywords.length, keywords: keywords.slice(0, 50), low_quality_score: lowQs, fetched_at: new Date().toISOString() };
+        }
+
+        return { report_type: reportType, date_range: { start: startDate, end: endDate }, results: results.slice(0, 50), fetched_at: new Date().toISOString() };
+      }
+
+      // ========================================
+      // fetch_ga4_report
+      // ========================================
+      case 'fetch_ga4_report': {
+        const token = await getValidGoogleToken(clientId);
+        if (!token) return { error: 'Google OAuth token unavailable. Check Credentials page.' };
+
+        // Get GA4 property ID from integration_assets
+        const { data: asset } = await supabase.from('integration_assets')
+          .select('external_id')
+          .eq('client_id', clientId).eq('sub_provider', 'analytics').eq('is_selected', true).maybeSingle();
+        if (!asset?.external_id) {
+          const { data: fallback } = await supabase.from('integration_assets')
+            .select('external_id').eq('client_id', clientId).eq('sub_provider', 'analytics')
+            .order('created_at', { ascending: true }).limit(1).maybeSingle();
+          asset = fallback;
+        }
+        if (!asset?.external_id) return { error: 'No GA4 property found. Connect Google Analytics in Credentials and ensure the property has been discovered.' };
+
+        const propertyId = asset.external_id.startsWith('properties/') ? asset.external_id : `properties/${asset.external_id}`;
+        const days = args.date_range_days || 30;
+        const endDate = 'today';
+        const startDate = `${days}daysAgo`;
+
+        const body = {
+          dateRanges: [{ startDate, endDate }],
+          metrics: (args.metrics || ['sessions', 'users', 'conversions']).map(m => ({ name: m })),
+          dimensions: (args.dimensions || ['date']).map(d => ({ name: d })),
+          limit: args.row_limit || 50,
+          orderBys: args.order_by_metric ? [{ metric: { metricName: args.order_by_metric }, desc: true }] : [{ metric: { metricName: args.metrics?.[0] || 'sessions' }, desc: true }]
+        };
+
+        const resp = await fetchWithTimeout(
+          `https://analyticsdata.googleapis.com/v1beta/${propertyId}:runReport`,
+          { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+          20000
+        );
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          return { error: `GA4 API error ${resp.status}: ${err?.error?.message || resp.statusText}` };
+        }
+
+        const data = await resp.json();
+        const dimHeaders = (data.dimensionHeaders || []).map(h => h.name);
+        const metHeaders = (data.metricHeaders || []).map(h => h.name);
+
+        const rows = (data.rows || []).map(row => {
+          const result = {};
+          dimHeaders.forEach((h, i) => { result[h] = row.dimensionValues?.[i]?.value; });
+          metHeaders.forEach((h, i) => {
+            const val = row.metricValues?.[i]?.value;
+            result[h] = isNaN(parseFloat(val)) ? val : parseFloat(parseFloat(val).toFixed(2));
+          });
+          return result;
+        });
+
+        // Aggregate totals
+        const totals = {};
+        metHeaders.forEach(h => {
+          totals[h] = parseFloat(rows.reduce((a, r) => a + (parseFloat(r[h]) || 0), 0).toFixed(2));
+        });
+
+        return {
+          property_id: propertyId, note: "GA4 property",
+          date_range: { start: startDate, end: endDate, days },
+          metrics: metHeaders,
+          dimensions: dimHeaders,
+          total_rows: rows.length,
+          totals,
+          rows,
+          fetched_at: new Date().toISOString()
+        };
+      }
+
+      // ========================================
       // fetch_gsc_search_analytics
       // ========================================
       case 'fetch_gsc_search_analytics': {
         const token = await getValidGoogleToken(clientId);
         if (!token) return { error: 'Google OAuth token unavailable. Check Credentials page.' };
 
-        const { data: asset } = await supabase.from('integration_assets')
-          .select('property_id')
-          .eq('client_id', clientId)
-          .eq('sub_provider', 'search_console')
-          .maybeSingle();
+        let { data: asset } = await supabase.from('integration_assets')
+          .select('external_id').eq('client_id', clientId).eq('sub_provider', 'search_console').eq('is_selected', true).maybeSingle();
+        if (!asset?.external_id) {
+          const { data: fallback } = await supabase.from('integration_assets')
+            .select('external_id').eq('client_id', clientId).eq('sub_provider', 'search_console')
+            .order('created_at', { ascending: true }).limit(1).maybeSingle();
+          asset = fallback;
+        }
+        if (!asset?.external_id) return { error: 'No GSC property found. Connect Google Search Console in Credentials.' };
 
-        if (!asset?.property_id) return { error: 'No GSC property selected. Go to Credentials and select a Search Console property.' };
-
-        const siteUrl = asset.property_id;
+        const siteUrl = asset.external_id;
         const days = Math.min(args.date_range_days || 28, 90);
         const endDate = new Date();
         const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
@@ -1776,17 +1990,17 @@ export async function executeTool(toolName, args, clientId, runId) {
         if (!token) return { error: 'Google OAuth token unavailable.' };
 
         const { data: asset } = await supabase.from('integration_assets')
-          .select('property_id')
+          .select('external_id')
           .eq('client_id', clientId)
           .eq('sub_provider', 'search_console')
           .maybeSingle();
 
-        if (!asset?.property_id) return { error: 'No GSC property selected.' };
+        if (!asset?.external_id) return { error: 'No GSC property selected.' };
 
         const resp = await fetchWithTimeout(
           'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect',
           { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ inspectionUrl: args.url, siteUrl: asset.property_id }) },
+            body: JSON.stringify({ inspectionUrl: args.url, siteUrl: asset.external_id }) },
           20000
         );
 

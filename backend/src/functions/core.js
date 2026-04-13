@@ -13,7 +13,11 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 50000,    // 50s per call — prevents Vercel function from hanging until killed at 300s
+  maxRetries: 0,     // No retries — each retry adds another 50s, burns the execution budget
+});
 
 const MAX_TOOL_ITERATIONS = 8; // Max tool call rounds per agent execution (keep under 300s Vercel limit)
 
@@ -335,7 +339,22 @@ FINAL OUTPUT RULES:
         callParams.response_format = { type: 'json_object' };
       }
 
-      const completion = await openai.chat.completions.create(callParams);
+      let completion;
+      try {
+        completion = await openai.chat.completions.create(callParams);
+      } catch (openaiErr) {
+        // OpenAI timed out or network dropped — save partial results and exit gracefully
+        console.error(`[OPENAI_TIMEOUT] ${agent.slug} iteration ${iteration}: ${openaiErr.message}`);
+        finalResponse = JSON.stringify({
+          timeout: true,
+          openai_error: openaiErr.message,
+          message: `OpenAI call timed out on iteration ${iteration}. Partial results from ${toolCallLog.length} tool calls.`,
+          tools_used: toolCallLog.map(t => t.tool),
+          actions_taken: [],
+          partial_results: true,
+        });
+        break;
+      }
       const choice = completion.choices[0];
 
       promptTokens += completion.usage?.prompt_tokens || 0;

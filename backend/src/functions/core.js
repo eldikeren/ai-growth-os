@@ -1010,58 +1010,42 @@ function estimateFollowUpPriority(sourceAgent, targetSlug, issues, output) {
 function detectFalseSuccess(run, output) {
   const flags = [];
   const didToolWork = run.tool_calls_count > 0;
-
-  // 1. No tool calls made
-  if (!run.tool_calls_count || run.tool_calls_count === 0) {
-    flags.push('no_tools_used');
-  }
-
-  // 2. Output is too short or generic
   const outputStr = typeof output === 'string' ? output : JSON.stringify(output || {});
-  if (outputStr.length < 100) {
-    flags.push('minimal_output');
-  }
 
-  // 3. No concrete actions listed — only flag if agent also used no tools
-  // Audit/monitoring agents return issues+recommendations, not actions_taken
-  const hasActions = output?.actions_taken?.length > 0 || output?.changes_made?.length > 0 ||
-    output?.fixes_applied?.length > 0 || output?.updates?.length > 0 || output?.results?.length > 0;
-  const hasFindings = output?.metrics || output?.issues || output?.recommendations ||
-    output?.rankings || output?.findings || output?.audit_results;
-  if (!hasActions && !hasFindings && !didToolWork) {
-    flags.push('no_concrete_actions');
-  }
+  // RULE: Only flag as fake when the agent called ZERO tools.
+  // Agents that call tools and return real data are doing real work —
+  // even if health scores are low, or data is incomplete.
+  // Low scores = real problems found. That is the correct behavior.
 
-  // 4. Output just echoes instructions back
-  if (output?.summary && /will monitor|will check|will review|no issues found|everything looks good/i.test(output.summary)) {
-    if (!hasActions && !hasFindings) flags.push('passive_summary_only');
-  }
-
-  // 5. Output contains failure keywords — only flag if agent also used NO tools.
-  // If agent used tools and still got failures, that's a real failure (missing credentials etc),
-  // not a fake success — the run status will already reflect that.
   if (!didToolWork) {
+    // Agent called no tools at all
+    flags.push('no_tools_used');
+
+    // Output is suspiciously empty
+    if (outputStr.length < 80) {
+      flags.push('minimal_output');
+    }
+
+    // No findings of any kind
+    const hasActions = output?.actions_taken?.length > 0 || output?.changes_made?.length > 0 ||
+      output?.fixes_applied?.length > 0 || output?.updates?.length > 0 || output?.results?.length > 0;
+    const hasFindings = output?.metrics || output?.issues || output?.recommendations ||
+      output?.rankings || output?.findings || output?.audit_results;
+    if (!hasActions && !hasFindings) {
+      flags.push('no_concrete_actions');
+    }
+
+    // Output mentions failures but no tools ran to verify them
     const failurePatterns = /נכשל|חוסר ב|לא נמצא|לא זמין|אין גישה|שגיאה|failed|error|not found|unavailable|no access|missing credential|not connected|could not fetch|unable to|blocked|unauthorized|denied|no data available/i;
     if (failurePatterns.test(outputStr)) {
       flags.push('output_contains_failure');
     }
   }
 
-  // 6. changed_anything is false — only penalize if agent ALSO used no tools.
-  // Monitoring/audit agents are supposed to observe, not mutate.
-  if (run.changed_anything === false && !didToolWork) {
-    flags.push('changed_nothing');
-  }
+  // Never penalise low health scores or low data completeness —
+  // those are valid agent findings about the client's real situation.
 
-  // 7. Health score or completeness is very low
-  if (output?.overall_health_score != null && output.overall_health_score < 20) {
-    flags.push('very_low_health_score');
-  }
-  if (output?.data_completeness != null && output.data_completeness < 20) {
-    flags.push('very_low_completeness');
-  }
-
-  const isFalseSuccess = flags.length >= 2; // 2+ signals = likely false
+  const isFalseSuccess = flags.length >= 2; // requires no_tools_used + at least one more signal
   return { isFalseSuccess, flags };
 }
 

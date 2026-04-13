@@ -673,7 +673,7 @@ router.get('/cron/geo-sweep', async (req, res) => {
 //   2. oauth_credentials  (encrypted tokens from onboarding OAuth flow)
 router.get('/cron/refresh-tokens', async (req, res) => {
   const results = [];
-  const refreshWindow = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // Refresh anything expiring within 1h
+  const refreshWindow = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // Refresh anything expiring within 10 min
 
   // ── PART 1: client_credentials table (legacy unencrypted store) ──
   try {
@@ -686,7 +686,7 @@ router.get('/cron/refresh-tokens', async (req, res) => {
       const data = cred.credential_data;
       if (!data?.refresh_token) continue;
       const expiresAt = data.expires_at ? new Date(data.expires_at).getTime() : 0;
-      if (expiresAt > Date.now() + 60 * 60 * 1000) continue; // Still valid for >1h
+      if (expiresAt > Date.now() + 10 * 60 * 1000) continue; // Still valid for >10 min
 
       try {
         let newTokens;

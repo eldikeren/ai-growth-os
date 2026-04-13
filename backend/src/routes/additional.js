@@ -929,6 +929,87 @@ router.get('/cron/audit-snapshot', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── SELF-HEALING CRON — runs every 5 min ─────────────────────
+// Continuously monitors and auto-fixes system health issues
+router.get('/cron/self-heal', async (req, res) => {
+  const fixes = [];
+  const errors = [];
+
+  try {
+    // ── 1. Cancel stuck runs (>10 min with no heartbeat) ──────
+    const stuckCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const { data: stuckRuns } = await supabase
+      .from('runs').select('id, agent_template_id').eq('status', 'running').lt('updated_at', stuckCutoff);
+    if (stuckRuns?.length) {
+      await supabase.from('runs')
+        .update({ status: 'failed', error: 'Auto-cancelled: stuck in running state for >10 minutes' })
+        .in('id', stuckRuns.map(r => r.id));
+      fixes.push({ action: 'cancel_stuck_runs', count: stuckRuns.length });
+    }
+
+    // ── 2. Clear stuck queue items (running >15 min) ──────────
+    const queueCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { data: stuckQueue } = await supabase
+      .from('run_queue').select('id').eq('status', 'running').lt('updated_at', queueCutoff);
+    if (stuckQueue?.length) {
+      await supabase.from('run_queue')
+        .update({ status: 'failed', error: 'Self-heal: stuck in running state for >15 min' })
+        .in('id', stuckQueue.map(q => q.id));
+      fixes.push({ action: 'clear_stuck_queue', count: stuckQueue.length });
+    }
+
+    // ── 3. Auto-resolve incidents for runs that later succeeded ──
+    const { data: openIncidents } = await supabase
+      .from('incidents').select('id, source_run_id, source_agent').eq('status', 'open').limit(100);
+    if (openIncidents?.length) {
+      const resolvedIds = [];
+      for (const inc of openIncidents) {
+        if (inc.source_run_id) {
+          const { data: run } = await supabase.from('runs').select('status').eq('id', inc.source_run_id).single();
+          if (run?.status === 'success') resolvedIds.push(inc.id);
+        }
+      }
+      // Also auto-close incidents older than 48h that are just noise from old failures
+      const { data: oldIncidents } = await supabase
+        .from('incidents').select('id').eq('status', 'open')
+        .lt('created_at', new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()).limit(200);
+      const allToClose = [...new Set([...resolvedIds, ...(oldIncidents?.map(i => i.id) || [])])];
+      if (allToClose.length) {
+        await supabase.from('incidents').update({ status: 'resolved', resolved_at: new Date().toISOString(), resolution_note: 'Auto-resolved by self-heal cron' }).in('id', allToClose);
+        fixes.push({ action: 'resolve_incidents', count: allToClose.length });
+      }
+    }
+
+    // ── 4. Clear pending queue items whose agent no longer exists ──
+    const { data: orphanQueue } = await supabase
+      .from('run_queue').select('id, agent_templates(id)').eq('status', 'queued')
+      .is('agent_templates', null).limit(50);
+    if (orphanQueue?.length) {
+      await supabase.from('run_queue').update({ status: 'failed', error: 'Agent template not found' })
+        .in('id', orphanQueue.map(q => q.id));
+      fixes.push({ action: 'clear_orphan_queue', count: orphanQueue.length });
+    }
+
+    // ── 5. Log self-heal snapshot ──────────────────────────────
+    const { count: openCount } = await supabase.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open');
+    const { count: runningCount } = await supabase.from('runs').select('id', { count: 'exact', head: true }).eq('status', 'running');
+    const { count: queuedCount } = await supabase.from('run_queue').select('id', { count: 'exact', head: true }).eq('status', 'queued');
+
+    res.json({
+      healed_at: new Date().toISOString(),
+      fixes,
+      errors,
+      system_state: {
+        open_incidents: openCount || 0,
+        running_agents: runningCount || 0,
+        queued_items: queuedCount || 0,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, fixes });
+  }
+});
+
 // ── META DATA DELETION CALLBACK ──────────────────────────────
 // Required by Meta App Review — receives callback when user removes app
 router.post('/meta/data-deletion', async (req, res) => {

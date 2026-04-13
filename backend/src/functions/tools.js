@@ -13,6 +13,25 @@ const supabase = createClient(
 );
 
 // ============================================================
+// FETCH WITH TIMEOUT — wraps all external API calls
+// Prevents hanging requests from blocking the Vercel function.
+// Default: 25s timeout (leaves buffer within 300s Vercel limit).
+// ============================================================
+async function fetchWithTimeout(url, options = {}, timeoutMs = 25000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs}ms: ${url}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ============================================================
 // GOOGLE TOKEN HELPER — auto-refresh before every API call
 // Google access tokens expire in 1 hour. This function always
 // returns a valid token, refreshing silently if needed.
@@ -60,7 +79,7 @@ async function getValidGoogleToken(clientId) {
     let refreshToken = refreshDecipher.update(cred.refresh_token_encrypted, 'hex', 'utf8');
     refreshToken += refreshDecipher.final('utf8');
 
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    const tokenRes = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -69,7 +88,7 @@ async function getValidGoogleToken(clientId) {
         refresh_token: refreshToken,
         grant_type: 'refresh_token',
       }),
-    });
+    }, 15000);
     const tokens = await tokenRes.json();
     if (!tokens.access_token) {
       await supabase.from('oauth_credentials').update({ status: 'expired', last_error: tokens.error_description || tokens.error || 'Refresh failed' }).eq('id', cred.id);
@@ -542,7 +561,7 @@ export async function executeTool(toolName, args, clientId, runId) {
         if (!apiKey) return { error: 'No Google API key configured', tool: toolName };
 
         const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=${strategy}&key=${apiKey}&category=performance&category=accessibility&category=best-practices&category=seo`;
-        const resp = await fetch(apiUrl);
+        const resp = await fetchWithTimeout(apiUrl, {}, 30000);
 
         if (!resp.ok) {
           const errText = await resp.text();
@@ -600,7 +619,7 @@ export async function executeTool(toolName, args, clientId, runId) {
         const languageCode = args.language_code || 'he';
         const highlightDomain = args.domain;
 
-        const resp = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+        const resp = await fetchWithTimeout('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
           method: 'POST',
           headers: {
             'Authorization': 'Basic ' + Buffer.from(`${login}:${password}`).toString('base64'),
@@ -613,7 +632,7 @@ export async function executeTool(toolName, args, clientId, runId) {
             device: 'mobile',
             os: 'android'
           }])
-        });
+        }, 25000);
 
         if (!resp.ok) return { error: `DataForSEO API error: ${resp.status}` };
 
@@ -687,14 +706,14 @@ export async function executeTool(toolName, args, clientId, runId) {
           body = [{ target: domain, limit: 50, order_by: ['rank,desc'], mode: 'as_is' }];
         }
 
-        const resp = await fetch(endpoint, {
+        const resp = await fetchWithTimeout(endpoint, {
           method: 'POST',
           headers: {
             'Authorization': 'Basic ' + Buffer.from(`${login}:${password}`).toString('base64'),
             'Content-Type': 'application/json'
           },
           body: JSON.stringify(body)
-        });
+        }, 25000);
 
         if (!resp.ok) return { error: `DataForSEO Backlinks error: ${resp.status}` };
 
@@ -740,7 +759,7 @@ export async function executeTool(toolName, args, clientId, runId) {
         const apiKey = process.env.PERPLEXITY_API_KEY;
         if (!apiKey) return { error: 'Perplexity API key not configured. Set PERPLEXITY_API_KEY environment variable.' };
 
-        const resp = await fetch('https://api.perplexity.ai/chat/completions', {
+        const resp = await fetchWithTimeout('https://api.perplexity.ai/chat/completions', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${apiKey}`,
@@ -869,23 +888,23 @@ export async function executeTool(toolName, args, clientId, runId) {
 
             if (accessToken) {
                   // Try GBP API — list accounts, then get location reviews
-                  const acctResp = await fetch('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', {
+                  const acctResp = await fetchWithTimeout('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', {
                     headers: { 'Authorization': `Bearer ${accessToken}` }
-                  });
+                  }, 15000);
                   const acctData = await acctResp.json();
                   if (acctData.accounts?.length) {
                     const accountName = acctData.accounts[0].name;
                     // List locations
-                    const locResp = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,metadata`, {
+                    const locResp = await fetchWithTimeout(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,metadata`, {
                       headers: { 'Authorization': `Bearer ${accessToken}` }
-                    });
+                    }, 15000);
                     const locData = await locResp.json();
                     if (locData.locations?.length) {
                       const location = locData.locations[0];
                       // Get reviews
-                      const reviewResp = await fetch(`https://mybusiness.googleapis.com/v4/${location.name}/reviews`, {
+                      const reviewResp = await fetchWithTimeout(`https://mybusiness.googleapis.com/v4/${location.name}/reviews`, {
                         headers: { 'Authorization': `Bearer ${accessToken}` }
-                      });
+                      }, 15000);
                       const reviewData = await reviewResp.json();
                       return {
                         business_name: location.title || args.business_name,
@@ -923,7 +942,7 @@ export async function executeTool(toolName, args, clientId, runId) {
           let searchData = null;
           for (const query of queries) {
             const searchUrl = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(query)}&inputtype=textquery&fields=place_id,name,formatted_address,rating,user_ratings_total&key=${apiKey}`;
-            const searchResp = await fetch(searchUrl);
+            const searchResp = await fetchWithTimeout(searchUrl, {}, 15000);
             searchData = await searchResp.json();
             if (searchData.status === 'OK' && searchData.candidates?.length) break;
           }
@@ -931,7 +950,7 @@ export async function executeTool(toolName, args, clientId, runId) {
           // Also try Text Search API as fallback (more flexible matching)
           if (searchData?.status !== 'OK' || !searchData?.candidates?.length) {
             const textSearchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(args.business_name)}&key=${apiKey}`;
-            const textResp = await fetch(textSearchUrl);
+            const textResp = await fetchWithTimeout(textSearchUrl, {}, 15000);
             const textData = await textResp.json();
             if (textData.status === 'OK' && textData.results?.length) {
               const r = textData.results[0];
@@ -962,7 +981,7 @@ export async function executeTool(toolName, args, clientId, runId) {
 
         // Get details with reviews
         const detailUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=name,rating,user_ratings_total,reviews&key=${apiKey}`;
-        const detailResp = await fetch(detailUrl);
+        const detailResp = await fetchWithTimeout(detailUrl, {}, 15000);
         const detailData = await detailResp.json();
 
         if (detailData.status !== 'OK') {
@@ -993,7 +1012,7 @@ export async function executeTool(toolName, args, clientId, runId) {
         const password = (process.env.DATAFORSEO_PASSWORD || '').trim();
         if (!login || !password) return { error: 'DataForSEO credentials not configured' };
 
-        const resp = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+        const resp = await fetchWithTimeout('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
           method: 'POST',
           headers: {
             'Authorization': 'Basic ' + Buffer.from(`${login}:${password}`).toString('base64'),
@@ -1006,7 +1025,7 @@ export async function executeTool(toolName, args, clientId, runId) {
             device: 'mobile',
             os: 'android'
           }])
-        });
+        }, 25000);
 
         if (!resp.ok) return { error: `DataForSEO error: ${resp.status}` };
 
@@ -1680,14 +1699,14 @@ async function executeGitHubChange(clientId, change, config) {
     const prBranch = `seo/${change.change_type}-${safePage}-${Date.now()}`.slice(0, 80);
 
     // Create branch from default
-    const refRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers });
+    const refRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers }, 15000);
     const refData = await refRes.json();
     if (!refData.object?.sha) return { success: false, error: `Cannot get SHA for branch ${branch}` };
 
-    await fetch(`https://api.github.com/repos/${owner}/${repo}/git/refs`, {
+    await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/git/refs`, {
       method: 'POST', headers,
       body: JSON.stringify({ ref: `refs/heads/${prBranch}`, sha: refData.object.sha }),
-    });
+    }, 15000);
 
     // Create a change description file in the repo for human review
     // (We create a _seo_changes/<id>.md file describing the change — the developer applies it)
@@ -1718,13 +1737,13 @@ async function executeGitHubChange(clientId, change, config) {
 
     const filePath = `_seo_changes/${change.id}.md`;
     const contentB64 = Buffer.from(changeDoc).toString('base64');
-    await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`, {
+    await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`, {
       method: 'PUT', headers,
       body: JSON.stringify({ message: `SEO: ${change.change_type} on ${safePage}`, content: contentB64, branch: prBranch }),
-    });
+    }, 15000);
 
     // Open PR
-    const prRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
+    const prRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
       method: 'POST', headers,
       body: JSON.stringify({
         title: `[SEO] ${change.change_type.replace(/_/g,' ')} — ${change.page_url}`,
@@ -1764,9 +1783,9 @@ async function executeWordPressChange(clientId, change) {
 
     // Find the page/post by URL slug
     const slug = change.page_url.replace(/.*\//, '').replace(/\/$/, '') || 'home';
-    const searchRes = await fetch(`${baseUrl}/wp-json/wp/v2/pages?slug=${slug}&_fields=id,title,content,yoast_head_json`, {
+    const searchRes = await fetchWithTimeout(`${baseUrl}/wp-json/wp/v2/pages?slug=${slug}&_fields=id,title,content,yoast_head_json`, {
       headers: { Authorization: `Basic ${auth}` }
-    });
+    }, 15000);
     const pages = await searchRes.json();
     const page = pages?.[0];
     if (!page) return { success: false, error: `Page not found for slug: ${slug}` };
@@ -1782,10 +1801,10 @@ async function executeWordPressChange(clientId, change) {
       return { success: false, error: `Change type ${change.change_type} requires manual WordPress editing` };
     }
 
-    const updateRes = await fetch(`${baseUrl}/wp-json/wp/v2/pages/${page.id}`, {
+    const updateRes = await fetchWithTimeout(`${baseUrl}/wp-json/wp/v2/pages/${page.id}`, {
       method: 'POST', headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(updateBody),
-    });
+    }, 15000);
     const updated = await updateRes.json();
     if (updated.id) {
       return { success: true, ref: `${baseUrl}/?p=${updated.id}`, message: `WordPress page ${updated.id} updated` };
@@ -1813,7 +1832,7 @@ async function executeWebflowChange(clientId, change) {
     const headers = { Authorization: `Bearer ${token}`, 'accept-version': '1.0.0', 'Content-Type': 'application/json' };
 
     // Get pages list to find matching page
-    const pagesRes = await fetch(`https://api.webflow.com/v2/sites/${siteId}/pages`, { headers });
+    const pagesRes = await fetchWithTimeout(`https://api.webflow.com/v2/sites/${siteId}/pages`, { headers }, 15000);
     const pagesData = await pagesRes.json();
     const slug = change.page_url.replace(/.*\//, '').replace(/\/$/, '') || 'index';
     const page = pagesData?.pages?.find(p => p.slug === slug || p.slug === '');
@@ -1825,15 +1844,15 @@ async function executeWebflowChange(clientId, change) {
     else if (change.change_type === 'meta_description') updateBody = { seo: { description: change.proposed_value } };
     else return { success: false, error: `Change type ${change.change_type} requires Webflow Designer access` };
 
-    const updateRes = await fetch(`https://api.webflow.com/v2/pages/${page.id}`, {
+    const updateRes = await fetchWithTimeout(`https://api.webflow.com/v2/pages/${page.id}`, {
       method: 'PATCH', headers, body: JSON.stringify(updateBody),
-    });
+    }, 15000);
     const updated = await updateRes.json();
     if (updated.id) {
       // Publish the page
-      await fetch(`https://api.webflow.com/v2/sites/${siteId}/publish`, {
+      await fetchWithTimeout(`https://api.webflow.com/v2/sites/${siteId}/publish`, {
         method: 'POST', headers, body: JSON.stringify({ publishToWebflowSubdomain: true }),
-      });
+      }, 15000);
       return { success: true, ref: `https://webflow.com/design/${siteId}`, message: `Webflow page updated and published` };
     }
     return { success: false, error: updated.message || 'Webflow update failed' };

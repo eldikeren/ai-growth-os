@@ -300,7 +300,7 @@ FINAL OUTPUT RULES:
     let iteration = 0;
     let finalResponse = null;
 
-    const EXECUTION_TIMEOUT_MS = 42000; // 42s — leave 18s for post-processing before Vercel's 60s limit
+    const EXECUTION_TIMEOUT_MS = 240000; // 240s — leave 60s for post-processing within 300s Vercel limit
 
     while (iteration < MAX_TOOL_ITERATIONS) {
       iteration++;
@@ -356,6 +356,9 @@ FINAL OUTPUT RULES:
           }
 
           console.log(`[TOOL_CALL] ${agent.slug} → ${fnName}(${JSON.stringify(fnArgs).slice(0, 200)})`);
+
+          // Heartbeat: keep updated_at fresh so zombie reaper doesn't kill active runs
+          supabase.from('runs').update({ updated_at: new Date().toISOString() }).eq('id', run.id).then(() => {});
 
           // Execute the tool
           const toolResult = await executeTool(fnName, fnArgs, clientId, run.id);
@@ -691,12 +694,12 @@ export async function processRunQueue() {
       .update({ status: 'failed', error: 'Timed out — stuck in running state for >15 min', updated_at: new Date().toISOString() })
       .in('id', zombies.map(z => z.id));
   }
-  // Also clean zombie runs in the runs table
+  // Also clean zombie runs in the runs table (use updated_at so actively-updating runs are not killed)
   const { data: zombieRuns } = await supabase
     .from('runs')
     .select('id')
     .eq('status', 'running')
-    .lt('created_at', zombieCutoff)
+    .lt('updated_at', zombieCutoff)
     .limit(100);
   if (zombieRuns?.length) {
     await supabase

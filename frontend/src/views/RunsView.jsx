@@ -1153,6 +1153,8 @@ export default function RunsView({ clientId, focusRunId, onFocusConsumed }) {
   const [loading, setLoading] = useState(false);
   const [filterStatus, setFilterStatus] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [latestOnly, setLatestOnly] = useState(true);
+  const [clearing, setClearing] = useState(false);
 
   const lanes = Object.keys(agents).sort();
 
@@ -1200,6 +1202,7 @@ export default function RunsView({ clientId, focusRunId, onFocusConsumed }) {
         res = await api('/runs/run-all', { method: 'POST', body: { clientId } });
       }
       setResult(res);
+      setFilterStatus('running'); // auto-switch to running view after queuing
       await refreshRuns();
     } catch (e) {
       setResult({ error: e.message });
@@ -1207,19 +1210,41 @@ export default function RunsView({ clientId, focusRunId, onFocusConsumed }) {
     setRunning(false);
   };
 
-  // Filter runs
-  const filteredRuns = runs.filter(r => {
-    if (filterStatus !== 'all' && r.status !== filterStatus) return false;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      const name = (r.agent_templates?.name || '').toLowerCase();
-      const lane = (r.agent_templates?.lane || '').toLowerCase();
-      if (!name.includes(q) && !lane.includes(q)) return false;
+  const clearOldRuns = async () => {
+    if (!confirm('Delete all failed and cancelled runs? Running and successful runs are kept.')) return;
+    setClearing(true);
+    try {
+      await api(`/clients/${clientId}/runs/clear-old`, { method: 'DELETE' });
+      await refreshRuns();
+    } catch (e) {
+      // fallback: just remove from local state
+      setRuns(prev => prev.filter(r => r.status === 'running' || r.status === 'success' || r.status === 'pending_approval'));
     }
-    return true;
-  });
+    setClearing(false);
+  };
 
-  const statusCounts = runs.reduce((acc, r) => {
+  // Filter runs — latest only = show 1 run per agent (most recent)
+  const latestRunsMap = runs.reduce((acc, r) => {
+    const key = r.agent_template_id;
+    if (!acc[key] || new Date(r.created_at) > new Date(acc[key].created_at)) acc[key] = r;
+    return acc;
+  }, {});
+  const baseRuns = latestOnly ? Object.values(latestRunsMap) : runs;
+
+  const filteredRuns = baseRuns
+    .filter(r => {
+      if (filterStatus !== 'all' && r.status !== filterStatus) return false;
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        const name = (r.agent_templates?.name || '').toLowerCase();
+        const lane = (r.agent_templates?.lane || '').toLowerCase();
+        if (!name.includes(q) && !lane.includes(q)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  const statusCounts = baseRuns.reduce((acc, r) => {
     acc[r.status] = (acc[r.status] || 0) + 1;
     return acc;
   }, {});
@@ -1347,42 +1372,83 @@ export default function RunsView({ clientId, focusRunId, onFocusConsumed }) {
       ) : (
         <>
           {/* Filter bar */}
-          <div style={{
-            display: 'flex', gap: spacing.md, marginBottom: spacing.lg,
-            flexWrap: 'wrap', alignItems: 'center',
-          }}>
-            <div style={{ position: 'relative', flex: '1 1 200px', maxWidth: 300 }}>
-              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: colors.textMuted }} />
-              <input
-                type="text"
-                placeholder="Search runs..."
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                style={{
-                  width: '100%', padding: '8px 12px 8px 32px',
-                  border: `1.5px solid ${colors.border}`, borderRadius: radius.md,
-                  fontSize: fontSize.sm, color: colors.text, background: colors.surface,
-                  outline: 'none', transition: transitions.fast,
-                }}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-              {['all', 'success', 'failed', 'running', 'pending_approval'].map(status => (
-                <button
-                  key={status}
-                  onClick={() => setFilterStatus(status)}
+          <div style={{ marginBottom: spacing.lg }}>
+            {/* Row 1: search + latest toggle + clear button */}
+            <div style={{ display: 'flex', gap: spacing.sm, marginBottom: spacing.sm, flexWrap: 'wrap', alignItems: 'center' }}>
+              <div style={{ position: 'relative', flex: '1 1 180px', maxWidth: 260 }}>
+                <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: colors.textMuted }} />
+                <input
+                  type="text"
+                  placeholder="Search agents..."
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
                   style={{
-                    padding: '5px 12px', borderRadius: radius.full,
-                    border: 'none', cursor: 'pointer',
-                    fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
-                    background: filterStatus === status ? colors.primary : colors.surfaceHover,
-                    color: filterStatus === status ? '#fff' : colors.textSecondary,
-                    transition: transitions.fast,
+                    width: '100%', padding: '7px 12px 7px 32px',
+                    border: `1.5px solid ${colors.border}`, borderRadius: radius.md,
+                    fontSize: fontSize.sm, color: colors.text, background: colors.surface,
+                    outline: 'none', boxSizing: 'border-box',
                   }}
-                >
-                  {status === 'all' ? `All (${runs.length})` : `${status.replace(/_/g, ' ')} (${statusCounts[status] || 0})`}
-                </button>
-              ))}
+                />
+              </div>
+
+              {/* Latest only toggle */}
+              <button
+                onClick={() => setLatestOnly(v => !v)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '7px 14px', borderRadius: radius.md, cursor: 'pointer',
+                  border: `1.5px solid ${latestOnly ? colors.primary : colors.border}`,
+                  background: latestOnly ? colors.primary + '15' : colors.surface,
+                  color: latestOnly ? colors.primary : colors.textSecondary,
+                  fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
+                  transition: 'all 0.15s',
+                }}
+              >
+                <Activity size={13} />
+                {latestOnly ? 'Latest run per agent ✓' : 'Show all history'}
+              </button>
+
+              {/* Clear old runs */}
+              <button
+                onClick={clearOldRuns}
+                disabled={clearing}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '7px 14px', borderRadius: radius.md, cursor: 'pointer',
+                  border: `1.5px solid ${colors.error}30`,
+                  background: colors.surface,
+                  color: colors.error,
+                  fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
+                  opacity: clearing ? 0.5 : 1,
+                }}
+              >
+                <X size={13} />
+                {clearing ? 'Clearing...' : 'Clear failed runs'}
+              </button>
+            </div>
+
+            {/* Row 2: status filter pills */}
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {['all', 'running', 'success', 'failed', 'pending_approval'].map(status => {
+                const count = status === 'all' ? baseRuns.length : (statusCounts[status] || 0);
+                const dotColor = status === 'running' ? colors.primary : status === 'success' ? colors.success : status === 'failed' ? colors.error : colors.textMuted;
+                return (
+                  <button
+                    key={status}
+                    onClick={() => setFilterStatus(status)}
+                    style={{
+                      padding: '5px 12px', borderRadius: radius.full,
+                      border: 'none', cursor: 'pointer',
+                      fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
+                      background: filterStatus === status ? colors.primary : colors.surfaceHover,
+                      color: filterStatus === status ? '#fff' : colors.textSecondary,
+                      transition: 'all 0.15s',
+                    }}
+                  >
+                    {status === 'all' ? `All (${count})` : `${status.replace(/_/g, ' ')} (${count})`}
+                  </button>
+                );
+              })}
             </div>
           </div>
 

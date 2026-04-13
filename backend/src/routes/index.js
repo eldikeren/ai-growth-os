@@ -210,6 +210,19 @@ router.get('/clients/:clientId/runs', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Clear old failed/cancelled runs — keeps running, success, pending_approval
+router.delete('/clients/:clientId/runs/clear-old', async (req, res) => {
+  try {
+    const { error, count } = await supabase
+      .from('runs')
+      .delete({ count: 'exact' })
+      .eq('client_id', req.params.clientId)
+      .in('status', ['failed', 'cancelled']);
+    if (error) throw error;
+    res.json({ deleted: count });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/runs/:id', async (req, res) => {
   try {
     const { data, error } = await supabase

@@ -236,6 +236,34 @@ router.post('/proposed-changes/:id/approve', async (req, res) => {
       .update({ status: 'approved', approved_by: req.body.approved_by || 'manual', approved_at: new Date().toISOString() })
       .eq('id', req.params.id).select().single();
     if (error) throw error;
+
+    // ── Queue validation agents immediately on approval ──
+    const VALIDATOR_SLUGS = ['hebrew-quality-agent', 'design-consistency-agent', 'seo-core-agent', 'website-qa-agent', 'website-content-agent'];
+    try {
+      const { data: agents } = await supabase.from('agent_templates').select('id, slug').in('slug', VALIDATOR_SLUGS).eq('is_active', true);
+      if (agents?.length) {
+        const taskPayload = {
+          trigger: 'post_change_validation',
+          change_id: change.id,
+          change_type: change.change_type,
+          page_url: change.page_url,
+          instructions: `Change approved: "${change.change_type}" on ${change.page_url}. Validate now — check Hebrew quality, design consistency, SEO impact, QA, and content quality.`,
+        };
+        await supabase.from('run_queue').insert(
+          agents.map(a => ({
+            client_id: change.client_id,
+            agent_template_id: a.id,
+            agent_slug: a.slug,
+            status: 'queued',
+            priority: 1,
+            priority_score: 9.0,
+            queued_by: 'post_change_approval',
+            task_payload: taskPayload,
+          }))
+        );
+      }
+    } catch (qErr) { console.error('[APPROVE_VALIDATORS]', qErr.message); }
+
     res.json({ success: true, change });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

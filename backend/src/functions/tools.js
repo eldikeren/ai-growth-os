@@ -1625,16 +1625,24 @@ export async function executeTool(toolName, args, clientId, runId) {
             executed_at: new Date().toISOString(),
             execution_result: executionResult,
           }).eq('id', change.id);
+
+          // ── IMMEDIATELY queue validation agents after every executed change ──
+          const validationQueued = await queuePostChangeValidators(clientId, change.id, args.change_type, args.page_url, runId);
+
           return {
             status: 'executed',
             platform,
             change_id: change.id,
             ref: executionResult.ref,
             message: executionResult.message,
+            validation_agents_queued: validationQueued,
           };
         }
 
         // No direct execution — staged for manual approval
+        // Still queue validators so they can pre-check the page before the change goes live
+        const validationQueued = await queuePostChangeValidators(clientId, change.id, args.change_type, args.page_url, runId);
+
         return {
           status: 'proposed',
           platform,
@@ -1643,6 +1651,7 @@ export async function executeTool(toolName, args, clientId, runId) {
           change_type: args.change_type,
           proposed_value: args.proposed_value,
           priority: args.priority || 'medium',
+          validation_agents_queued: validationQueued,
           message: platform === 'manual'
             ? 'Change staged. No platform connector configured — requires manual implementation.'
             : `Change staged for ${platform}. Platform connector found but execution pending approval.`,
@@ -1655,6 +1664,67 @@ export async function executeTool(toolName, args, clientId, runId) {
   } catch (err) {
     console.error(`[TOOL_ERROR] ${toolName}:`, err.message);
     return { error: err.message, tool: toolName };
+  }
+}
+
+// ============================================================
+// POST-CHANGE VALIDATION — queue agents immediately after any change
+// Fires guaranteed from inside the tool, NOT dependent on LLM output.
+// Agents: hebrew-quality, design-consistency, seo-core, website-qa, website-content
+// ============================================================
+async function queuePostChangeValidators(clientId, changeId, changeType, pageUrl, triggerRunId) {
+  const VALIDATOR_SLUGS = [
+    'hebrew-quality-agent',
+    'design-consistency-agent',
+    'seo-core-agent',
+    'website-qa-agent',
+    'website-content-agent',
+  ];
+
+  try {
+    // Load all 5 agent templates in one query
+    const { data: agents } = await supabase
+      .from('agent_templates')
+      .select('id, slug')
+      .in('slug', VALIDATOR_SLUGS)
+      .eq('is_active', true);
+
+    if (!agents?.length) return { queued: 0, error: 'No validator agent templates found' };
+
+    const taskPayload = {
+      trigger: 'post_change_validation',
+      change_id: changeId,
+      change_type: changeType,
+      page_url: pageUrl,
+      triggered_by_run: triggerRunId,
+      instructions: `A change of type "${changeType}" was just made to ${pageUrl}. Validate the change: check Hebrew quality, design consistency, SEO impact, QA, and content quality. Report findings and flag any issues.`,
+    };
+
+    const inserts = agents.map(agent => ({
+      client_id: clientId,
+      agent_template_id: agent.id,
+      agent_slug: agent.slug,
+      status: 'queued',
+      priority: 1,
+      priority_score: 9.0, // High priority — validation must run right after change
+      queued_by: 'post_change_auto_trigger',
+      task_payload: taskPayload,
+    }));
+
+    const { data: queued, error } = await supabase.from('run_queue').insert(inserts).select('id, agent_slug');
+    if (error) {
+      console.error('[POST_CHANGE_VALIDATORS] Queue error:', error.message);
+      return { queued: 0, error: error.message };
+    }
+
+    console.log(`[POST_CHANGE_VALIDATORS] Queued ${queued?.length} validators for change ${changeId}`);
+    return {
+      queued: queued?.length || 0,
+      agents: queued?.map(q => q.agent_slug) || [],
+    };
+  } catch (e) {
+    console.error('[POST_CHANGE_VALIDATORS] Fatal:', e.message);
+    return { queued: 0, error: e.message };
   }
 }
 

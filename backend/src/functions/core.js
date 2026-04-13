@@ -760,40 +760,35 @@ export async function processRunQueue() {
     .order('priority_score', { ascending: false, nullsFirst: false })
     .order('priority', { ascending: true })
     .order('created_at', { ascending: true })
-    .limit(20);
+    .limit(50); // fetch up to 50 — all agents run concurrently
 
   if (!queueItems?.length) {
     return { processed: 0, failed: 0, skipped: 0, blocked: 0, duration_ms: Date.now() - startTime };
   }
 
-  for (const item of queueItems) {
-    // Time budget: only process ONE item per cron tick (agent execution takes ~40-50s)
-    if (processed > 0 || Date.now() - startTime > 45000) {
-      console.log(`[QUEUE] Time budget exhausted after ${processed} processed, stopping`);
-      break;
-    }
-    try {
-      // Mark as running
-      await supabase.from('run_queue').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', item.id);
+  // ── Phase 1: Pre-validate all items sequentially (fast DB checks) ──
+  // Run ALL valid items concurrently — Master Orchestrator decides which to continue/stop
+  const MAX_CONCURRENT = 20; // Run up to 20 agents in parallel per cron tick
+  const toExecute = [];
 
+  for (const item of queueItems) {
+    if (toExecute.length >= MAX_CONCURRENT) break;
+    try {
       // Verify client exists
       const { data: client } = await supabase.from('clients').select('id, status').eq('id', item.client_id).single();
       if (!client) {
         await supabase.from('run_queue').update({ status: 'failed', error: 'Client not found' }).eq('id', item.id);
-        failed++;
-        continue;
+        failed++; continue;
       }
       if (client.status === 'paused' || client.status === 'archived') {
         await supabase.from('run_queue').update({ status: 'skipped_cooldown', error: `Client is ${client.status}` }).eq('id', item.id);
-        skipped++;
-        continue;
+        skipped++; continue;
       }
 
       // Verify agent is active
       if (!item.agent_templates?.is_active) {
         await supabase.from('run_queue').update({ status: 'failed', error: 'Agent is not active' }).eq('id', item.id);
-        failed++;
-        continue;
+        failed++; continue;
       }
 
       // Check assignment is enabled
@@ -806,61 +801,86 @@ export async function processRunQueue() {
 
       if (!assignment?.enabled) {
         await supabase.from('run_queue').update({ status: 'skipped_cooldown', error: 'Agent not enabled for this client' }).eq('id', item.id);
-        skipped++;
-        continue;
+        skipped++; continue;
       }
 
       // Check cooldown
       const cooldownMinutes = item.agent_templates?.cooldown_minutes || 0;
       if (cooldownMinutes > 0 && assignment.last_run_at) {
         const lastRunMs = new Date(assignment.last_run_at).getTime();
-        const cooldownMs = cooldownMinutes * 60 * 1000;
-        if (Date.now() - lastRunMs < cooldownMs) {
+        if (Date.now() - lastRunMs < cooldownMinutes * 60 * 1000) {
           await supabase.from('run_queue').update({ status: 'skipped_cooldown', error: `Cooldown active: ${cooldownMinutes} minutes` }).eq('id', item.id);
-          skipped++;
-          continue;
+          skipped++; continue;
         }
       }
 
       // Check dependencies
       if (item.depends_on?.length) {
-        const { data: deps } = await supabase
-          .from('run_queue')
-          .select('id, status')
-          .in('id', item.depends_on);
-
+        const { data: deps } = await supabase.from('run_queue').select('id, status').in('id', item.depends_on);
         const allDone = deps?.every(d => d.status === 'executed');
         const anyFailed = deps?.some(d => d.status === 'failed');
-
         if (anyFailed) {
           await supabase.from('run_queue').update({ status: 'failed', error: 'A dependency failed' }).eq('id', item.id);
-          failed++;
-          continue;
+          failed++; continue;
         }
         if (!allDone) {
           await supabase.from('run_queue').update({ status: 'blocked_dependency' }).eq('id', item.id);
-          blocked++;
-          continue;
+          blocked++; continue;
         }
       }
 
-      // Execute
-      const result = await executeAgent(
-        item.client_id,
-        item.agent_template_id,
-        item.task_payload || {},
-        { triggeredBy: item.queued_by || 'queue' }
-      );
+      // Valid — mark running and add to execution batch
+      await supabase.from('run_queue').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', item.id);
+      toExecute.push(item);
 
+    } catch (err) {
+      console.error(`[QUEUE] Pre-validation error for item ${item.id}:`, err.message);
+      failed++;
+    }
+  }
+
+  if (toExecute.length === 0) {
+    return { processed: 0, failed, skipped, blocked, duration_ms: Date.now() - startTime };
+  }
+
+  // ── Phase 2: Execute all valid items CONCURRENTLY ──
+  // Instead of 1 agent every 5 min, run up to 3 agents in parallel (~50s total vs 15+ min)
+  console.log(`[QUEUE] Running ${toExecute.length} agents concurrently`);
+
+  const execResults = await Promise.allSettled(
+    toExecute.map(async (item) => {
+      try {
+        const result = await executeAgent(
+          item.client_id,
+          item.agent_template_id,
+          item.task_payload || {},
+          { triggeredBy: item.queued_by || 'queue' }
+        );
+        return { item, result };
+      } catch (err) {
+        // Re-throw with item attached so we can handle retry logic below
+        const wrappedErr = new Error(err.message);
+        wrappedErr.item = item;
+        throw wrappedErr;
+      }
+    })
+  );
+
+  // ── Phase 3: Record outcomes ──
+  for (const outcome of execResults) {
+    if (outcome.status === 'fulfilled') {
+      const { item, result } = outcome.value;
       await supabase.from('run_queue').update({
         status: 'executed',
         run_id: result.runId,
         executed_at: new Date().toISOString()
       }).eq('id', item.id);
-
       processed++;
+    } else {
+      const err = outcome.reason;
+      const item = err.item || toExecute[execResults.indexOf(outcome)];
+      if (!item) { failed++; continue; }
 
-    } catch (err) {
       const retryCount = (item.retry_count || 0) + 1;
       const maxRetries = item.max_retries || 3;
       if (retryCount < maxRetries) {

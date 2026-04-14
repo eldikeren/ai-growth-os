@@ -1025,35 +1025,18 @@ export async function executeTool(toolName, args, clientId, runId) {
               }, 15000);
               const acctData = await acctResp.json();
 
-              // Detect 429 quota exceeded — this is the #1 GBP API issue
+              // Detect GBP API errors — log and fall through to DataForSEO instead of returning
               if (acctResp.status === 429 || acctData.error?.code === 429) {
-                return {
-                  error: 'GBP API quota exceeded (HTTP 429). The Google Cloud project has hit the per-minute rate limit on mybusinessaccountmanagement.googleapis.com. Fix: go to https://console.cloud.google.com/apis/api/mybusinessaccountmanagement.googleapis.com/quotas and request a quota increase, OR wait 60s before retrying.',
-                  gbp_oauth_used: true,
-                  quota_exceeded: true,
-                  http_status: 429,
-                  cache_for_seconds: 600
-                };
+                console.error('[GBP_OAUTH] 429 quota exceeded — falling through to DataForSEO');
+                throw new Error('GBP 429 quota exceeded');
               }
-
-              // Detect other GBP API errors (403, 401, etc.)
               if (acctData.error) {
-                return {
-                  error: `GBP API error ${acctData.error.code}: ${acctData.error.message}`,
-                  gbp_oauth_used: true,
-                  http_status: acctData.error.code,
-                  gbp_api_response: JSON.stringify(acctData.error).slice(0, 300)
-                };
+                console.error(`[GBP_OAUTH] ${acctData.error.code} error — falling through to DataForSEO`);
+                throw new Error(`GBP ${acctData.error.code}: ${acctData.error.message}`);
               }
-
               if (!acctData.accounts?.length) {
-                // Return explicit error — don't fall through to billing-required Places API
-                return {
-                  error: 'GBP OAuth connected but no accounts found. The connected Google account may not manage this business profile. Check that the correct Google account is connected in Credentials.',
-                  gbp_oauth_used: true,
-                  gbp_accounts_found: 0,
-                  gbp_api_response: JSON.stringify(acctData).slice(0, 200)
-                };
+                console.error('[GBP_OAUTH] no accounts — falling through to DataForSEO');
+                throw new Error('GBP OAuth returned zero accounts');
               }
 
               const accountName = acctData.accounts[0].name;

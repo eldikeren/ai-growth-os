@@ -15,11 +15,13 @@ const supabase = createClient(
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 50000,    // 50s per call — prevents Vercel function from hanging until killed at 300s
-  maxRetries: 0,     // No retries — each retry adds another 50s, burns the execution budget
+  timeout: 35000,    // 35s per call — tight budget to fit under 300s Vercel limit even in worst case
+  maxRetries: 0,     // No retries — each retry adds another 35s, burns the execution budget
 });
 
-const MAX_TOOL_ITERATIONS = 5; // Max tool call rounds — 5 × 50s OpenAI = 250s, safely under 300s Vercel hard limit
+// 3 iterations × (35s LLM + 28s tool) = 189s, + final LLM (35s) + DB writes = ~230s total
+// Safely under 300s Vercel hard limit even when an agent has no data and runs full iteration count
+const MAX_TOOL_ITERATIONS = 3;
 
 // ============================================================
 // VALIDATION GOVERNANCE — action_type → required validators
@@ -304,7 +306,7 @@ FINAL OUTPUT RULES:
     let iteration = 0;
     let finalResponse = null;
 
-    const EXECUTION_TIMEOUT_MS = 200000; // 200s — leaves 100s for post-processing within 300s Vercel hard limit
+    const EXECUTION_TIMEOUT_MS = 180000; // 180s — leaves 120s for post-processing within 300s Vercel hard limit
     let consecutiveToolErrors = 0; // Track runs of tool errors; abort early if tools consistently unavailable
 
     while (iteration < MAX_TOOL_ITERATIONS) {
@@ -439,8 +441,8 @@ FINAL OUTPUT RULES:
 
     // If we exhausted iterations without a final response, force one — but only if we have time
     if (!finalResponse) {
-      // Skip forced call if we're already past the safe point (220s) — Vercel kills at 300s
-      if (Date.now() - startTime > 220000) {
+      // Skip forced call if we're already past the safe point (210s) — Vercel kills at 300s
+      if (Date.now() - startTime > 210000) {
         finalResponse = JSON.stringify({
           timeout: true,
           message: `Agent ran out of time after ${iteration} iterations (${Math.round((Date.now()-startTime)/1000)}s). Tools called: ${toolCallLog.map(t=>t.tool).join(', ')}.`,

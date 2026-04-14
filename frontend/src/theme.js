@@ -153,6 +153,7 @@ export const NAV_GROUPS = [
       { id: 'runs', label: 'Runs', emoji: '▶️' },
       { id: 'queue', label: 'Queue', emoji: '📋' },
       { id: 'approvals', label: 'Approvals', emoji: '👍' },
+      { id: 'proposed-changes', label: 'Proposed Changes', emoji: '🔧' },
       { id: 'schedules', label: 'Schedules', emoji: '⏰' },
     ],
   },

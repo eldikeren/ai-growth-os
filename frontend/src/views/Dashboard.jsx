@@ -496,6 +496,7 @@ function ClientCard({ client, runCount, failCount, agentCount, kpis, isActive, o
         <KpiMini label="Page 1 KWs" value={b.page1_keyword_count} target={b.page1_keyword_count_target} provenance={b.page1_keyword_count_prov} color="#6366F1" />
         <KpiMini label="Reviews" value={b.google_reviews_count} target={b.google_reviews_count_target} provenance={b.google_reviews_count_prov} />
         <KpiMini label="DA" value={b.domain_authority} target={b.domain_authority_target} provenance={b.domain_authority_prov} />
+        <KpiMini label="AI Visibility" value={b.ai_visibility_score} target={100} provenance={b.ai_visibility_score_prov} color={b.ai_visibility_score >= 50 ? '#10B981' : b.ai_visibility_score >= 20 ? '#F59E0B' : b.ai_visibility_score !== null ? '#EF4444' : null} />
       </div>
 
       {/* Operational stats */}

@@ -1134,45 +1134,92 @@ export async function executeTool(toolName, args, clientId, runId) {
           }
         }
 
-        // ── Strategy 2: DataForSEO Business Data — works without GBP OAuth, no quota issues ──
-        // Uses DataForSEO's Google Reviews endpoint. Free tier gives ~100 req/month,
-        // paid tier is cents per call. No Google quota/approval needed.
-        if (process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD && args.business_name) {
+        // ── Strategy 2: DataForSEO SERP — branded search returns rating + votes in local_pack ──
+        // Same proven endpoint as fetch_local_serp. We search for the business name
+        // and look for it in the local_pack items, which contain rating.value and
+        // rating.votes_count for each business Google shows on Maps.
+        const dfsLogin = (process.env.DATAFORSEO_LOGIN || '').trim();
+        const dfsPassword = (process.env.DATAFORSEO_PASSWORD || '').trim();
+        if (dfsLogin && dfsPassword && args.business_name) {
           try {
-            const dfsAuth = Buffer.from(`${process.env.DATAFORSEO_LOGIN}:${process.env.DATAFORSEO_PASSWORD}`).toString('base64');
-            // Use My Business Info endpoint — returns name, rating, reviews count, place_id
-            const searchQuery = args.location
-              ? `${args.business_name} ${args.location}`
-              : args.business_name;
-            const dfsResp = await fetchWithTimeout(
-              'https://api.dataforseo.com/v3/business_data/google/my_business_info/live',
-              {
-                method: 'POST',
-                headers: { 'Authorization': `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify([{
-                  keyword: searchQuery,
-                  language_code: (args.location || '').toLowerCase().includes('israel') ? 'he' : 'en',
-                  location_code: (args.location || '').toLowerCase().includes('israel') ? 2376 : 2840
-                }])
-              },
-              20000
-            );
-            const dfsData = await dfsResp.json();
-            const item = dfsData?.tasks?.[0]?.result?.[0]?.items?.[0];
+            const isIsrael = ((args.location || args.domain || '').toLowerCase().includes('israel') ||
+                             (args.location || '').toLowerCase().includes('tel aviv') ||
+                             (args.business_name_he) || /[\u0590-\u05FF]/.test(args.business_name));
 
-            if (item && item.rating) {
+            // Search queries to try — branded first, then with location, then just domain
+            const searchQueries = [args.business_name];
+            if (args.location) searchQueries.push(`${args.business_name} ${args.location}`);
+            if (args.domain) searchQueries.push(args.domain.replace(/^https?:\/\//, '').replace(/\/$/, ''));
+
+            let matchedItem = null;
+            let matchSourceQuery = null;
+            const targetDomain = (args.domain || '').replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+
+            for (const q of searchQueries) {
+              const dfsResp = await fetchWithTimeout(
+                'https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
+                {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': 'Basic ' + Buffer.from(`${dfsLogin}:${dfsPassword}`).toString('base64'),
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify([{
+                    keyword: q,
+                    location_code: isIsrael ? 2376 : 2840,
+                    language_code: isIsrael ? 'he' : 'en',
+                    device: 'desktop',
+                    os: 'windows'
+                  }])
+                },
+                20000
+              );
+
+              if (!dfsResp.ok) continue;
+              const dfsData = await dfsResp.json();
+              const result = dfsData?.tasks?.[0]?.result?.[0];
+              const allItems = result?.items || [];
+
+              // Look in knowledge_graph first (best match for branded searches)
+              const knowledgeGraph = allItems.find(i => i.type === 'knowledge_graph');
+              if (knowledgeGraph?.rating) {
+                matchedItem = knowledgeGraph;
+                matchSourceQuery = q;
+                break;
+              }
+
+              // Otherwise look in local_pack for entry matching domain or business name
+              const localPacks = allItems.filter(i => i.type === 'local_pack' || i.type === 'maps');
+              for (const lp of localPacks) {
+                const entries = lp.items || [lp];
+                for (const entry of entries) {
+                  const entryDomain = (entry.domain || '').toLowerCase();
+                  const entryTitle = (entry.title || '').toLowerCase();
+                  const matchesDomain = targetDomain && entryDomain.includes(targetDomain.split('.')[0]);
+                  const matchesName = args.business_name && entryTitle.includes(args.business_name.toLowerCase().split(' ')[0]);
+                  if ((matchesDomain || matchesName) && entry.rating?.votes_count !== undefined) {
+                    matchedItem = entry;
+                    matchSourceQuery = q;
+                    break;
+                  }
+                }
+                if (matchedItem) break;
+              }
+              if (matchedItem) break;
+            }
+
+            if (matchedItem && matchedItem.rating) {
               const successResult = {
-                business_name: item.title || args.business_name,
-                total_reviews: item.rating?.votes_count || 0,
-                rating: item.rating?.value || null,
-                place_id: item.place_id,
-                address: item.address,
-                category: item.category,
-                phone: item.phone,
-                website: item.url,
-                is_claimed: item.is_claimed,
+                business_name: matchedItem.title || args.business_name,
+                total_reviews: matchedItem.rating.votes_count || 0,
+                rating: matchedItem.rating.value || null,
+                place_id: matchedItem.place_id || null,
+                address: matchedItem.address || null,
+                phone: matchedItem.phone || null,
+                website: matchedItem.url || matchedItem.domain || null,
+                matched_via_query: matchSourceQuery,
                 fetched_at: new Date().toISOString(),
-                source: 'dataforseo_business_data'
+                source: 'dataforseo_serp_local_pack'
               };
 
               // Cache it

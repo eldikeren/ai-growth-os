@@ -696,6 +696,29 @@ router.get('/clients/:clientId/baselines', async (req, res) => {
   try {
     const { data, error } = await supabase.from('baselines').select('*').eq('client_id', req.params.clientId);
     if (error) throw error;
+
+    // Inject ai_visibility_score as a synthetic baseline (computed from geo_visibility_signals)
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: geoSignals } = await supabase
+      .from('geo_visibility_signals')
+      .select('client_mentioned, created_at')
+      .eq('client_id', req.params.clientId)
+      .gte('created_at', since);
+    if (geoSignals && geoSignals.length > 0) {
+      const mentioned = geoSignals.filter(s => s.client_mentioned).length;
+      const aiScore = Math.round((mentioned / geoSignals.length) * 100);
+      const latestGeo = geoSignals.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+      if (!data.find(b => b.metric_name === 'ai_visibility_score')) {
+        data.push({
+          client_id: req.params.clientId,
+          metric_name: 'ai_visibility_score',
+          metric_value: aiScore,
+          source: `${geoSignals.length} queries tested (ChatGPT + Perplexity)`,
+          recorded_at: latestGeo.created_at
+        });
+      }
+    }
+
     const now = Date.now();
     // Enrich each baseline with provenance and freshness
     const enriched = (data || []).map(b => {
@@ -720,6 +743,87 @@ router.get('/clients/:clientId/baselines', async (req, res) => {
       };
     });
     res.json(enriched);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── AI VISIBILITY — aggregated GEO data from Perplexity + ChatGPT tests ──
+router.get('/clients/:clientId/ai-visibility', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+
+    // All visibility signals from the last 30 days
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: signals } = await supabase
+      .from('geo_visibility_signals')
+      .select('*')
+      .eq('client_id', clientId)
+      .gte('created_at', since)
+      .order('created_at', { ascending: false });
+
+    const rows = signals || [];
+    if (rows.length === 0) {
+      return res.json({
+        score: null,
+        total_queries: 0,
+        message: 'No AI visibility data yet. Run geo-ai-visibility-agent to collect data.',
+        recent_queries: [],
+        top_competitors: [],
+        by_platform: {}
+      });
+    }
+
+    // Overall score = percent of queries where client was mentioned
+    const mentioned = rows.filter(r => r.client_mentioned).length;
+    const score = Math.round((mentioned / rows.length) * 100);
+
+    // By platform breakdown
+    const byPlatform = {};
+    for (const r of rows) {
+      const p = r.platform || 'unknown';
+      if (!byPlatform[p]) byPlatform[p] = { total: 0, mentioned: 0, cited: 0 };
+      byPlatform[p].total += 1;
+      if (r.client_mentioned) byPlatform[p].mentioned += 1;
+      if (r.client_cited) byPlatform[p].cited += 1;
+    }
+    for (const p of Object.keys(byPlatform)) {
+      byPlatform[p].mention_rate = Math.round((byPlatform[p].mentioned / byPlatform[p].total) * 100);
+      byPlatform[p].citation_rate = Math.round((byPlatform[p].cited / byPlatform[p].total) * 100);
+    }
+
+    // Top competitors — count occurrences across all queries
+    const competitorCounts = {};
+    for (const r of rows) {
+      const comps = r.competitors_mentioned || [];
+      for (const c of comps) {
+        if (!c) continue;
+        const key = String(c).toLowerCase().trim();
+        competitorCounts[key] = (competitorCounts[key] || 0) + 1;
+      }
+    }
+    const topCompetitors = Object.entries(competitorCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([name, count]) => ({ name, times_mentioned: count }));
+
+    // Recent queries (last 20)
+    const recentQueries = rows.slice(0, 20).map(r => ({
+      query: r.query,
+      platform: r.platform,
+      client_mentioned: r.client_mentioned,
+      client_cited: r.client_cited,
+      competitors: (r.competitors_mentioned || []).slice(0, 5),
+      created_at: r.created_at
+    }));
+
+    res.json({
+      score,
+      total_queries: rows.length,
+      mentioned_count: mentioned,
+      by_platform: byPlatform,
+      top_competitors: topCompetitors,
+      recent_queries: recentQueries,
+      last_updated: rows[0]?.created_at
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

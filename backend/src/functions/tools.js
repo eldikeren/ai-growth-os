@@ -1906,7 +1906,7 @@ export async function executeTool(toolName, args, clientId, runId) {
           .eq('client_id', clientId)
           .maybeSingle();
 
-        // Also check client_connectors for github
+        // Also check client_connectors for github (legacy table)
         const { data: connectors } = await supabase.from('client_connectors')
           .select('connector_type, config, is_active')
           .eq('client_id', clientId)
@@ -1914,9 +1914,21 @@ export async function executeTool(toolName, args, clientId, runId) {
 
         const connectorMap = Object.fromEntries((connectors || []).map(c => [c.connector_type, c]));
 
-        // Determine platform from website record or connectors
+        // ── NEW: check website_git_connections (the real git config table) ──
+        let gitConnection = null;
+        if (website?.id) {
+          const { data: gitConn } = await supabase.from('website_git_connections')
+            .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
+            .eq('client_website_id', website.id)
+            .maybeSingle();
+          gitConnection = gitConn;
+        }
+
+        // Determine platform — prefer the real git connection table over legacy connectors
         let platform = 'manual';
-        if (connectorMap['github']) platform = 'github';
+        if (gitConnection?.provider === 'github') platform = 'github';
+        else if (gitConnection?.provider === 'gitlab') platform = 'gitlab';
+        else if (connectorMap['github']) platform = 'github';
         else if (website?.cms_type) platform = website.cms_type; // wordpress/wix/webflow/shopify
         else if (website?.website_platform_type === 'wordpress') platform = 'wordpress';
         else if (website?.website_platform_type === 'wix') platform = 'wix';
@@ -1943,8 +1955,19 @@ export async function executeTool(toolName, args, clientId, runId) {
         // 3. Try immediate execution if platform connector is available
         let executionResult = null;
 
-        if (platform === 'github' && connectorMap['github']?.config?.repo_url) {
-          executionResult = await executeGitHubChange(clientId, change, connectorMap['github'].config);
+        if (platform === 'github') {
+          // Build config from website_git_connections first, then fall back to client_connectors
+          const gitConfig = gitConnection ? {
+            repo_url: gitConnection.repo_url || `https://github.com/${gitConnection.repo_owner}/${gitConnection.repo_name}`,
+            repo_owner: gitConnection.repo_owner,
+            repo_name: gitConnection.repo_name,
+            default_branch: gitConnection.production_branch || gitConnection.default_branch || 'main',
+            access_mode: gitConnection.access_mode
+          } : connectorMap['github']?.config;
+
+          if (gitConfig?.repo_url || gitConfig?.repo_owner) {
+            executionResult = await executeGitHubChange(clientId, change, gitConfig);
+          }
         } else if (platform === 'wordpress') {
           executionResult = await executeWordPressChange(clientId, change);
         } else if (platform === 'webflow') {
@@ -2664,34 +2687,21 @@ async function queuePostChangeValidators(clientId, changeId, changeType, pageUrl
 
 async function executeGitHubChange(clientId, change, config) {
   try {
-    const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
-    const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+    // Global token from Vercel env is the default for all clients
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) return { success: false, error: 'GITHUB_TOKEN env var not set' };
 
-    // Try repo-level token first (stored in website_git_repos)
-    const { data: gitRepo } = await supabase.from('website_git_repos')
-      .select('repo_url, default_branch, access_token_encrypted, encryption_iv')
-      .eq('client_id', clientId)
-      .maybeSingle();
-
-    let token = GITHUB_TOKEN;
-    if (gitRepo?.access_token_encrypted && ENC_KEY) {
-      try {
-        const iv = (gitRepo.encryption_iv || '').split(':')[0];
-        const decipher = (await import('crypto')).default.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(iv, 'hex'));
-        let dec = decipher.update(gitRepo.access_token_encrypted, 'hex', 'utf8');
-        token = dec + decipher.final('utf8');
-      } catch { /* fall back to global token */ }
+    // Prefer explicit owner/repo from config (website_git_connections), else parse from URL
+    let owner = config?.repo_owner;
+    let repo = config?.repo_name;
+    if (!owner || !repo) {
+      const repoUrl = config?.repo_url || '';
+      const repoMatch = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
+      if (!repoMatch) return { success: false, error: `Cannot parse repo URL: ${repoUrl}` };
+      owner = repoMatch[1];
+      repo = repoMatch[2].replace('.git', '');
     }
-
-    if (!token) return { success: false, error: 'No GitHub token available' };
-
-    const repoUrl = gitRepo?.repo_url || config?.repo_url || '';
-    const repoMatch = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)/);
-    if (!repoMatch) return { success: false, error: `Cannot parse repo URL: ${repoUrl}` };
-
-    const owner = repoMatch[1];
-    const repo = repoMatch[2].replace('.git', '');
-    const branch = gitRepo?.default_branch || 'main';
+    const branch = config?.default_branch || config?.production_branch || 'main';
     const headers = { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json', 'Content-Type': 'application/json' };
 
     // Build a descriptive branch name and commit message

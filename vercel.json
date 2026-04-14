@@ -28,6 +28,7 @@
     { "path": "/api/cron/geo-sweep", "schedule": "0 */12 * * *" },
     { "path": "/api/cron/refresh-tokens", "schedule": "*/30 * * * *" },
     { "path": "/api/cron/process-browser-tasks", "schedule": "*/10 * * * *" },
+    { "path": "/api/cron/process-onpage-tasks", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/audit-snapshot", "schedule": "0 5 * * *" },
     { "path": "/api/cron/self-heal", "schedule": "*/5 * * * *" }
   ],

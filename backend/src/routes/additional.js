@@ -820,6 +820,112 @@ router.get('/cron/refresh-tokens', async (req, res) => {
   res.json({ token_refreshes: results.length, results, ran_at: new Date().toISOString() });
 });
 
+// ── DATAFORSEO ONPAGE POLLER — runs every 5 min ──────────────
+// Picks up pending onpage crawl tasks and retrieves results out of band
+router.get('/cron/process-onpage-tasks', async (req, res) => {
+  try {
+    if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) {
+      return res.json({ processed: 0, reason: 'DataForSEO credentials not configured' });
+    }
+    const dfsAuth = Buffer.from(`${process.env.DATAFORSEO_LOGIN}:${process.env.DATAFORSEO_PASSWORD}`).toString('base64');
+    const headers = { 'Authorization': `Basic ${dfsAuth}`, 'Content-Type': 'application/json' };
+
+    // Find all pending onpage cache rows
+    const { data: pending } = await supabase
+      .from('baselines')
+      .select('id, client_id, metric_name, metric_text')
+      .like('metric_name', 'onpage_crawl_cache:%')
+      .eq('source', 'dataforseo_onpage_pending');
+
+    if (!pending?.length) return res.json({ processed: 0, pending_count: 0 });
+
+    // Get ready task IDs from DataForSEO
+    const readyResp = await fetch('https://api.dataforseo.com/v3/on_page/tasks_ready', { method: 'GET', headers });
+    const readyData = await readyResp.json();
+    const readyIds = new Set((readyData?.tasks?.[0]?.result || []).map(t => t.id));
+
+    const processed = [];
+    for (const row of pending) {
+      let meta;
+      try { meta = JSON.parse(row.metric_text || '{}'); } catch { continue; }
+      if (!meta.task_id) continue;
+
+      // Skip if still pending on DataForSEO side — but also time out after 30 min
+      const ageMin = (Date.now() - new Date(meta.submitted_at).getTime()) / 60000;
+      if (ageMin > 30) {
+        // Abandon — mark as failed
+        await supabase.from('baselines').update({
+          metric_text: JSON.stringify({ ...meta, status: 'failed', error: 'Task took > 30 min, abandoned' }),
+          source: 'dataforseo_onpage_failed'
+        }).eq('id', row.id);
+        processed.push({ task_id: meta.task_id, status: 'abandoned' });
+        continue;
+      }
+      if (!readyIds.has(meta.task_id)) continue;
+
+      // Fetch summary
+      const summaryResp = await fetch(`https://api.dataforseo.com/v3/on_page/summary/${meta.task_id}`, { headers });
+      const summaryData = await summaryResp.json();
+      const summary = summaryData?.tasks?.[0]?.result?.[0];
+      if (!summary) continue;
+
+      const checks = summary.page_metrics?.checks || {};
+      const keyIssues = Object.entries(checks)
+        .filter(([, v]) => v > 0)
+        .map(([name, count]) => ({ check: name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 30);
+
+      const result = {
+        source: 'dataforseo_onpage',
+        target: meta.target,
+        task_id: meta.task_id,
+        pages_crawled: summary.crawl_progress?.pages_crawled || 0,
+        onpage_score: summary.page_metrics?.onpage_score || null,
+        broken_resources: summary.page_metrics?.broken_resources || 0,
+        broken_links: summary.page_metrics?.broken_links || 0,
+        duplicate_title: summary.page_metrics?.duplicate_title || 0,
+        duplicate_description: summary.page_metrics?.duplicate_description || 0,
+        duplicate_content: summary.page_metrics?.duplicate_content || 0,
+        links_external: summary.page_metrics?.links_external || 0,
+        links_internal: summary.page_metrics?.links_internal || 0,
+        non_indexable: summary.page_metrics?.non_indexable || 0,
+        key_issues: keyIssues,
+        domain_info: summary.domain_info || {},
+        fetched_at: new Date().toISOString()
+      };
+
+      // Overwrite cache row with completed results
+      await supabase.from('baselines').update({
+        metric_value: result.pages_crawled,
+        metric_text: JSON.stringify(result),
+        source: 'dataforseo_onpage',
+        recorded_at: new Date().toISOString()
+      }).eq('id', row.id);
+
+      // Also update canonical baselines
+      await supabase.from('baselines').upsert({
+        client_id: row.client_id,
+        metric_name: 'onpage_score',
+        metric_value: result.onpage_score || 0,
+        source: 'DataForSEO OnPage',
+        recorded_at: new Date().toISOString()
+      }, { onConflict: 'client_id,metric_name' });
+      await supabase.from('baselines').upsert({
+        client_id: row.client_id,
+        metric_name: 'indexed_pages_count',
+        metric_value: (result.pages_crawled || 0) - (result.non_indexable || 0),
+        source: 'DataForSEO OnPage',
+        recorded_at: new Date().toISOString()
+      }, { onConflict: 'client_id,metric_name' });
+
+      processed.push({ task_id: meta.task_id, status: 'completed', pages: result.pages_crawled });
+    }
+
+    res.json({ processed: processed.length, pending_count: pending.length, results: processed });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── MANUS BROWSER TASK WORKER — runs every 10 min ───────────
 router.get('/cron/process-browser-tasks', async (req, res) => {
   try {

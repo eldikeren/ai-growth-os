@@ -1336,6 +1336,24 @@ function extractMeasuredFindings(output) {
   if (typeof output?.indexed_pages_count === 'number') {
     findings.push({ title: 'Indexed pages', evidence: `${output.indexed_pages_count} pages indexed`, metric_name: 'indexed_pages_count', metric_value: output.indexed_pages_count });
   }
+  // Catch-all: any non-empty array at top level = agent found something real
+  const FINDING_ARRAYS = ['opportunities', 'top_queries', 'fell_off_page1', 'top_pages', 'alerts',
+    'ranking_changes', 'quick_wins', 'content_gaps', 'new_citations', 'lost_citations',
+    'cro_opportunities', 'link_opportunities', 'missing_schema', 'redirect_issues'];
+  for (const key of FINDING_ARRAYS) {
+    if (Array.isArray(output?.[key]) && output[key].length > 0 && !findings.some(f => f.metric_name === key)) {
+      findings.push({ title: key.replace(/_/g, ' '), evidence: `${output[key].length} ${key.replace(/_/g,' ')} found`, metric_name: key, metric_value: output[key].length });
+    }
+  }
+  // Catch-all: top-level numeric fields = real measurements
+  const NUMERIC_KEYS = ['daily_health_score', 'overall_health_score', 'geo_score', 'local_pack_count',
+    'total_reviews', 'avg_rating', 'page1_count', 'new_backlinks', 'lost_backlinks', 'domain_authority',
+    'conversion_rate', 'sessions', 'bounce_rate', 'pages_discovered', 'total_issues_found'];
+  for (const key of NUMERIC_KEYS) {
+    if (typeof output?.[key] === 'number' && !findings.some(f => f.metric_name === key)) {
+      findings.push({ title: key.replace(/_/g, ' '), evidence: `${key} = ${output[key]}`, metric_name: key, metric_value: output[key] });
+    }
+  }
   return findings;
 }
 
@@ -1399,10 +1417,11 @@ function enforceTruthGate(output, agentSlug, toolCallLog) {
   if (dataCompleteness < 70 || realSourceCount < 2 || staleCount > 0 || measuredFindings.length === 0 || criticalMissing > 0) {
     confidence = 'medium';
   }
-  if (dataCompleteness < 50 || measuredFindings.length === 0) {
+  // Only mark 'low' when BOTH data is sparse AND no findings — not just because output format differs
+  if (dataCompleteness < 50 && measuredFindings.length === 0) {
     confidence = 'low';
   }
-  if (dataCompleteness < 30 || (inspectedAssets.length === 0 && realSourceCount === 0)) {
+  if (dataCompleteness < 30 || (inspectedAssets.length === 0 && realSourceCount === 0 && toolCallLog.length === 0)) {
     confidence = 'very_low';
   }
 

@@ -621,6 +621,22 @@ export function getToolDefinitions(agentSlug, clientId) {
         }
       },
       allowed_agents: ['technical-seo-crawl-agent','seo-core-agent','gsc-daily-monitor','master-orchestrator']
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'reply_to_review',
+        description: 'Publish a reply to a Google Business Profile review using GBP OAuth. Use the review_name returned by fetch_google_reviews. The reply is posted immediately and visible publicly.',
+        parameters: {
+          type: 'object',
+          properties: {
+            review_name: { type: 'string', description: 'Full GBP review name from fetch_google_reviews (e.g. accounts/123/locations/456/reviews/789)' },
+            reply_text: { type: 'string', description: 'The reply text to post. Must be in CLIENT LANGUAGE. Max 4096 chars.' }
+          },
+          required: ['review_name', 'reply_text']
+        }
+      },
+      allowed_agents: ['reviews-gbp-authority-agent']
     }
   ];
 
@@ -977,43 +993,69 @@ export async function executeTool(toolName, args, clientId, runId) {
             const accessToken = await getValidGoogleToken(clientId);
 
             if (accessToken) {
-                  // Try GBP API — list accounts, then get location reviews
-                  const acctResp = await fetchWithTimeout('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', {
-                    headers: { 'Authorization': `Bearer ${accessToken}` }
-                  }, 15000);
-                  const acctData = await acctResp.json();
-                  if (acctData.accounts?.length) {
-                    const accountName = acctData.accounts[0].name;
-                    // List locations
-                    const locResp = await fetchWithTimeout(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,metadata`, {
-                      headers: { 'Authorization': `Bearer ${accessToken}` }
-                    }, 15000);
-                    const locData = await locResp.json();
-                    if (locData.locations?.length) {
-                      const location = locData.locations[0];
-                      // Get reviews
-                      const reviewResp = await fetchWithTimeout(`https://mybusiness.googleapis.com/v4/${location.name}/reviews`, {
-                        headers: { 'Authorization': `Bearer ${accessToken}` }
-                      }, 15000);
-                      const reviewData = await reviewResp.json();
-                      return {
-                        business_name: location.title || args.business_name,
-                        total_reviews: reviewData.totalReviewCount || 0,
-                        rating: reviewData.averageRating || null,
-                        recent_reviews: (reviewData.reviews || []).slice(0, 5).map(r => ({
-                          author: r.reviewer?.displayName,
-                          rating: r.starRating === 'FIVE' ? 5 : r.starRating === 'FOUR' ? 4 : r.starRating === 'THREE' ? 3 : r.starRating === 'TWO' ? 2 : 1,
-                          text: r.comment?.slice(0, 300),
-                          time: r.createTime
-                        })),
-                        fetched_at: new Date().toISOString(),
-                        source: 'gbp_oauth_api'
-                      };
-                    }
-                  }
+              // Try GBP API — list accounts, then get location reviews
+              const acctResp = await fetchWithTimeout('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+              }, 15000);
+              const acctData = await acctResp.json();
+
+              if (!acctData.accounts?.length) {
+                // Return explicit error — don't fall through to billing-required Places API
+                return {
+                  error: 'GBP OAuth connected but no accounts found. The connected Google account may not manage this business profile. Check that the correct Google account is connected in Credentials.',
+                  gbp_oauth_used: true,
+                  gbp_accounts_found: 0,
+                  gbp_api_response: JSON.stringify(acctData).slice(0, 200)
+                };
+              }
+
+              const accountName = acctData.accounts[0].name;
+              // List locations
+              const locResp = await fetchWithTimeout(`https://mybusinessbusinessinformation.googleapis.com/v1/${accountName}/locations?readMask=name,title,metadata`, {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+              }, 15000);
+              const locData = await locResp.json();
+
+              if (!locData.locations?.length) {
+                return {
+                  error: 'GBP OAuth connected and account found, but no locations/business profiles. Make sure the business is claimed and verified.',
+                  gbp_oauth_used: true,
+                  gbp_account: accountName,
+                  gbp_locations_found: 0
+                };
+              }
+
+              const location = locData.locations[0];
+              // Get reviews — include review names so reply_to_review can use them
+              const reviewResp = await fetchWithTimeout(`https://mybusiness.googleapis.com/v4/${location.name}/reviews`, {
+                headers: { 'Authorization': `Bearer ${accessToken}` }
+              }, 15000);
+              const reviewData = await reviewResp.json();
+
+              const starToNum = s => ({ FIVE: 5, FOUR: 4, THREE: 3, TWO: 2, ONE: 1 }[s] || 0);
+              return {
+                business_name: location.title || args.business_name,
+                location_name: location.name,
+                account_name: accountName,
+                total_reviews: reviewData.totalReviewCount || 0,
+                rating: reviewData.averageRating || null,
+                recent_reviews: (reviewData.reviews || []).slice(0, 10).map(r => ({
+                  review_name: r.name,  // needed for reply_to_review
+                  author: r.reviewer?.displayName,
+                  rating: starToNum(r.starRating),
+                  text: r.comment?.slice(0, 300),
+                  time: r.createTime,
+                  has_reply: !!r.reviewReply,
+                  reply_text: r.reviewReply?.comment?.slice(0, 200)
+                })),
+                unanswered_count: (reviewData.reviews || []).filter(r => !r.reviewReply).length,
+                fetched_at: new Date().toISOString(),
+                source: 'gbp_oauth_api'
+              };
             }
           } catch (gbpErr) {
             console.error('[GBP_OAUTH]', gbpErr.message);
+            return { error: `GBP OAuth error: ${gbpErr.message}`, gbp_oauth_used: true };
           }
         }
 
@@ -2084,6 +2126,45 @@ export async function executeTool(toolName, args, clientId, runId) {
 
         const err = await resp.json().catch(() => ({}));
         return { error: `GSC Sitemap API error ${resp.status}: ${err?.error?.message || resp.statusText}` };
+      }
+
+      // ========================================
+      // reply_to_review
+      // ========================================
+      case 'reply_to_review': {
+        if (!clientId) return { error: 'clientId required to reply to reviews' };
+        const token = await getValidGoogleToken(clientId);
+        if (!token) return { error: 'Google OAuth token unavailable. Connect Google Business Profile in Credentials.' };
+
+        const { review_name, reply_text } = args;
+        if (!review_name) return { error: 'review_name is required (from fetch_google_reviews result)' };
+        if (!reply_text) return { error: 'reply_text is required' };
+        if (reply_text.length > 4096) return { error: 'reply_text exceeds 4096 character limit' };
+
+        const replyResp = await fetchWithTimeout(
+          `https://mybusiness.googleapis.com/v4/${review_name}/reply`,
+          {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ comment: reply_text })
+          },
+          15000
+        );
+
+        if (replyResp.ok) {
+          const replyData = await replyResp.json().catch(() => ({}));
+          return {
+            success: true,
+            review_name,
+            reply_published: true,
+            reply_text: reply_text.slice(0, 100) + (reply_text.length > 100 ? '...' : ''),
+            published_at: replyData.updateTime || new Date().toISOString(),
+            message: 'Reply published to Google Business Profile.'
+          };
+        }
+
+        const replyErr = await replyResp.json().catch(() => ({}));
+        return { error: `GBP Reply API error ${replyResp.status}: ${replyErr?.error?.message || replyResp.statusText}`, review_name };
       }
 
       default:

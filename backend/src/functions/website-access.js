@@ -205,12 +205,19 @@ async function crawlWebsiteBasic(url) {
 // GIT CONNECTION
 // ============================================================
 export async function saveGitConnection(clientWebsiteId, data, gitToken = null) {
-  const {
-    provider, repoUrl, repoOwner, repoName,
-    defaultBranch, productionBranch, stagingBranch,
-    accessMode, deploymentPlatform, deploymentProjectId,
-    deploymentProductionUrl, deploymentStagingUrl
-  } = data;
+  // Accept both camelCase and snake_case field names from frontend
+  const provider = data.provider;
+  const repoUrl = data.repoUrl || data.repo_url;
+  const repoOwner = data.repoOwner || data.repo_owner;
+  const repoName = data.repoName || data.repo_name;
+  const defaultBranch = data.defaultBranch || data.default_branch;
+  const productionBranch = data.productionBranch || data.production_branch;
+  const stagingBranch = data.stagingBranch || data.staging_branch;
+  const accessMode = data.accessMode || data.access_mode;
+  const deploymentPlatform = data.deploymentPlatform || data.deployment_platform;
+  const deploymentProjectId = data.deploymentProjectId || data.deployment_project_id;
+  const deploymentProductionUrl = data.deploymentProductionUrl || data.deployment_production_url;
+  const deploymentStagingUrl = data.deploymentStagingUrl || data.deployment_staging_url;
 
   // Parse owner/name from URL if not provided
   let owner = repoOwner, name = repoName;
@@ -225,7 +232,7 @@ export async function saveGitConnection(clientWebsiteId, data, gitToken = null) 
     default_branch: defaultBranch || 'main',
     production_branch: productionBranch || 'main',
     staging_branch: stagingBranch,
-    access_mode: accessMode || 'clone_only',
+    access_mode: accessMode || 'branch_and_pr',
     deployment_platform: deploymentPlatform,
     deployment_project_id: deploymentProjectId,
     deployment_production_url: deploymentProductionUrl,
@@ -238,11 +245,14 @@ export async function saveGitConnection(clientWebsiteId, data, gitToken = null) 
     await storeSecret(clientWebsiteId, 'git_token', gitToken, 'Git access token');
   }
 
+  // has_git_token = true if per-client token stored OR global GITHUB_TOKEN env var is configured
+  const hasToken = !!gitToken || !!process.env.GITHUB_TOKEN;
+
   // Update access profile
   await supabase.from('website_access_profiles').upsert({
     client_website_id: clientWebsiteId,
     git_access_enabled: true,
-    has_git_token: !!gitToken,
+    has_git_token: hasToken,
     current_access_level: 'git_edit'
   }, { onConflict: 'client_website_id' });
 
@@ -353,7 +363,8 @@ export async function validateGitConnection(clientWebsiteId) {
   let error = null;
 
   try {
-    const token = await getDecryptedSecret(clientWebsiteId, 'git_token');
+    // Use per-client token if stored, otherwise fall back to global GITHUB_TOKEN env var
+    const token = await getDecryptedSecret(clientWebsiteId, 'git_token') || process.env.GITHUB_TOKEN;
     const headers = token ? { Authorization: `token ${token}` } : {};
 
     if (conn.provider === 'github' && conn.repo_owner && conn.repo_name) {

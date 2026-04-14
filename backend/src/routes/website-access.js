@@ -42,8 +42,9 @@ router.post('/clients/:clientId/website/analyze', async (req, res) => {
 // ── GIT CONNECTION ────────────────────────────────────────────
 router.post('/website/:websiteId/git', async (req, res) => {
   try {
-    const { gitToken, ...data } = req.body;
-    const result = await saveGitConnection(req.params.websiteId, data, gitToken);
+    // Accept both camelCase (gitToken) and snake_case (git_token) from frontend
+    const { gitToken, git_token, ...data } = req.body;
+    const result = await saveGitConnection(req.params.websiteId, data, gitToken || git_token || null);
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

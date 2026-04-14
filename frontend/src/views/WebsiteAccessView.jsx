@@ -58,10 +58,21 @@ function GitEditor({ git, websiteId, onSaved, onCancel }) {
     repo_owner: git?.repo_owner || '',
     repo_name: git?.repo_name || '',
     production_branch: git?.production_branch || 'main',
-    access_mode: git?.access_mode || 'token',
+    access_mode: git?.access_mode || 'branch_and_pr',
     git_token: '',
   });
+  const [repoUrl, setRepoUrl] = useState('');
   const [saving, setSaving] = useState(false);
+
+  // Auto-parse owner/repo from a pasted GitHub URL
+  const handleUrlPaste = (url) => {
+    setRepoUrl(url);
+    const match = url.match(/(?:github|gitlab|bitbucket)\.com[:/]([^/]+)\/([^/.?\s]+)/);
+    if (match) {
+      const provider = url.includes('gitlab') ? 'gitlab' : url.includes('bitbucket') ? 'bitbucket' : 'github';
+      setForm(p => ({ ...p, provider, repo_owner: match[1], repo_name: match[2].replace('.git', '') }));
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -74,6 +85,9 @@ function GitEditor({ git, websiteId, onSaved, onCancel }) {
 
   return (
     <div>
+      <Field label="Paste GitHub URL (auto-fills fields below)" htmlFor="git-url" hint="e.g. https://github.com/owner/repo-name">
+        <input id="git-url" value={repoUrl} onChange={e => handleUrlPaste(e.target.value)} style={inputStyle} placeholder="https://github.com/owner/repo-name" />
+      </Field>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: spacing.sm }}>
         <Field label="Provider" htmlFor="git-provider">
           <select id="git-provider" value={form.provider} onChange={e => setForm(p => ({ ...p, provider: e.target.value }))} style={selectStyle}>
@@ -90,8 +104,8 @@ function GitEditor({ git, websiteId, onSaved, onCancel }) {
           <input id="git-branch" value={form.production_branch} onChange={e => setForm(p => ({ ...p, production_branch: e.target.value }))} style={inputStyle} placeholder="main" />
         </Field>
       </div>
-      <Field label="Access Token" htmlFor="git-token" hint="Personal access token or deploy key">
-        <input id="git-token" type="password" value={form.git_token} onChange={e => setForm(p => ({ ...p, git_token: e.target.value }))} style={inputStyle} placeholder="ghp_xxxxxxxxxxxx" />
+      <Field label="Access Token (optional)" htmlFor="git-token" hint="Leave blank to use the global GITHUB_TOKEN. Enter a token here only to override for this client.">
+        <input id="git-token" type="password" value={form.git_token} onChange={e => setForm(p => ({ ...p, git_token: e.target.value }))} style={inputStyle} placeholder="ghp_xxxx  (leave blank to use global token)" />
       </Field>
       <div style={{ display: 'flex', gap: spacing.sm }}>
         <Btn onClick={save} disabled={saving}>{saving ? <Spin /> : <Check size={13} />} Save Git</Btn>

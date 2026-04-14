@@ -990,7 +990,88 @@ router.get('/cron/self-heal', async (req, res) => {
       fixes.push({ action: 'clear_orphan_queue', count: orphanQueue.length });
     }
 
-    // ── 5. Log self-heal snapshot ──────────────────────────────
+    // ── 5. PREVENTIVE: Auto-queue agents to refresh stale metrics ──
+    // This is what makes the audit score stable — we proactively queue
+    // the agent that owns each stale metric.
+    const STALE_METRIC_AGENT_MAP = {
+      'google_reviews_count': 'reviews-gbp-authority-agent',
+      'google_reviews_rating': 'reviews-gbp-authority-agent',
+      'google_rating': 'reviews-gbp-authority-agent',
+      'mobile_pagespeed': 'technical-seo-crawl-agent',
+      'desktop_pagespeed': 'technical-seo-crawl-agent',
+      'indexed_pages_count': 'technical-seo-crawl-agent',
+      'non_indexed_pages_count': 'technical-seo-crawl-agent',
+      'lcp_ms': 'technical-seo-crawl-agent',
+      'cls_score': 'technical-seo-crawl-agent',
+      'gsc_impressions': 'gsc-daily-monitor',
+      'gsc_clicks': 'gsc-daily-monitor',
+      'gsc_ctr': 'gsc-daily-monitor',
+      'gsc_avg_position': 'gsc-daily-monitor',
+    };
+    const staleCutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: staleMetrics } = await supabase
+      .from('baselines')
+      .select('client_id, metric_name, recorded_at')
+      .lt('recorded_at', staleCutoff)
+      .in('metric_name', Object.keys(STALE_METRIC_AGENT_MAP))
+      .limit(100);
+
+    if (staleMetrics?.length) {
+      // Build unique (client_id, agent_slug) pairs to queue
+      const pairsToQueue = new Map();
+      for (const m of staleMetrics) {
+        const agentSlug = STALE_METRIC_AGENT_MAP[m.metric_name];
+        if (!agentSlug) continue;
+        const key = `${m.client_id}::${agentSlug}`;
+        if (!pairsToQueue.has(key)) {
+          pairsToQueue.set(key, { client_id: m.client_id, agent_slug: agentSlug, reason: `${m.metric_name} stale (${Math.round((Date.now() - new Date(m.recorded_at).getTime()) / 86400000)}d old)` });
+        }
+      }
+
+      // For each pair, check: is the agent already queued/running OR failed 3x in the last hour?
+      let queuedForRefresh = 0;
+      for (const pair of pairsToQueue.values()) {
+        // Get agent template ID
+        const { data: agent } = await supabase
+          .from('agent_templates').select('id').eq('slug', pair.agent_slug).maybeSingle();
+        if (!agent) continue;
+
+        // Skip if already queued or currently running
+        const { count: activeCount } = await supabase.from('run_queue')
+          .select('id', { count: 'exact', head: true })
+          .eq('client_id', pair.client_id)
+          .eq('agent_template_id', agent.id)
+          .in('status', ['queued', 'running']);
+        if (activeCount && activeCount > 0) continue;
+
+        // Skip if this agent failed 3+ times in the last hour (circuit breaker)
+        const { count: recentFailures } = await supabase.from('runs')
+          .select('id', { count: 'exact', head: true })
+          .eq('client_id', pair.client_id)
+          .eq('agent_template_id', agent.id)
+          .eq('status', 'failed')
+          .gt('created_at', new Date(Date.now() - 60 * 60 * 1000).toISOString());
+        if (recentFailures && recentFailures >= 3) continue;
+
+        // Queue it
+        await supabase.from('run_queue').insert({
+          client_id: pair.client_id,
+          agent_template_id: agent.id,
+          status: 'queued',
+          priority_score: 7,
+          priority: 2,
+          max_retries: 1,
+          task_payload: { triggered_by: 'self_heal', reason: pair.reason },
+          queued_by: 'self_heal_cron'
+        });
+        queuedForRefresh++;
+      }
+      if (queuedForRefresh > 0) {
+        fixes.push({ action: 'queue_stale_metric_refresh', count: queuedForRefresh });
+      }
+    }
+
+    // ── 6. Log self-heal snapshot ──────────────────────────────
     const { count: openCount } = await supabase.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open');
     const { count: runningCount } = await supabase.from('runs').select('id', { count: 'exact', head: true }).eq('status', 'running');
     const { count: queuedCount } = await supabase.from('run_queue').select('id', { count: 'exact', head: true }).eq('status', 'queued');

@@ -637,6 +637,39 @@ export function getToolDefinitions(agentSlug, clientId) {
         }
       },
       allowed_agents: ['reviews-gbp-authority-agent']
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'crawl_site_onpage',
+        description: 'Deep multi-page site crawl via DataForSEO OnPage API (Screaming Frog replacement). Returns domain-wide SEO health: broken links, duplicate titles/metas, missing alt text, page speed issues, canonical problems, thin content. Crawls up to 20 pages by default. Cached for 24h to avoid re-crawling. Use INSTEAD of scan_website when you need site-wide analysis.',
+        parameters: {
+          type: 'object',
+          properties: {
+            target_url: { type: 'string', description: 'Root URL of site to crawl (e.g. https://example.com)' },
+            max_pages: { type: 'number', description: 'Max pages to crawl (default 20, max 100)' }
+          },
+          required: ['target_url']
+        }
+      },
+      allowed_agents: ['technical-seo-crawl-agent', 'seo-core-agent', 'website-content-agent', 'cro-agent', 'master-orchestrator']
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'ask_chatgpt_visibility',
+        description: 'Test whether the client appears in ChatGPT/GPT-4 answers for a specific question. Uses the live OpenAI API. Checks if client domain or business name is mentioned in the answer. Stores result to geo_visibility_signals. Use this alongside search_perplexity to measure AI visibility across multiple platforms.',
+        parameters: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'The question to ask ChatGPT (e.g. "Who is the best divorce lawyer in Tel Aviv?")' },
+            client_domain: { type: 'string', description: 'Client domain to check for in the answer (e.g. yanivgil.co.il)' },
+            client_name: { type: 'string', description: 'Client name to also check for (e.g. "Yaniv Gil Law Firm")' }
+          },
+          required: ['question', 'client_domain']
+        }
+      },
+      allowed_agents: ['geo-ai-visibility-agent', 'competitor-intelligence-agent', 'master-orchestrator']
     }
   ];
 
@@ -2286,6 +2319,226 @@ export async function executeTool(toolName, args, clientId, runId) {
 
         const replyErr = await replyResp.json().catch(() => ({}));
         return { error: `GBP Reply API error ${replyResp.status}: ${replyErr?.error?.message || replyResp.statusText}`, review_name };
+      }
+
+      // ========================================
+      // crawl_site_onpage — DataForSEO OnPage (Screaming Frog replacement)
+      // ========================================
+      case 'crawl_site_onpage': {
+        if (!process.env.DATAFORSEO_LOGIN || !process.env.DATAFORSEO_PASSWORD) {
+          return { error: 'DataForSEO credentials not configured' };
+        }
+        if (!args.target_url) return { error: 'target_url is required' };
+
+        const target = args.target_url.replace(/^https?:\/\//, '').replace(/\/$/, '').split('/')[0];
+        const dfsAuth = Buffer.from(`${process.env.DATAFORSEO_LOGIN}:${process.env.DATAFORSEO_PASSWORD}`).toString('base64');
+        const headers = { 'Authorization': `Basic ${dfsAuth}`, 'Content-Type': 'application/json' };
+
+        // 1. Cache check — 24h TTL
+        if (clientId) {
+          const { data: cached } = await supabase
+            .from('baselines')
+            .select('metric_text, recorded_at')
+            .eq('client_id', clientId)
+            .eq('metric_name', `onpage_crawl_cache:${target}`)
+            .gte('recorded_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+            .maybeSingle();
+          if (cached?.metric_text) {
+            try {
+              return { ...JSON.parse(cached.metric_text), source: 'cache', cached_at: cached.recorded_at };
+            } catch { /* fall through */ }
+          }
+        }
+
+        // 2. Submit new crawl task
+        const maxPages = Math.min(args.max_pages || 20, 100);
+        const submitResp = await fetchWithTimeout(
+          'https://api.dataforseo.com/v3/on_page/task_post',
+          {
+            method: 'POST', headers,
+            body: JSON.stringify([{
+              target,
+              max_crawl_pages: maxPages,
+              load_resources: true,
+              enable_javascript: false,
+              check_spell: false,
+              custom_user_agent: 'Mozilla/5.0 AIGrowthOSCrawler'
+            }])
+          },
+          15000
+        );
+        const submitData = await submitResp.json();
+        const taskId = submitData?.tasks?.[0]?.id;
+        if (!taskId) return { error: 'Failed to submit OnPage task', response: JSON.stringify(submitData).slice(0, 300) };
+
+        // 3. Poll for completion — budget 22s (under 28s per-tool timeout)
+        const pollStart = Date.now();
+        let ready = false;
+        while (Date.now() - pollStart < 22000) {
+          await new Promise(r => setTimeout(r, 4000));
+          const readyResp = await fetchWithTimeout(
+            'https://api.dataforseo.com/v3/on_page/tasks_ready',
+            { method: 'GET', headers },
+            8000
+          );
+          const readyData = await readyResp.json();
+          if (readyData?.tasks?.[0]?.result?.some(t => t.id === taskId)) {
+            ready = true;
+            break;
+          }
+        }
+
+        if (!ready) {
+          return {
+            status: 'pending',
+            task_id: taskId,
+            message: `OnPage crawl submitted for ${target}. Still processing after 22s. Call this tool again in 2-5 minutes to retrieve results from cache.`,
+            target
+          };
+        }
+
+        // 4. Fetch summary
+        const summaryResp = await fetchWithTimeout(
+          `https://api.dataforseo.com/v3/on_page/summary/${taskId}`,
+          { method: 'GET', headers },
+          12000
+        );
+        const summaryData = await summaryResp.json();
+        const summary = summaryData?.tasks?.[0]?.result?.[0];
+        if (!summary) {
+          return { error: 'OnPage summary unavailable', task_id: taskId };
+        }
+
+        // Extract the actionable bits
+        const checks = summary.page_metrics?.checks || {};
+        const keyIssues = Object.entries(checks)
+          .filter(([, v]) => v > 0)
+          .map(([name, count]) => ({ check: name, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 30);
+
+        const result = {
+          source: 'dataforseo_onpage',
+          target,
+          task_id: taskId,
+          pages_crawled: summary.crawl_progress?.pages_crawled || 0,
+          pages_in_queue: summary.crawl_progress?.pages_in_queue || 0,
+          onpage_score: summary.page_metrics?.onpage_score || null,
+          status_code_distribution: summary.page_metrics?.non_indexable || 0,
+          broken_resources: summary.page_metrics?.broken_resources || 0,
+          broken_links: summary.page_metrics?.broken_links || 0,
+          duplicate_title: summary.page_metrics?.duplicate_title || 0,
+          duplicate_description: summary.page_metrics?.duplicate_description || 0,
+          duplicate_content: summary.page_metrics?.duplicate_content || 0,
+          links_external: summary.page_metrics?.links_external || 0,
+          links_internal: summary.page_metrics?.links_internal || 0,
+          non_indexable: summary.page_metrics?.non_indexable || 0,
+          key_issues: keyIssues,
+          domain_info: summary.domain_info || {},
+          fetched_at: new Date().toISOString()
+        };
+
+        // Cache the result — 24h
+        if (clientId) {
+          await supabase.from('baselines').upsert({
+            client_id: clientId,
+            metric_name: `onpage_crawl_cache:${target}`,
+            metric_value: result.pages_crawled,
+            metric_text: JSON.stringify(result),
+            source: 'dataforseo_onpage',
+            recorded_at: new Date().toISOString()
+          }, { onConflict: 'client_id,metric_name' });
+
+          // Also update the canonical baselines that the dashboard reads
+          await supabase.from('baselines').upsert({
+            client_id: clientId,
+            metric_name: 'onpage_score',
+            metric_value: result.onpage_score || 0,
+            source: 'DataForSEO OnPage',
+            recorded_at: new Date().toISOString()
+          }, { onConflict: 'client_id,metric_name' });
+
+          await supabase.from('baselines').upsert({
+            client_id: clientId,
+            metric_name: 'indexed_pages_count',
+            metric_value: (result.pages_crawled || 0) - (result.non_indexable || 0),
+            source: 'DataForSEO OnPage',
+            recorded_at: new Date().toISOString()
+          }, { onConflict: 'client_id,metric_name' });
+        }
+
+        return result;
+      }
+
+      // ========================================
+      // ask_chatgpt_visibility — test GPT-4 for brand mention
+      // ========================================
+      case 'ask_chatgpt_visibility': {
+        if (!process.env.OPENAI_API_KEY) return { error: 'OPENAI_API_KEY not configured' };
+        if (!args.question || !args.client_domain) return { error: 'question and client_domain required' };
+
+        const openaiResp = await fetchWithTimeout(
+          'https://api.openai.com/v1/chat/completions',
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: 'gpt-4-turbo-preview',
+              messages: [
+                { role: 'system', content: 'You are a helpful assistant. Answer the user question factually. If you mention specific businesses, cite real ones you know about.' },
+                { role: 'user', content: args.question }
+              ],
+              max_tokens: 800,
+              temperature: 0.3
+            })
+          },
+          25000
+        );
+        const data = await openaiResp.json();
+        const answer = data.choices?.[0]?.message?.content || '';
+        if (!answer) return { error: 'GPT-4 returned empty answer', raw: JSON.stringify(data).slice(0, 300) };
+
+        // Detect client mention
+        const clientDomain = args.client_domain.replace(/^https?:\/\//, '').replace(/\/$/, '').toLowerCase();
+        const clientName = (args.client_name || '').toLowerCase();
+        const answerLower = answer.toLowerCase();
+        const domainMentioned = clientDomain && answerLower.includes(clientDomain);
+        const nameMentioned = clientName && answerLower.includes(clientName);
+        const mentioned = !!(domainMentioned || nameMentioned);
+
+        // Extract competitor mentions (any domain-like patterns in the answer)
+        const competitorMatches = [...answer.matchAll(/\b([a-z0-9][-a-z0-9]*\.[a-z]{2,})\b/gi)];
+        const competitorDomains = [...new Set(competitorMatches.map(m => m[1].toLowerCase()))]
+          .filter(d => d !== clientDomain)
+          .slice(0, 10);
+
+        if (clientId) {
+          await supabase.from('geo_visibility_signals').insert({
+            client_id: clientId,
+            query: args.question,
+            platform: 'chatgpt',
+            client_mentioned: mentioned,
+            client_cited: domainMentioned, // stricter: domain present = cited
+            client_position: null,
+            competitors_mentioned: competitorDomains,
+            total_entities_mentioned: competitorDomains.length
+          });
+        }
+
+        return {
+          question: args.question,
+          platform: 'chatgpt',
+          model: 'gpt-4-turbo-preview',
+          answer_preview: answer.slice(0, 500),
+          client_mentioned: mentioned,
+          client_cited: domainMentioned,
+          mention_type: domainMentioned ? 'domain' : (nameMentioned ? 'name_only' : 'none'),
+          competitors_mentioned: competitorDomains,
+          stored_in: 'geo_visibility_signals'
+        };
       }
 
       default:

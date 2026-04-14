@@ -542,11 +542,14 @@ router.post('/clients/:clientId/reports/generate', async (req, res) => {
     const { periodStart, periodEnd, periodType } = req.body;
     const clientId = req.params.clientId;
     const { data: client } = await supabase.from('clients').select('name').eq('id', clientId).single();
+    const { data: clientRules } = await supabase.from('client_rules').select('language').eq('client_id', clientId).maybeSingle();
+    const reportLang = clientRules?.language || 'en';
     const { data: reportAgent } = await supabase.from('agent_templates').select('id').eq('slug', 'report-composer-agent').single();
     if (!reportAgent) return res.status(404).json({ error: 'Report Composer agent not found' });
     const execResult = await executeAgent(clientId, reportAgent.id, { period_start: periodStart, period_end: periodEnd, period_type: periodType || 'monthly' }, { triggeredBy: 'report_generation' });
     const htmlContent = await generateReportHtml(execResult.output, client.name, { start: periodStart, end: periodEnd, type: periodType || 'monthly' });
-    const { data: report, error } = await supabase.from('reports').insert({ client_id: clientId, run_id: execResult.runId, title: `דוח ${periodType === 'weekly' ? 'שבועי' : 'חודשי'} — ${client.name} — ${periodEnd}`, period: periodType || 'monthly', period_start: periodStart, period_end: periodEnd, html_content: htmlContent, json_content: execResult.output, status: 'ready', language: 'he' }).select().single();
+    const reportTitle = `${periodType === 'weekly' ? 'Weekly' : 'Monthly'} Report — ${client.name} — ${periodEnd}`;
+    const { data: report, error } = await supabase.from('reports').insert({ client_id: clientId, run_id: execResult.runId, title: reportTitle, period: periodType || 'monthly', period_start: periodStart, period_end: periodEnd, html_content: htmlContent, json_content: execResult.output, status: 'ready', language: reportLang }).select().single();
     if (error) throw error;
     res.json({ report, run: execResult });
   } catch (err) { res.status(500).json({ error: err.message }); }

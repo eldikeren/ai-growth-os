@@ -987,6 +987,32 @@ export async function executeTool(toolName, args, clientId, runId) {
       case 'fetch_google_reviews': {
         const apiKey = process.env.GOOGLE_PLACES_API_KEY;
 
+        // ── CACHE: check for a recent cached GBP response (< 10 min old) ──
+        // Google Business Profile API has a very low default quota (1 req/min),
+        // so we cache every successful fetch and serve from cache for 10 minutes.
+        // This caps real API calls at ~6/hour/client, well under the 60/hr free limit.
+        if (clientId) {
+          const { data: cached } = await supabase
+            .from('baselines')
+            .select('metric_text, recorded_at')
+            .eq('client_id', clientId)
+            .eq('metric_name', 'google_reviews_cached_response')
+            .gte('recorded_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+            .maybeSingle();
+
+          if (cached?.metric_text) {
+            try {
+              const cachedData = JSON.parse(cached.metric_text);
+              return {
+                ...cachedData,
+                source: 'cache',
+                cached_at: cached.recorded_at,
+                cache_age_seconds: Math.round((Date.now() - new Date(cached.recorded_at).getTime()) / 1000)
+              };
+            } catch { /* fall through to live fetch if cache is corrupted */ }
+          }
+        }
+
         // ── Strategy 1: Use GBP OAuth to fetch reviews (auto-refreshes if expired) ──
         if (clientId) {
           try {
@@ -1054,7 +1080,7 @@ export async function executeTool(toolName, args, clientId, runId) {
               const reviewData = await reviewResp.json();
 
               const starToNum = s => ({ FIVE: 5, FOUR: 4, THREE: 3, TWO: 2, ONE: 1 }[s] || 0);
-              return {
+              const successResult = {
                 business_name: location.title || args.business_name,
                 location_name: location.name,
                 account_name: accountName,
@@ -1073,6 +1099,18 @@ export async function executeTool(toolName, args, clientId, runId) {
                 fetched_at: new Date().toISOString(),
                 source: 'gbp_oauth_api'
               };
+
+              // Write cache — 10 min TTL enforced on read side
+              await supabase.from('baselines').upsert({
+                client_id: clientId,
+                metric_name: 'google_reviews_cached_response',
+                metric_value: successResult.total_reviews,
+                metric_text: JSON.stringify(successResult),
+                source: 'gbp_oauth_api_cache',
+                recorded_at: new Date().toISOString()
+              }, { onConflict: 'client_id,metric_name' });
+
+              return successResult;
             }
           } catch (gbpErr) {
             console.error('[GBP_OAUTH]', gbpErr.message);

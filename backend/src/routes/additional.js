@@ -820,6 +820,69 @@ router.get('/cron/refresh-tokens', async (req, res) => {
   res.json({ token_refreshes: results.length, results, ran_at: new Date().toISOString() });
 });
 
+// ── HOURLY SEO SWEEP — queues the 3 SEO agents for every active client ──
+// Fires 1 run per (agent, client) pair every hour. De-duplicated against
+// any currently queued/running runs so bursts don't pile up.
+router.get('/cron/queue-seo-sweep', async (req, res) => {
+  try {
+    const SWEEP_AGENTS = ['technical-seo-crawl-agent', 'seo-core-agent', 'website-content-agent'];
+    const { data: clients } = await supabase
+      .from('clients').select('id, name')
+      .in('status', ['active', null]);
+    const { data: agents } = await supabase
+      .from('agent_templates').select('id, slug').in('slug', SWEEP_AGENTS).eq('is_active', true);
+
+    if (!clients?.length || !agents?.length) {
+      return res.json({ queued: 0, reason: 'No active clients or agents' });
+    }
+
+    const results = [];
+    for (const client of clients) {
+      for (const agent of agents) {
+        // Skip if already queued or running for this (client, agent)
+        const { count: activeCount } = await supabase
+          .from('run_queue')
+          .select('id', { count: 'exact', head: true })
+          .eq('client_id', client.id)
+          .eq('agent_template_id', agent.id)
+          .in('status', ['queued', 'running']);
+        if (activeCount && activeCount > 0) {
+          results.push({ client: client.name, agent: agent.slug, skipped: 'already active' });
+          continue;
+        }
+
+        // Skip if this agent ran successfully in the last 30 min (don't repeat too fast)
+        const { count: recentRuns } = await supabase
+          .from('runs')
+          .select('id', { count: 'exact', head: true })
+          .eq('client_id', client.id)
+          .eq('agent_template_id', agent.id)
+          .eq('status', 'success')
+          .gt('created_at', new Date(Date.now() - 30 * 60 * 1000).toISOString());
+        if (recentRuns && recentRuns > 0) {
+          results.push({ client: client.name, agent: agent.slug, skipped: 'ran recently' });
+          continue;
+        }
+
+        await supabase.from('run_queue').insert({
+          client_id: client.id,
+          agent_template_id: agent.id,
+          priority_score: 7,
+          priority: 2,
+          status: 'queued',
+          max_retries: 1,
+          task_payload: { triggered_by: 'hourly_seo_sweep' },
+          queued_by: 'hourly_seo_sweep'
+        });
+        results.push({ client: client.name, agent: agent.slug, queued: true });
+      }
+    }
+
+    const queued = results.filter(r => r.queued).length;
+    res.json({ queued, total_pairs: results.length, details: results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── DATAFORSEO ONPAGE POLLER — runs every 5 min ──────────────
 // Picks up pending onpage crawl tasks and retrieves results out of band
 router.get('/cron/process-onpage-tasks', async (req, res) => {

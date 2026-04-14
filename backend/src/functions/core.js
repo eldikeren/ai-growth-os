@@ -19,7 +19,7 @@ const openai = new OpenAI({
   maxRetries: 0,     // No retries — each retry adds another 50s, burns the execution budget
 });
 
-const MAX_TOOL_ITERATIONS = 8; // Max tool call rounds per agent execution (keep under 300s Vercel limit)
+const MAX_TOOL_ITERATIONS = 5; // Max tool call rounds — 5 × 50s OpenAI = 250s, safely under 300s Vercel hard limit
 
 // ============================================================
 // VALIDATION GOVERNANCE — action_type → required validators
@@ -304,7 +304,8 @@ FINAL OUTPUT RULES:
     let iteration = 0;
     let finalResponse = null;
 
-    const EXECUTION_TIMEOUT_MS = 240000; // 240s — leave 60s for post-processing within 300s Vercel limit
+    const EXECUTION_TIMEOUT_MS = 200000; // 200s — leaves 100s for post-processing within 300s Vercel hard limit
+    let consecutiveToolErrors = 0; // Track runs of tool errors; abort early if tools consistently unavailable
 
     while (iteration < MAX_TOOL_ITERATIONS) {
       iteration++;
@@ -379,8 +380,24 @@ FINAL OUTPUT RULES:
           // Heartbeat: keep updated_at fresh so zombie reaper doesn't kill active runs
           supabase.from('runs').update({ updated_at: new Date().toISOString() }).eq('id', run.id).then(() => {});
 
-          // Execute the tool
-          const toolResult = await executeTool(fnName, fnArgs, clientId, run.id);
+          // Execute the tool — with a hard 28-second timeout so one slow call can't block indefinitely
+          const toolTimeoutMs = 28000;
+          let toolResult;
+          try {
+            toolResult = await Promise.race([
+              executeTool(fnName, fnArgs, clientId, run.id),
+              new Promise((_, reject) => setTimeout(() => reject(new Error(`Tool ${fnName} timed out after ${toolTimeoutMs}ms`)), toolTimeoutMs))
+            ]);
+          } catch (toolErr) {
+            toolResult = { error: toolErr.message, tool: fnName, timed_out: true };
+          }
+
+          // Track consecutive errors — if all tools in first iteration fail, abort early to save quota
+          if (toolResult?.error) {
+            consecutiveToolErrors++;
+          } else {
+            consecutiveToolErrors = 0;
+          }
 
           toolCallLog.push({
             tool: fnName,
@@ -397,6 +414,20 @@ FINAL OUTPUT RULES:
           });
         }
 
+        // Early abort: if every tool in iteration 1 returned an error, credentials/data sources unavailable
+        if (iteration === 1 && consecutiveToolErrors === choice.message.tool_calls.length && consecutiveToolErrors > 0) {
+          const errorSummary = toolCallLog.map(t => `${t.tool}: ${JSON.parse(t.result_preview)?.error || 'error'}`).join('; ');
+          finalResponse = JSON.stringify({
+            status: 'credentials_unavailable',
+            message: `All ${consecutiveToolErrors} tools failed on first iteration — required credentials or data sources not configured for this client.`,
+            tool_errors: errorSummary,
+            tools_used: toolCallLog.map(t => t.tool),
+            actions_taken: [],
+            recommendation: 'Run credential-health-agent to diagnose and connect missing integrations.'
+          });
+          break;
+        }
+
         // Continue the loop — model will process tool results
         continue;
       }
@@ -406,8 +437,18 @@ FINAL OUTPUT RULES:
       break;
     }
 
-    // If we exhausted iterations without a final response, force one
+    // If we exhausted iterations without a final response, force one — but only if we have time
     if (!finalResponse) {
+      // Skip forced call if we're already past the safe point (220s) — Vercel kills at 300s
+      if (Date.now() - startTime > 220000) {
+        finalResponse = JSON.stringify({
+          timeout: true,
+          message: `Agent ran out of time after ${iteration} iterations (${Math.round((Date.now()-startTime)/1000)}s). Tools called: ${toolCallLog.map(t=>t.tool).join(', ')}.`,
+          tools_used: toolCallLog.map(t => t.tool),
+          actions_taken: [],
+          partial_results: true,
+        });
+      } else {
       messages.push({
         role: 'user',
         content: 'You have reached the maximum number of tool calls. Now produce your final JSON output summarizing everything you found and all actions you took.'
@@ -423,6 +464,7 @@ FINAL OUTPUT RULES:
       promptTokens += finalCompletion.usage?.prompt_tokens || 0;
       completionTokens += finalCompletion.usage?.completion_tokens || 0;
       tokensUsed += finalCompletion.usage?.total_tokens || 0;
+      } // end else (had time for forced call)
     }
 
     outputText = finalResponse;

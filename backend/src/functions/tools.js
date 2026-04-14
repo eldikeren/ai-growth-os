@@ -2643,17 +2643,29 @@ async function executeGitHubChange(clientId, change, config) {
       owner = repoMatch[1];
       repo = repoMatch[2].replace('.git', '');
     }
-    const branch = config?.default_branch || config?.production_branch || 'main';
+    let branch = config?.default_branch || config?.production_branch || 'main';
     const headers = { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json', 'Content-Type': 'application/json' };
 
     // Build a descriptive branch name and commit message
     const safePage = change.page_url.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 40);
     const prBranch = `seo/${change.change_type}-${safePage}-${Date.now()}`.slice(0, 80);
 
-    // Create branch from default
-    const refRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers }, 15000);
-    const refData = await refRes.json();
-    if (!refData.object?.sha) return { success: false, error: `Cannot get SHA for branch ${branch}` };
+    // Try configured branch first; if not found, fetch the repo's real default branch
+    let refRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers }, 15000);
+    let refData = await refRes.json();
+    if (!refData.object?.sha) {
+      // Configured branch doesn't exist — ask the GitHub API what the default branch is
+      const repoRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}`, { headers }, 15000);
+      const repoInfo = await repoRes.json();
+      if (repoInfo?.default_branch && repoInfo.default_branch !== branch) {
+        branch = repoInfo.default_branch;
+        refRes = await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, { headers }, 15000);
+        refData = await refRes.json();
+      }
+      if (!refData.object?.sha) {
+        return { success: false, error: `Cannot get SHA for branch ${branch} (or repo has no accessible default branch)` };
+      }
+    }
 
     await fetchWithTimeout(`https://api.github.com/repos/${owner}/${repo}/git/refs`, {
       method: 'POST', headers,

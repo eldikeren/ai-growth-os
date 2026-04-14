@@ -26,7 +26,7 @@ export async function createClientOnboarding(onboardingData) {
     // Step 4: SEO Foundation
     keywords, competitors,
     // Step 5: Policies
-    allowedAccounts, forbiddenAccounts, sourceOfTruth, preRunDocument,
+    allowedAccounts, forbiddenAccounts, sourceOfTruth,
     specialPolicies, approvalRequiredFor, legalToneRequired, reviewsVoice,
     // Step 6: Reports
     defaultReportLanguage, defaultReportTypes, reportSchedule, timezone
@@ -69,7 +69,6 @@ export async function createClientOnboarding(onboardingData) {
     geographies: geographies || [],
     compliance_style: complianceRestrictions || null,
     source_of_truth: sourceOfTruth || 'Google Drive',
-    pre_run_document: preRunDocument || 'CLAUDE.md',
     allowed_accounts: allowedAccounts || [],
     forbidden_accounts: forbiddenAccounts || [],
     special_policies: specialPolicies || [],

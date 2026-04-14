@@ -15,7 +15,7 @@ const INITIAL_DATA = {
   complianceRestrictions: '', gscPropertyUrl: '', googleAdsCid: '', websiteUrl: '',
   reportRecipients: [], keywords: [], competitors: [],
   allowedAccounts: [], forbiddenAccounts: [], sourceOfTruth: 'Google Drive',
-  preRunDocument: 'CLAUDE.md', specialPolicies: [], approvalRequiredFor: [],
+  specialPolicies: [], approvalRequiredFor: [],
   reviewsVoice: 'office', defaultReportLanguage: 'he',
   defaultReportTypes: ['weekly_progress'], reportSchedule: 'weekly', timezone: 'Asia/Jerusalem',
 };
@@ -539,15 +539,6 @@ export default function OnboardingView({ clientId, clients, onClientCreated }) {
               </Field>
             </div>
 
-            <Field label="Pre-Run Document Name" htmlFor="ob-prerun">
-              <input
-                id="ob-prerun"
-                value={data.preRunDocument}
-                onChange={e => update('preRunDocument', e.target.value)}
-                style={inputStyle}
-                placeholder="CLAUDE.md"
-              />
-            </Field>
           </div>
         )}
 
@@ -559,7 +550,7 @@ export default function OnboardingView({ clientId, clients, onClientCreated }) {
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.md }}>
-              <Field label="Default Report Language" htmlFor="ob-report-lang">
+              <Field label="Report Language" htmlFor="ob-report-lang">
                 <select
                   id="ob-report-lang"
                   value={data.defaultReportLanguage}
@@ -584,7 +575,7 @@ export default function OnboardingView({ clientId, clients, onClientCreated }) {
               </Field>
             </div>
 
-            <Field label="Default Report Types">
+            <Field label="Report Types">
               <div role="group" aria-label="Report types">
                 {['weekly_progress', 'monthly_progress', 'weekly_seo', 'weekly_paid_ads', 'weekly_growth'].map(type => (
                   <label

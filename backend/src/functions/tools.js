@@ -999,6 +999,27 @@ export async function executeTool(toolName, args, clientId, runId) {
               }, 15000);
               const acctData = await acctResp.json();
 
+              // Detect 429 quota exceeded — this is the #1 GBP API issue
+              if (acctResp.status === 429 || acctData.error?.code === 429) {
+                return {
+                  error: 'GBP API quota exceeded (HTTP 429). The Google Cloud project has hit the per-minute rate limit on mybusinessaccountmanagement.googleapis.com. Fix: go to https://console.cloud.google.com/apis/api/mybusinessaccountmanagement.googleapis.com/quotas and request a quota increase, OR wait 60s before retrying.',
+                  gbp_oauth_used: true,
+                  quota_exceeded: true,
+                  http_status: 429,
+                  cache_for_seconds: 600
+                };
+              }
+
+              // Detect other GBP API errors (403, 401, etc.)
+              if (acctData.error) {
+                return {
+                  error: `GBP API error ${acctData.error.code}: ${acctData.error.message}`,
+                  gbp_oauth_used: true,
+                  http_status: acctData.error.code,
+                  gbp_api_response: JSON.stringify(acctData.error).slice(0, 300)
+                };
+              }
+
               if (!acctData.accounts?.length) {
                 // Return explicit error — don't fall through to billing-required Places API
                 return {

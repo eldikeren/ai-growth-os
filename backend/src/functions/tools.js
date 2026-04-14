@@ -1901,10 +1901,13 @@ export async function executeTool(toolName, args, clientId, runId) {
 
       case 'propose_website_change': {
         // 1. Detect client's website platform
-        const { data: website } = await supabase.from('client_websites')
-          .select('id, website_platform_type, cms_type, domain')
+        // NOTE: column is primary_domain, NOT domain. Using the wrong name
+        // causes the whole SELECT to fail silently and website stays null.
+        const { data: website, error: websiteErr } = await supabase.from('client_websites')
+          .select('id, website_platform_type, cms_type, primary_domain')
           .eq('client_id', clientId)
           .maybeSingle();
+        if (websiteErr) console.error('[PROPOSE_CHANGE] client_websites query failed:', websiteErr.message);
 
         // Also check client_connectors for github (legacy table)
         const { data: connectors } = await supabase.from('client_connectors')

@@ -1414,16 +1414,29 @@ function enforceTruthGate(output, agentSlug, toolCallLog) {
     (output?.changes_made?.length > 0) || (output?.fixes_applied?.length > 0) ||
     (output?.total_fixes_proposed > 0) || (output?.fixes_proposed > 0) || proposedChangesCount > 0;
 
+  // Count tool calls that returned errors (especially quota/auth failures)
+  const toolErrors = toolCallLog.filter(t => {
+    try { const r = JSON.parse(t.result_preview || '{}'); return !!r.error; } catch { return false; }
+  }).length;
+  const toolSuccesses = toolCallLog.length - toolErrors;
+
   // Determine confidence
   let confidence = 'high';
-  if (dataCompleteness < 70 || realSourceCount < 2 || staleCount > 0 || measuredFindings.length === 0 || criticalMissing > 0) {
+  if (dataCompleteness < 70 || realSourceCount < 2 || staleCount > 0 || criticalMissing > 0) {
     confidence = 'medium';
   }
-  // Only mark 'low' when BOTH data is sparse AND no findings — not just because output format differs
-  if (dataCompleteness < 50 && measuredFindings.length === 0) {
+  // Zero measured findings = low confidence regardless of completeness percentage.
+  // data_completeness counts SOURCES TOUCHED not DATA RECEIVED, so an agent that
+  // called 5 tools and got errors from all of them would show 100% completeness
+  // but produce zero useful output. This run is NOT trustworthy.
+  if (measuredFindings.length === 0) {
     confidence = 'low';
   }
-  if (dataCompleteness < 30 || (inspectedAssets.length === 0 && realSourceCount === 0 && toolCallLog.length === 0)) {
+  // If most tool calls returned errors, the run is essentially worthless
+  if (toolCallLog.length > 0 && toolErrors / toolCallLog.length > 0.5) {
+    confidence = 'low';
+  }
+  if (dataCompleteness < 30 || (inspectedAssets.length === 0 && realSourceCount === 0 && toolCallLog.length === 0) || toolSuccesses === 0) {
     confidence = 'very_low';
   }
 
@@ -1433,6 +1446,10 @@ function enforceTruthGate(output, agentSlug, toolCallLog) {
     statusOverride = 'partial';
   }
   if (criticalMissing > 0 && dataCompleteness < 40) {
+    statusOverride = 'partial';
+  }
+  // If every meaningful tool call errored out, don't call this a success
+  if (toolCallLog.length >= 2 && toolErrors / toolCallLog.length > 0.5 && measuredFindings.length === 0) {
     statusOverride = 'partial';
   }
 

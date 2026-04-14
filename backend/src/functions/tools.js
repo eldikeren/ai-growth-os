@@ -1114,12 +1114,91 @@ export async function executeTool(toolName, args, clientId, runId) {
             }
           } catch (gbpErr) {
             console.error('[GBP_OAUTH]', gbpErr.message);
-            return { error: `GBP OAuth error: ${gbpErr.message}`, gbp_oauth_used: true };
+            // Don't return here — fall through to DataForSEO
           }
         }
 
-        // ── Strategy 2: Google Places API (requires billing) ──
-        if (!apiKey) return { error: 'Google Places API key not configured and GBP OAuth unavailable' };
+        // ── Strategy 2: DataForSEO Business Data — works without GBP OAuth, no quota issues ──
+        // Uses DataForSEO's Google Reviews endpoint. Free tier gives ~100 req/month,
+        // paid tier is cents per call. No Google quota/approval needed.
+        if (process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD && args.business_name) {
+          try {
+            const dfsAuth = Buffer.from(`${process.env.DATAFORSEO_LOGIN}:${process.env.DATAFORSEO_PASSWORD}`).toString('base64');
+            // Use My Business Info endpoint — returns name, rating, reviews count, place_id
+            const searchQuery = args.location
+              ? `${args.business_name} ${args.location}`
+              : args.business_name;
+            const dfsResp = await fetchWithTimeout(
+              'https://api.dataforseo.com/v3/business_data/google/my_business_info/live',
+              {
+                method: 'POST',
+                headers: { 'Authorization': `Basic ${dfsAuth}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify([{
+                  keyword: searchQuery,
+                  language_code: (args.location || '').toLowerCase().includes('israel') ? 'he' : 'en',
+                  location_code: (args.location || '').toLowerCase().includes('israel') ? 2376 : 2840
+                }])
+              },
+              20000
+            );
+            const dfsData = await dfsResp.json();
+            const item = dfsData?.tasks?.[0]?.result?.[0]?.items?.[0];
+
+            if (item && item.rating) {
+              const successResult = {
+                business_name: item.title || args.business_name,
+                total_reviews: item.rating?.votes_count || 0,
+                rating: item.rating?.value || null,
+                place_id: item.place_id,
+                address: item.address,
+                category: item.category,
+                phone: item.phone,
+                website: item.url,
+                is_claimed: item.is_claimed,
+                fetched_at: new Date().toISOString(),
+                source: 'dataforseo_business_data'
+              };
+
+              // Cache it
+              if (clientId) {
+                await supabase.from('baselines').upsert({
+                  client_id: clientId,
+                  metric_name: 'google_reviews_cached_response',
+                  metric_value: successResult.total_reviews,
+                  metric_text: JSON.stringify(successResult),
+                  source: 'dataforseo_cache',
+                  recorded_at: new Date().toISOString()
+                }, { onConflict: 'client_id,metric_name' });
+
+                // Also update the canonical baseline so the dashboard shows fresh data
+                await supabase.from('baselines').upsert({
+                  client_id: clientId,
+                  metric_name: 'google_reviews_count',
+                  metric_value: successResult.total_reviews,
+                  source: 'DataForSEO Business Data',
+                  recorded_at: new Date().toISOString()
+                }, { onConflict: 'client_id,metric_name' });
+
+                if (successResult.rating) {
+                  await supabase.from('baselines').upsert({
+                    client_id: clientId,
+                    metric_name: 'google_reviews_rating',
+                    metric_value: successResult.rating,
+                    source: 'DataForSEO Business Data',
+                    recorded_at: new Date().toISOString()
+                  }, { onConflict: 'client_id,metric_name' });
+                }
+              }
+
+              return successResult;
+            }
+          } catch (dfsErr) {
+            console.error('[DATAFORSEO_GBP]', dfsErr.message);
+          }
+        }
+
+        // ── Strategy 3: Google Places API (requires billing) ──
+        if (!apiKey) return { error: 'All review fetch strategies failed. GBP OAuth quota exceeded AND DataForSEO returned no match. Check business_name spelling or verify DataForSEO credentials.' };
 
         let placeId = args.place_id;
 

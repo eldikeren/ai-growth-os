@@ -127,6 +127,198 @@ function getErrorFix(errorMsg) {
 
 // ─── Sub-components ─────────────────────────────────────────────
 
+// ─── Now Running panel ─────────────────────────────────────────
+// Live view of what's executing for the selected client (or aggregate
+// across all clients when 'all' is picked). Shows elapsed time,
+// next-up queue, and recent completions — the user's at-a-glance
+// "what's happening right now".
+function NowRunningPanel({ clientId, clients }) {
+  const [data, setData] = useState({ running: [], queued: [], recent: [], summary: {} });
+  const [loading, setLoading] = useState(true);
+  const [tick, setTick] = useState(0); // force re-render for live elapsed time
+
+  const load = useCallback(async () => {
+    try {
+      if (clientId && clientId !== 'all') {
+        const d = await api(`/clients/${clientId}/now-running`);
+        setData(d || { running: [], queued: [], recent: [], summary: {} });
+      } else if (clients?.length) {
+        // Aggregate across all clients
+        const results = await Promise.all(
+          clients.map(c =>
+            api(`/clients/${c.id}/now-running`)
+              .then(r => ({ ...r, _clientName: c.name }))
+              .catch(() => null)
+          )
+        );
+        const agg = { running: [], queued: [], recent: [], summary: { running_count: 0, queued_count: 0 } };
+        for (const r of results) {
+          if (!r) continue;
+          (r.running || []).forEach(x => agg.running.push({ ...x, _clientName: r._clientName }));
+          (r.queued || []).forEach(x => agg.queued.push({ ...x, _clientName: r._clientName }));
+          (r.recent || []).forEach(x => agg.recent.push({ ...x, _clientName: r._clientName }));
+          agg.summary.running_count += r.summary?.running_count || 0;
+          agg.summary.queued_count += r.summary?.queued_count || 0;
+        }
+        agg.recent.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        agg.recent = agg.recent.slice(0, 10);
+        setData(agg);
+      }
+    } catch (e) {
+      console.error('now-running fetch error:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, [clientId, clients]);
+
+  useEffect(() => { setLoading(true); load(); }, [load]);
+
+  // Poll every 5s for fresh elapsed data + tick every 1s for smooth countdown
+  useEffect(() => {
+    const pollT = setInterval(load, 5000);
+    const tickT = setInterval(() => setTick(t => t + 1), 1000);
+    return () => { clearInterval(pollT); clearInterval(tickT); };
+  }, [load]);
+
+  // ── Live elapsed: server elapsed + time since last fetch ──
+  const nowRef = Date.now();
+  const liveElapsed = (run) => {
+    const serverTs = new Date(run.created_at).getTime();
+    return Math.max(0, Math.round((nowRef - serverTs) / 1000));
+  };
+
+  // ── ETA guess: typical run takes 60-120s for most agents ──
+  const etaText = (run) => {
+    const elapsed = liveElapsed(run);
+    if (elapsed < 30) return 'just started';
+    if (elapsed < 90) return `~${90 - elapsed}s remaining`;
+    if (elapsed < 300) return 'finishing up';
+    return 'long-running';
+  };
+
+  const fmt = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+  };
+
+  const running = data.running || [];
+  const queued = data.queued || [];
+  const recent = data.recent || [];
+  const nextUp = queued[0];
+  const showingAll = clientId === 'all' || !clientId;
+
+  return (
+    <div
+      style={{
+        background: colors.surface,
+        border: `1px solid ${running.length > 0 ? '#3B82F6' : colors.border}`,
+        borderRadius: radius.xl,
+        marginBottom: spacing.md,
+        padding: '14px 20px',
+        boxShadow: running.length > 0 ? `0 0 0 3px #3B82F610` : shadows.sm,
+        transition: transitions.normal,
+      }}
+    >
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: running.length > 0 || queued.length > 0 ? 12 : 0 }}>
+        <Activity size={14} color={running.length > 0 ? '#3B82F6' : colors.textMuted} style={{ animation: running.length > 0 ? 'pulse 1.5s infinite' : 'none' }} />
+        <span style={{ fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.text }}>
+          Now Running {showingAll ? '(all clients)' : ''}
+        </span>
+        <span style={{ fontSize: fontSize.xs, color: colors.textDisabled, fontFamily: MONO }}>
+          {running.length} active · {queued.length} queued
+        </span>
+        {loading && <Spin />}
+      </div>
+
+      {running.length === 0 && queued.length === 0 ? (
+        <div style={{ fontSize: fontSize.xs, color: colors.textDisabled, fontStyle: 'italic' }}>
+          Idle. {recent.length > 0 && `Last run: ${recent[0].agent_name || recent[0].agent_slug} (${relativeTime(recent[0].created_at)})`}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {/* Running rows */}
+          {running.map(r => {
+            const el = liveElapsed(r);
+            return (
+              <div
+                key={r.id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 12px',
+                  background: '#EBF5FF',
+                  border: '1px solid #BFDBFE',
+                  borderRadius: radius.md,
+                }}
+              >
+                <StatusDot status="running" size={10} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: '#1E3A8A' }}>
+                      {r.agent_name || r.agent_slug || 'Unknown'}
+                    </span>
+                    {r.lane && (
+                      <span
+                        style={{
+                          fontSize: 9,
+                          padding: '1px 6px',
+                          borderRadius: radius.full,
+                          background: (LANE_COLORS[r.lane] || colors.textMuted) + '22',
+                          color: LANE_COLORS[r.lane] || colors.textMuted,
+                          fontWeight: fontWeight.bold,
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {r.lane}
+                      </span>
+                    )}
+                    {showingAll && r._clientName && (
+                      <span style={{ fontSize: fontSize.xs, color: colors.primary }}>
+                        · {r._clientName}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: fontSize.xs, color: '#3B82F6', fontFamily: MONO }}>
+                    Started {relativeTime(r.created_at)} · {etaText(r)}
+                  </div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: '#1E3A8A', fontFamily: MONO, lineHeight: 1 }}>
+                    {fmt(el)}
+                  </div>
+                  <div style={{ fontSize: 9, color: '#3B82F6', fontFamily: MONO }}>elapsed</div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Next up */}
+          {nextUp && (
+            <div
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '6px 12px',
+                background: colors.surfaceHover,
+                borderRadius: radius.md,
+                fontSize: fontSize.xs,
+                color: colors.textSecondary,
+              }}
+            >
+              <Clock size={11} color={colors.textMuted} />
+              <span>
+                <strong>Next in queue:</strong> {nextUp.agent_name || nextUp.agent_slug}
+                {showingAll && nextUp._clientName && ` · ${nextUp._clientName}`}
+                {queued.length > 1 && ` (+${queued.length - 1} more)`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HealthBar({ score, label }) {
   const barColor = score >= 80 ? '#10B981' : score >= 50 ? '#F59E0B' : '#EF4444';
   return (
@@ -948,6 +1140,9 @@ export default function Dashboard({ clientId, setClientId, clients }) {
           </button>
         </div>
       </div>
+
+      {/* ─── Now Running live panel ──────────────────────────────── */}
+      <NowRunningPanel clientId={clientFilter} clients={clients} />
 
       {/* ─── Section 5: CLIENT OVERVIEW CARDS (Collapsible) ──────── */}
       <div style={{

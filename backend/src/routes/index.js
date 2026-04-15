@@ -122,6 +122,102 @@ router.patch('/agents/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Bulk agent controls by lane (category) ───
+router.patch('/agents/lane/:lane', async (req, res) => {
+  try {
+    const patch = {};
+    if (typeof req.body.is_active === 'boolean') patch.is_active = req.body.is_active;
+    if (req.body.action_mode_default) patch.action_mode_default = req.body.action_mode_default;
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+
+    const { data, error } = await supabase.from('agent_templates')
+      .update(patch)
+      .eq('lane', req.params.lane)
+      .select('id, slug, name, lane, is_active, action_mode_default');
+    if (error) throw error;
+    res.json({ updated: data?.length || 0, agents: data });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Per-client action mode override for a specific agent ───
+// Body: { agent_slug: "technical-seo-crawl-agent", mode: "autonomous" | "approve_then_act" | "report_only" | null }
+// null clears the override
+router.post('/clients/:clientId/agent-mode-override', async (req, res) => {
+  try {
+    const { agent_slug, mode } = req.body;
+    if (!agent_slug) return res.status(400).json({ error: 'agent_slug required' });
+    if (mode && !['autonomous', 'approve_then_act', 'report_only'].includes(mode)) {
+      return res.status(400).json({ error: 'mode must be autonomous, approve_then_act, or report_only' });
+    }
+
+    const { data: rules } = await supabase.from('client_rules')
+      .select('action_mode_overrides')
+      .eq('client_id', req.params.clientId).maybeSingle();
+    const overrides = rules?.action_mode_overrides || {};
+    if (mode === null) delete overrides[agent_slug];
+    else overrides[agent_slug] = mode;
+
+    const { data, error } = await supabase.from('client_rules')
+      .update({ action_mode_overrides: overrides })
+      .eq('client_id', req.params.clientId).select().single();
+    if (error) throw error;
+    res.json({ success: true, overrides });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── "Now Running" panel data — live agent status with elapsed time ───
+router.get('/clients/:clientId/now-running', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    // Active runs
+    const { data: running } = await supabase.from('runs')
+      .select('id, status, created_at, updated_at, agent_templates(name, slug, lane)')
+      .eq('client_id', clientId)
+      .eq('status', 'running')
+      .order('created_at', { ascending: false });
+
+    // Queued items
+    const { data: queued } = await supabase.from('run_queue')
+      .select('id, status, created_at, priority, agent_templates(name, slug, lane)')
+      .eq('client_id', clientId)
+      .eq('status', 'queued')
+      .order('priority', { ascending: true }).order('created_at', { ascending: true });
+
+    // Recent completions (last 10)
+    const { data: recent } = await supabase.from('runs')
+      .select('id, status, created_at, updated_at, agent_templates(name, slug, lane)')
+      .eq('client_id', clientId)
+      .in('status', ['success', 'failed'])
+      .order('created_at', { ascending: false }).limit(10);
+
+    const now = Date.now();
+    const enrichRun = (r) => ({
+      ...r,
+      elapsed_seconds: Math.round((now - new Date(r.created_at).getTime()) / 1000),
+      agent_name: r.agent_templates?.name,
+      agent_slug: r.agent_templates?.slug,
+      lane: r.agent_templates?.lane,
+    });
+
+    res.json({
+      running: (running || []).map(enrichRun),
+      queued: (queued || []).map(enrichRun),
+      recent: (recent || []).map(r => ({
+        ...r,
+        duration_seconds: r.updated_at ? Math.round((new Date(r.updated_at).getTime() - new Date(r.created_at).getTime()) / 1000) : null,
+        agent_name: r.agent_templates?.name,
+        agent_slug: r.agent_templates?.slug,
+        lane: r.agent_templates?.lane,
+      })),
+      summary: {
+        running_count: running?.length || 0,
+        queued_count: queued?.length || 0,
+        next_in_queue: queued?.[0]?.agent_templates?.name || null,
+      }
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/clients/:clientId/agents', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -250,34 +346,43 @@ router.post('/proposed-changes/:id/approve', async (req, res) => {
       .eq('id', req.params.id).select().single();
     if (error) throw error;
 
-    // ── Queue validation agents immediately on approval ──
-    const VALIDATOR_SLUGS = ['hebrew-quality-agent', 'design-consistency-agent', 'seo-core-agent', 'website-qa-agent', 'website-content-agent'];
-    try {
-      const { data: agents } = await supabase.from('agent_templates').select('id, slug').in('slug', VALIDATOR_SLUGS).eq('is_active', true);
-      if (agents?.length) {
-        const taskPayload = {
-          trigger: 'post_change_validation',
-          change_id: change.id,
-          change_type: change.change_type,
-          page_url: change.page_url,
-          instructions: `Change approved: "${change.change_type}" on ${change.page_url}. Validate now — check Hebrew quality, design consistency, SEO impact, QA, and content quality.`,
+    // ─── Actually push the change to GitHub now that the user approved ───
+    // This is the point where approved changes transition from intention to action.
+    let executionResult = null;
+    if (change.platform === 'github') {
+      const { data: cw } = await supabase.from('client_websites')
+        .select('id').eq('client_id', change.client_id).maybeSingle();
+      const { data: gitConn } = cw?.id
+        ? await supabase.from('website_git_connections')
+            .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
+            .eq('client_website_id', cw.id).maybeSingle()
+        : { data: null };
+      if (gitConn?.provider === 'github') {
+        const { executeGitHubChange } = await import('../functions/tools.js');
+        const gitConfig = {
+          repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
+          repo_owner: gitConn.repo_owner,
+          repo_name: gitConn.repo_name,
+          default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
+          access_mode: gitConn.access_mode
         };
-        await supabase.from('run_queue').insert(
-          agents.map(a => ({
-            client_id: change.client_id,
-            agent_template_id: a.id,
-            agent_slug: a.slug,
-            status: 'queued',
-            priority: 1,
-            priority_score: 9.0,
-            queued_by: 'post_change_approval',
-            task_payload: taskPayload,
-          }))
-        );
+        executionResult = await executeGitHubChange(change.client_id, change, gitConfig);
+        if (executionResult?.success) {
+          await supabase.from('proposed_changes').update({
+            status: 'executed',
+            platform_ref: executionResult.ref,
+            executed_at: new Date().toISOString(),
+            execution_result: executionResult,
+          }).eq('id', change.id);
+        } else {
+          await supabase.from('proposed_changes').update({
+            execution_result: executionResult,
+          }).eq('id', change.id);
+        }
       }
-    } catch (qErr) { console.error('[APPROVE_VALIDATORS]', qErr.message); }
+    }
 
-    res.json({ success: true, change });
+    res.json({ success: true, change, executionResult });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

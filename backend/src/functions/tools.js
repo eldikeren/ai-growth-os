@@ -1900,6 +1900,38 @@ export async function executeTool(toolName, args, clientId, runId) {
       }
 
       case 'propose_website_change': {
+        // ─── 0. APPROVAL GATE ───
+        // Determine the action mode for this agent/client combination.
+        // Order: client_rules.action_mode_overrides[slug] > agent_templates.action_mode_default > 'approve_then_act' default
+        let actionMode = 'approve_then_act'; // safety default
+        let agentSlug = null;
+        if (runId) {
+          const { data: run } = await supabase.from('runs')
+            .select('agent_template_id, agent_templates!inner(slug, action_mode_default)')
+            .eq('id', runId).maybeSingle();
+          agentSlug = run?.agent_templates?.slug || null;
+          const agentDefault = run?.agent_templates?.action_mode_default || 'approve_then_act';
+          actionMode = agentDefault;
+        }
+        if (clientId) {
+          const { data: rules } = await supabase.from('client_rules')
+            .select('action_mode_overrides')
+            .eq('client_id', clientId).maybeSingle();
+          const overrides = rules?.action_mode_overrides || {};
+          if (agentSlug && overrides[agentSlug]) actionMode = overrides[agentSlug];
+        }
+
+        // Report-only mode: refuse to even store the change
+        if (actionMode === 'report_only') {
+          return {
+            status: 'skipped',
+            action_mode: 'report_only',
+            message: `Agent ${agentSlug || 'unknown'} is in report_only mode — no change proposed. Finding logged only.`,
+            change_type: args.change_type,
+            page_url: args.page_url
+          };
+        }
+
         // 1. Detect client's website platform
         // NOTE: column is primary_domain, NOT domain. Using the wrong name
         // causes the whole SELECT to fail silently and website stays null.
@@ -1942,7 +1974,7 @@ export async function executeTool(toolName, args, clientId, runId) {
         const { data: change, error: changeErr } = await supabase.from('proposed_changes').insert({
           client_id: clientId,
           run_id: runId,
-          agent_slug: 'agent', // will be populated from context
+          agent_slug: agentSlug || 'agent',
           page_url: args.page_url,
           change_type: args.change_type,
           current_value: args.current_value || null,
@@ -1955,7 +1987,23 @@ export async function executeTool(toolName, args, clientId, runId) {
 
         if (changeErr) return { error: `Failed to save proposed change: ${changeErr.message}` };
 
-        // 3. Try immediate execution if platform connector is available
+        // 3. If action mode is approve_then_act, STOP here — the user must approve
+        //    via the app before any code is pushed. This is the safety gate.
+        if (actionMode === 'approve_then_act') {
+          return {
+            status: 'awaiting_approval',
+            action_mode: 'approve_then_act',
+            change_id: change.id,
+            platform,
+            page_url: args.page_url,
+            change_type: args.change_type,
+            proposed_value: args.proposed_value,
+            priority: args.priority || 'medium',
+            message: `Change saved for your review. Open the Proposed Changes tab in the app to approve or reject.`
+          };
+        }
+
+        // 4. Autonomous mode — execute immediately via platform connector
         let executionResult = null;
 
         if (platform === 'github') {
@@ -2627,7 +2675,7 @@ async function queuePostChangeValidators(clientId, changeId, changeType, pageUrl
 // PLATFORM EXECUTION HELPERS
 // ============================================================
 
-async function executeGitHubChange(clientId, change, config) {
+export async function executeGitHubChange(clientId, change, config) {
   try {
     // Global token from Vercel env is the default for all clients
     const token = process.env.GITHUB_TOKEN;

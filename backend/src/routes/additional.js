@@ -15,6 +15,7 @@ import {
   generateFullLinkIntelligence, generateSeoActionPlan,
   runFullVerification, snapshotKeywordPositions, recordKpiSnapshot
 } from '../functions/additional.js';
+import { deployApprovedChange } from '../functions/deploy.js';
 
 const router = express.Router();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -1240,7 +1241,108 @@ router.get('/cron/self-heal', async (req, res) => {
       }
     }
 
-    // ── 6. Log self-heal snapshot ──────────────────────────────
+    // ── 6. BACKFILL: missing agent_schedules for all active agents ──
+    // Root cause fix: onboarding only hardcodes 7 agents into agent_schedules,
+    // so 15+ of the 25 active agents never fire via enqueueDueRuns(). This
+    // section ensures every (client, active_agent) pair has a schedule row.
+    // Runs every 5 min so brand-new agents activated mid-flight get picked up
+    // automatically without anyone touching onboarding code.
+    try {
+      // Lane → default cron map (staggered across the week to avoid 09:00 pileup)
+      const LANE_DEFAULT_CRON = {
+        'System / Infrastructure':           '0 6 * * *',       // daily 06:00
+        'SEO Operations':                    '0 8 * * *',       // daily 08:00
+        'Paid Acquisition and Conversion':   '0 10 * * *',      // daily 10:00
+        'Social Publishing and Engagement':  '0 11 * * 1,3,5',  // Mon/Wed/Fri 11:00
+        'Local Authority, Reviews, and GBP': '0 9 * * 3',       // weekly Wed 09:00
+        'Innovation and Competitive Edge':   '0 9 * * 4',       // weekly Thu 09:00
+        'Website Content, UX, and Design':   '0 9 * * 5',       // weekly Fri 09:00
+        'Reporting':                         '0 10 1 * *',      // monthly 1st 10:00
+      };
+      const FALLBACK_CRON = '0 9 * * *';
+
+      const [{ data: assignments }, { data: existingSchedules }, { data: clientTimezones }] = await Promise.all([
+        supabase.from('client_agent_assignments')
+          .select('client_id, agent_template_id, agent_templates!inner(slug, lane, is_active)')
+          .eq('enabled', true)
+          .eq('agent_templates.is_active', true),
+        supabase.from('agent_schedules')
+          .select('client_id, agent_template_id'),
+        supabase.from('client_profiles')
+          .select('client_id, timezone'),
+      ]);
+
+      const existingKeys = new Set(
+        (existingSchedules || []).map(s => `${s.client_id}::${s.agent_template_id}`)
+      );
+      const tzByClient = Object.fromEntries(
+        (clientTimezones || []).map(p => [p.client_id, p.timezone || 'Asia/Jerusalem'])
+      );
+
+      const toInsert = [];
+      for (const a of (assignments || [])) {
+        const key = `${a.client_id}::${a.agent_template_id}`;
+        if (existingKeys.has(key)) continue;
+        const cron = LANE_DEFAULT_CRON[a.agent_templates?.lane] || FALLBACK_CRON;
+        toInsert.push({
+          client_id: a.client_id,
+          agent_template_id: a.agent_template_id,
+          cron_expression: cron,
+          timezone: tzByClient[a.client_id] || 'Asia/Jerusalem',
+          enabled: true,
+          // next_run_at=now so enqueueDueRuns() picks them up on the very next tick;
+          // the queue's concurrency cap will throttle if many fire at once.
+          next_run_at: new Date().toISOString(),
+        });
+      }
+
+      if (toInsert.length > 0) {
+        const { error: insErr } = await supabase.from('agent_schedules').insert(toInsert);
+        if (insErr) errors.push({ action: 'backfill_schedules', error: insErr.message });
+        else fixes.push({ action: 'backfill_schedules', count: toInsert.length });
+      }
+    } catch (e) {
+      errors.push({ action: 'backfill_schedules', error: e.message });
+    }
+
+    // ── 7. AUTO-DEPLOY: stuck approved proposed_changes ──────────
+    // Root cause fix: proposed_changes with status='approved' AND executed_at=null
+    // should never sit there. The orchestrator entity is responsible for pushing
+    // every approved change to git, not the user clicking Deploy Now.
+    try {
+      const { data: stuckApprovals } = await supabase
+        .from('proposed_changes')
+        .select('id, client_id')
+        .eq('status', 'approved')
+        .is('executed_at', null)
+        .limit(50); // chunk so one run doesn't burn the whole Vercel timeout
+
+      if (stuckApprovals?.length) {
+        let deployed = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const row of stuckApprovals) {
+          try {
+            const r = await deployApprovedChange(row.id);
+            if (r.skipped) skipped++;
+            else if (r.deployed) deployed++;
+            else if (!r.success) failed++;
+          } catch (e) {
+            failed++;
+            errors.push({ action: 'auto_deploy_stuck', id: row.id, error: e.message });
+          }
+        }
+        fixes.push({
+          action: 'auto_deploy_stuck_approvals',
+          attempted: stuckApprovals.length,
+          deployed, skipped, failed,
+        });
+      }
+    } catch (e) {
+      errors.push({ action: 'auto_deploy_stuck_approvals', error: e.message });
+    }
+
+    // ── 8. Log self-heal snapshot ──────────────────────────────
     const { count: openCount } = await supabase.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open');
     const { count: runningCount } = await supabase.from('runs').select('id', { count: 'exact', head: true }).eq('status', 'running');
     const { count: queuedCount } = await supabase.from('run_queue').select('id', { count: 'exact', head: true }).eq('status', 'queued');

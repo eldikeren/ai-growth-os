@@ -13,6 +13,10 @@ import {
   generateReportHtml, sendClientReport,
   refreshCredentialHealth, validateKpiSources, enqueueDueRuns
 } from '../functions/core.js';
+import {
+  loadGitConfigForClient, pushChangeToGit,
+  approveAndDeployChange, deployApprovedChange
+} from '../functions/deploy.js';
 
 const router = express.Router();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -407,76 +411,9 @@ router.post('/proposed-changes/deploy-stuck', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ─── Helper: load the git config for a client (or null) ───
-async function loadGitConfigForClient(clientId) {
-  const { data: cw } = await supabase.from('client_websites')
-    .select('id').eq('client_id', clientId).maybeSingle();
-  if (!cw?.id) return null;
-  const { data: gitConn } = await supabase.from('website_git_connections')
-    .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
-    .eq('client_website_id', cw.id).maybeSingle();
-  if (gitConn?.provider !== 'github') return null;
-  return {
-    repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
-    repo_owner: gitConn.repo_owner,
-    repo_name: gitConn.repo_name,
-    default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
-    // ─── force auto-merge — approval IS consent to deploy ───
-    access_mode: 'branch_pr_and_merge',
-  };
-}
-
-// ─── Helper: run the github push for a change row (shared) ───
-// RE-DETECTS the git connection at execution time, so a change stored with
-// platform='manual' still deploys if the client has a git conn NOW. This is
-// the fix for the 36 stuck Yaniv Gil approvals.
-async function pushChangeToGit(change) {
-  const gitConfig = await loadGitConfigForClient(change.client_id);
-  if (!gitConfig) {
-    return { success: true, skipped: true, deployed: false, message: 'No GitHub connection for this client — manual apply required' };
-  }
-  const { executeGitHubChange } = await import('../functions/tools.js');
-  const executionResult = await executeGitHubChange(change.client_id, change, gitConfig);
-
-  if (executionResult?.success) {
-    // Also flip platform to 'github' if it was stored wrong — keeps the audit trail honest.
-    await supabase.from('proposed_changes').update({
-      status: 'executed',
-      platform: 'github',
-      platform_ref: executionResult.ref,
-      executed_at: new Date().toISOString(),
-      execution_result: executionResult,
-    }).eq('id', change.id);
-    return { success: true, executionResult, deployed: !!executionResult.merged };
-  }
-  await supabase.from('proposed_changes').update({ execution_result: executionResult }).eq('id', change.id);
-  return { success: false, executionResult, deployed: false, error: executionResult?.error };
-}
-
-// ─── Helper: approve a single change and deploy it ───
-async function approveAndDeployChange(changeId, approvedBy) {
-  const { data: change, error } = await supabase.from('proposed_changes')
-    .update({ status: 'approved', approved_by: approvedBy, approved_at: new Date().toISOString() })
-    .eq('id', changeId).select().single();
-  if (error) return { success: false, error: error.message };
-  const pushResult = await pushChangeToGit(change);
-  return { ...pushResult, change };
-}
-
-// ─── Helper: deploy an already-approved change (idempotent retry) ───
-async function deployApprovedChange(changeId) {
-  const { data: change, error } = await supabase.from('proposed_changes')
-    .select('*').eq('id', changeId).single();
-  if (error) return { success: false, error: error.message };
-  if (change.status === 'executed') {
-    return { success: true, change, deployed: true, skipped: true, message: 'Already executed' };
-  }
-  if (change.status !== 'approved') {
-    return { success: false, change, error: `Cannot deploy change in status '${change.status}'` };
-  }
-  const pushResult = await pushChangeToGit(change);
-  return { ...pushResult, change };
-}
+// Deploy helpers (loadGitConfigForClient, pushChangeToGit,
+// approveAndDeployChange, deployApprovedChange) live in functions/deploy.js
+// so the self-heal cron in routes/additional.js can import the same code path.
 
 router.post('/proposed-changes/:id/reject', async (req, res) => {
   try {

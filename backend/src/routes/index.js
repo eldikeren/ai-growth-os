@@ -339,52 +339,85 @@ router.get('/clients/:clientId/proposed-changes', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Approve ONE proposed change and deploy it ───
+// The user's explicit approval is consent to deploy, so we FORCE auto-merge
+// by passing access_mode='branch_pr_and_merge' regardless of what's stored.
+// That's the point — they clicked Approve, so push + merge in one shot.
 router.post('/proposed-changes/:id/approve', async (req, res) => {
   try {
-    const { data: change, error } = await supabase.from('proposed_changes')
-      .update({ status: 'approved', approved_by: req.body.approved_by || 'manual', approved_at: new Date().toISOString() })
-      .eq('id', req.params.id).select().single();
-    if (error) throw error;
-
-    // ─── Actually push the change to GitHub now that the user approved ───
-    // This is the point where approved changes transition from intention to action.
-    let executionResult = null;
-    if (change.platform === 'github') {
-      const { data: cw } = await supabase.from('client_websites')
-        .select('id').eq('client_id', change.client_id).maybeSingle();
-      const { data: gitConn } = cw?.id
-        ? await supabase.from('website_git_connections')
-            .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
-            .eq('client_website_id', cw.id).maybeSingle()
-        : { data: null };
-      if (gitConn?.provider === 'github') {
-        const { executeGitHubChange } = await import('../functions/tools.js');
-        const gitConfig = {
-          repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
-          repo_owner: gitConn.repo_owner,
-          repo_name: gitConn.repo_name,
-          default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
-          access_mode: gitConn.access_mode
-        };
-        executionResult = await executeGitHubChange(change.client_id, change, gitConfig);
-        if (executionResult?.success) {
-          await supabase.from('proposed_changes').update({
-            status: 'executed',
-            platform_ref: executionResult.ref,
-            executed_at: new Date().toISOString(),
-            execution_result: executionResult,
-          }).eq('id', change.id);
-        } else {
-          await supabase.from('proposed_changes').update({
-            execution_result: executionResult,
-          }).eq('id', change.id);
-        }
-      }
-    }
-
-    res.json({ success: true, change, executionResult });
+    const result = await approveAndDeployChange(req.params.id, req.body.approved_by || 'manual');
+    if (!result.success) return res.status(500).json(result);
+    res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+// ─── Bulk approve + deploy multiple changes at once ───
+// Body: { ids: [uuid, uuid, ...], approved_by?: string }
+// Runs them sequentially to avoid swamping the GitHub API.
+router.post('/proposed-changes/bulk-approve', async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+    if (ids.length === 0) return res.status(400).json({ error: 'ids array required' });
+    const approvedBy = req.body.approved_by || 'manual';
+
+    const results = [];
+    for (const id of ids) {
+      const r = await approveAndDeployChange(id, approvedBy);
+      results.push({ id, ...r });
+    }
+    const deployed = results.filter(r => r.deployed).length;
+    const failed = results.filter(r => !r.success || r.executionResult?.success === false).length;
+    res.json({ success: true, total: ids.length, deployed, failed, results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Helper: approve a single change and deploy it ───
+async function approveAndDeployChange(changeId, approvedBy) {
+  const { data: change, error } = await supabase.from('proposed_changes')
+    .update({ status: 'approved', approved_by: approvedBy, approved_at: new Date().toISOString() })
+    .eq('id', changeId).select().single();
+  if (error) return { success: false, error: error.message };
+
+  // Only GitHub-backed changes can be auto-deployed. Anything else stays approved for manual apply.
+  if (change.platform !== 'github') {
+    return { success: true, change, executionResult: null, deployed: false, message: 'Approved — manual apply required (non-GitHub platform)' };
+  }
+
+  const { data: cw } = await supabase.from('client_websites')
+    .select('id').eq('client_id', change.client_id).maybeSingle();
+  const { data: gitConn } = cw?.id
+    ? await supabase.from('website_git_connections')
+        .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
+        .eq('client_website_id', cw.id).maybeSingle()
+    : { data: null };
+
+  if (gitConn?.provider !== 'github') {
+    return { success: true, change, executionResult: null, deployed: false, message: 'Approved — no GitHub connection configured' };
+  }
+
+  const { executeGitHubChange } = await import('../functions/tools.js');
+  const gitConfig = {
+    repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
+    repo_owner: gitConn.repo_owner,
+    repo_name: gitConn.repo_name,
+    default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
+    // ─── force auto-merge — the user explicitly approved, so deploy it ───
+    access_mode: 'branch_pr_and_merge',
+  };
+  const executionResult = await executeGitHubChange(change.client_id, change, gitConfig);
+
+  if (executionResult?.success) {
+    await supabase.from('proposed_changes').update({
+      status: 'executed',
+      platform_ref: executionResult.ref,
+      executed_at: new Date().toISOString(),
+      execution_result: executionResult,
+    }).eq('id', change.id);
+    return { success: true, change, executionResult, deployed: !!executionResult.merged };
+  }
+  await supabase.from('proposed_changes').update({ execution_result: executionResult }).eq('id', change.id);
+  return { success: false, change, executionResult, deployed: false, error: executionResult?.error };
+}
 
 router.post('/proposed-changes/:id/reject', async (req, res) => {
   try {

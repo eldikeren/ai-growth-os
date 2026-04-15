@@ -25,7 +25,7 @@ const statusStyle = (status) => {
 };
 
 // ─── Change card (reused in both sections) ───
-function ChangeCard({ c, onApprove, onReject, pendingIds }) {
+function ChangeCard({ c, onApprove, onReject, pendingIds, selectable, selected, onToggleSelect }) {
   const { bg, fg, label, Icon } = statusStyle(c.status);
   const prUrl = c.platform_ref;
   const exec = c.execution_result || {};
@@ -34,8 +34,30 @@ function ChangeCard({ c, onApprove, onReject, pendingIds }) {
   const isPending = pendingIds?.has(c.id);
 
   return (
-    <Card style={{ marginBottom: spacing.md, opacity: isPending ? 0.6 : 1 }}>
+    <Card style={{
+      marginBottom: spacing.md,
+      opacity: isPending ? 0.6 : 1,
+      border: selected ? `2px solid ${colors.primary}` : undefined,
+    }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing.sm, gap: spacing.md }}>
+        {selectable && (
+          <label
+            style={{
+              display: 'flex', alignItems: 'center', cursor: 'pointer',
+              paddingTop: 2, flexShrink: 0,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={!!selected}
+              onChange={() => onToggleSelect?.(c.id)}
+              disabled={isPending}
+              aria-label={`Select ${c.change_type} for bulk approval`}
+              style={{ width: 18, height: 18, cursor: 'pointer', accentColor: colors.primary }}
+            />
+          </label>
+        )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.xs, flexWrap: 'wrap' }}>
             <div style={{ fontSize: fontSize.md, fontWeight: fontWeight.bold, color: colors.text }}>
@@ -130,6 +152,8 @@ export default function ProposedChangesView({ clientId }) {
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('all');
   const [pendingIds, setPendingIds] = useState(new Set());
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = async () => {
     if (!clientId) return;
@@ -164,6 +188,16 @@ export default function ProposedChangesView({ clientId }) {
     return next;
   });
 
+  const toggleSelect = (id) => setSelectedIds(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const selectAll = () => setSelectedIds(new Set(awaiting.map(c => c.id)));
+  const clearSelection = () => setSelectedIds(new Set());
+  const allSelected = awaiting.length > 0 && awaiting.every(c => selectedIds.has(c.id));
+
   const handleApprove = async (id) => {
     markPending(id, true);
     try {
@@ -171,6 +205,7 @@ export default function ProposedChangesView({ clientId }) {
       if (res?.executionResult?.success === false) {
         alert(`Approved, but deploy failed: ${res.executionResult.error || 'unknown error'}`);
       }
+      setSelectedIds(prev => { const next = new Set(prev); next.delete(id); return next; });
       await load();
     } catch (e) { alert(e.message); }
     finally { markPending(id, false); }
@@ -182,15 +217,57 @@ export default function ProposedChangesView({ clientId }) {
     markPending(id, true);
     try {
       await api(`/proposed-changes/${id}/reject`, { method: 'POST', body: { reason } });
+      setSelectedIds(prev => { const next = new Set(prev); next.delete(id); return next; });
       await load();
     } catch (e) { alert(e.message); }
     finally { markPending(id, false); }
   };
 
+  // Approve the N currently-checked items
+  const handleApproveSelected = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Approve & deploy ${ids.length} selected change${ids.length === 1 ? '' : 's'}? Each will be committed and auto-merged to production.`)) return;
+    setBulkBusy(true);
+    ids.forEach(id => markPending(id, true));
+    try {
+      const res = await api('/proposed-changes/bulk-approve', {
+        method: 'POST',
+        body: { ids, approved_by: 'admin' },
+      });
+      if (res?.failed > 0) {
+        alert(`${res.deployed}/${res.total} deployed successfully. ${res.failed} failed — check the audit trail below.`);
+      }
+      clearSelection();
+      await load();
+    } catch (e) { alert(e.message); }
+    finally {
+      ids.forEach(id => markPending(id, false));
+      setBulkBusy(false);
+    }
+  };
+
   const handleApproveAll = async () => {
     if (!awaiting.length) return;
-    if (!window.confirm(`Approve & deploy all ${awaiting.length} pending changes? This will push to production.`)) return;
-    for (const c of awaiting) await handleApprove(c.id);
+    if (!window.confirm(`Approve & deploy ALL ${awaiting.length} pending change${awaiting.length === 1 ? '' : 's'}? Each will be committed and auto-merged to production.`)) return;
+    setBulkBusy(true);
+    const ids = awaiting.map(c => c.id);
+    ids.forEach(id => markPending(id, true));
+    try {
+      const res = await api('/proposed-changes/bulk-approve', {
+        method: 'POST',
+        body: { ids, approved_by: 'admin' },
+      });
+      if (res?.failed > 0) {
+        alert(`${res.deployed}/${res.total} deployed successfully. ${res.failed} failed — check the audit trail below.`);
+      }
+      clearSelection();
+      await load();
+    } catch (e) { alert(e.message); }
+    finally {
+      ids.forEach(id => markPending(id, false));
+      setBulkBusy(false);
+    }
   };
 
   return (
@@ -221,16 +298,71 @@ export default function ProposedChangesView({ clientId }) {
                   {awaiting.length} change{awaiting.length === 1 ? '' : 's'} waiting for your approval
                 </div>
                 <div style={{ fontSize: fontSize.sm, color: colors.warningDark, opacity: 0.8 }}>
-                  Nothing will be pushed until you approve. Review each below.
+                  Tick to pick specific ones, or approve all. Approved changes commit + auto-merge immediately.
                 </div>
               </div>
             </div>
+          </div>
+
+          {/* Select-all row + bulk actions */}
+          <div
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              background: colors.surface,
+              border: `1px solid ${colors.warning}`,
+              borderRadius: radius.md,
+              padding: `${spacing.sm}px ${spacing.md}px`,
+              marginBottom: spacing.md,
+              gap: spacing.md,
+              flexWrap: 'wrap',
+            }}
+          >
+            <label style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={() => allSelected ? clearSelection() : selectAll()}
+                aria-label="Select all awaiting changes"
+                style={{ width: 18, height: 18, cursor: 'pointer', accentColor: colors.primary }}
+              />
+              <span style={{ fontSize: fontSize.sm, fontWeight: fontWeight.semibold, color: colors.text }}>
+                {selectedIds.size === 0
+                  ? 'Select all'
+                  : `${selectedIds.size} of ${awaiting.length} selected`}
+              </span>
+              {selectedIds.size > 0 && (
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  style={{
+                    marginLeft: spacing.sm, background: 'none', border: 'none',
+                    color: colors.textMuted, fontSize: fontSize.xs, cursor: 'pointer',
+                    textDecoration: 'underline',
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </label>
             <div style={{ display: 'flex', gap: spacing.sm }}>
-              <Btn small onClick={handleApproveAll} disabled={pendingIds.size > 0}>
-                <Check size={11} /> Approve all
+              <Btn
+                small
+                onClick={handleApproveSelected}
+                disabled={selectedIds.size === 0 || bulkBusy || pendingIds.size > 0}
+              >
+                <Check size={11} /> Approve selected ({selectedIds.size})
+              </Btn>
+              <Btn
+                small
+                secondary
+                onClick={handleApproveAll}
+                disabled={bulkBusy || pendingIds.size > 0}
+              >
+                <Check size={11} /> Approve all ({awaiting.length})
               </Btn>
             </div>
           </div>
+
           {awaiting.map(c => (
             <ChangeCard
               key={c.id}
@@ -238,6 +370,9 @@ export default function ProposedChangesView({ clientId }) {
               onApprove={handleApprove}
               onReject={handleReject}
               pendingIds={pendingIds}
+              selectable
+              selected={selectedIds.has(c.id)}
+              onToggleSelect={toggleSelect}
             />
           ))}
         </div>

@@ -10,7 +10,7 @@
 // as status='proposed' and waits for the user to approve or reject.
 import { useState, useEffect, useMemo } from 'react';
 import {
-  GitPullRequest, RefreshCw, ExternalLink, Check, X, Clock, GitMerge, AlertTriangle,
+  GitPullRequest, RefreshCw, ExternalLink, Check, X, Clock, GitMerge, AlertTriangle, Rocket,
 } from 'lucide-react';
 import { colors, spacing, radius, fontSize, fontWeight, shadows } from '../theme.js';
 import { Card, Badge, Btn, Empty, SH, SkeletonCard } from '../components/index.jsx';
@@ -25,7 +25,7 @@ const statusStyle = (status) => {
 };
 
 // ─── Change card (reused in both sections) ───
-function ChangeCard({ c, onApprove, onReject, pendingIds, selectable, selected, onToggleSelect }) {
+function ChangeCard({ c, onApprove, onReject, onDeploy, pendingIds, selectable, selected, onToggleSelect }) {
   const { bg, fg, label, Icon } = statusStyle(c.status);
   const prUrl = c.platform_ref;
   const exec = c.execution_result || {};
@@ -133,6 +133,18 @@ function ChangeCard({ c, onApprove, onReject, pendingIds, selectable, selected, 
         </div>
       )}
 
+      {/* Stuck approved — user already approved but deploy never fired */}
+      {c.status === 'approved' && !c.executed_at && onDeploy && (
+        <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.md, alignItems: 'center' }}>
+          <Btn small onClick={() => onDeploy(c.id)} disabled={isPending}>
+            <Rocket size={11} /> Deploy now
+          </Btn>
+          <span style={{ fontSize: fontSize.xs, color: colors.warningDark }}>
+            ⚠ Approved but never deployed — click to commit + auto-merge
+          </span>
+        </div>
+      )}
+
       {exec.error && (
         <div style={{ fontSize: fontSize.xs, color: colors.errorDark, marginTop: spacing.sm }}>
           ⚠ Execution error: {exec.error}
@@ -167,8 +179,9 @@ export default function ProposedChangesView({ clientId }) {
 
   if (!clientId) return <Empty icon={GitPullRequest} msg="Select a client to view proposed changes" />;
 
-  // Split into waiting vs history
+  // Split into waiting vs history vs stuck-approved
   const awaiting = useMemo(() => changes.filter(c => c.status === 'proposed'), [changes]);
+  const stuck = useMemo(() => changes.filter(c => c.status === 'approved' && !c.executed_at), [changes]);
   const history = useMemo(() => changes.filter(c => c.status !== 'proposed'), [changes]);
 
   const counts = {
@@ -239,6 +252,44 @@ export default function ProposedChangesView({ clientId }) {
         alert(`${res.deployed}/${res.total} deployed successfully. ${res.failed} failed — check the audit trail below.`);
       }
       clearSelection();
+      await load();
+    } catch (e) { alert(e.message); }
+    finally {
+      ids.forEach(id => markPending(id, false));
+      setBulkBusy(false);
+    }
+  };
+
+  // Deploy a single approved-but-stuck change (retry path)
+  const handleDeploy = async (id) => {
+    markPending(id, true);
+    try {
+      const res = await api(`/proposed-changes/${id}/deploy`, { method: 'POST' });
+      if (res?.executionResult?.success === false) {
+        alert(`Deploy failed: ${res.executionResult.error || 'unknown error'}`);
+      }
+      await load();
+    } catch (e) { alert(e.message); }
+    finally { markPending(id, false); }
+  };
+
+  // Bulk rescue: push every stuck approved change for this client
+  const handleDeployStuck = async () => {
+    if (!stuck.length) return;
+    if (!window.confirm(`Deploy all ${stuck.length} stuck approved change${stuck.length === 1 ? '' : 's'}? Each will be committed and auto-merged to production.`)) return;
+    setBulkBusy(true);
+    const ids = stuck.map(c => c.id);
+    ids.forEach(id => markPending(id, true));
+    try {
+      const res = await api('/proposed-changes/deploy-stuck', {
+        method: 'POST',
+        body: { clientId },
+      });
+      if (res?.failed > 0) {
+        alert(`${res.deployed}/${res.total} deployed. ${res.skipped || 0} skipped, ${res.failed} failed.`);
+      } else {
+        alert(`✓ ${res.deployed}/${res.total} deployed successfully${res.skipped ? ` (${res.skipped} already done)` : ''}`);
+      }
       await load();
     } catch (e) { alert(e.message); }
     finally {
@@ -378,6 +429,37 @@ export default function ProposedChangesView({ clientId }) {
         </div>
       )}
 
+      {/* ─── Stuck approvals rescue banner ─── */}
+      {stuck.length > 0 && (
+        <div
+          style={{
+            background: '#FEF2F2',
+            border: `2px solid ${colors.error}`,
+            borderRadius: radius.xl,
+            padding: spacing.lg,
+            marginBottom: spacing.xl,
+            boxShadow: shadows.md,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
+              <Rocket size={18} color={colors.errorDark} />
+              <div>
+                <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.errorDark }}>
+                  {stuck.length} approved change{stuck.length === 1 ? '' : 's'} stuck — never deployed
+                </div>
+                <div style={{ fontSize: fontSize.sm, color: colors.errorDark, opacity: 0.8 }}>
+                  These were approved but the deploy step never fired (older records with missing git link). One click will push + auto-merge all of them.
+                </div>
+              </div>
+            </div>
+            <Btn small danger onClick={handleDeployStuck} disabled={bulkBusy || pendingIds.size > 0}>
+              <Rocket size={11} /> Deploy all stuck ({stuck.length})
+            </Btn>
+          </div>
+        </div>
+      )}
+
       {/* ─── Audit trail ─── */}
       <div style={{ fontSize: fontSize.lg, fontWeight: fontWeight.bold, color: colors.text, marginBottom: spacing.sm }}>
         Audit trail
@@ -429,6 +511,7 @@ export default function ProposedChangesView({ clientId }) {
             c={c}
             onApprove={handleApprove}
             onReject={handleReject}
+            onDeploy={handleDeploy}
             pendingIds={pendingIds}
           />
         ))

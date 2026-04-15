@@ -351,6 +351,18 @@ router.post('/proposed-changes/:id/approve', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Deploy ONE already-approved change (retry path) ───
+// For the case where approval succeeded but the deploy step was skipped
+// (e.g. old records with platform='manual' that ACTUALLY have a git conn now).
+// Idempotent — if the change is already 'executed' it returns success with no action.
+router.post('/proposed-changes/:id/deploy', async (req, res) => {
+  try {
+    const result = await deployApprovedChange(req.params.id);
+    if (!result.success) return res.status(500).json(result);
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── Bulk approve + deploy multiple changes at once ───
 // Body: { ids: [uuid, uuid, ...], approved_by?: string }
 // Runs them sequentially to avoid swamping the GitHub API.
@@ -371,52 +383,99 @@ router.post('/proposed-changes/bulk-approve', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Deploy all stuck 'approved' changes for a client ───
+// Body: { clientId?: uuid }  (if omitted, across all clients)
+// This is the "rescue" button for the user's 36 stuck approvals.
+router.post('/proposed-changes/deploy-stuck', async (req, res) => {
+  try {
+    let q = supabase.from('proposed_changes')
+      .select('id, client_id')
+      .eq('status', 'approved');
+    if (req.body.clientId) q = q.eq('client_id', req.body.clientId);
+    const { data: stuck, error } = await q;
+    if (error) throw error;
+
+    const results = [];
+    for (const row of stuck || []) {
+      const r = await deployApprovedChange(row.id);
+      results.push({ id: row.id, ...r });
+    }
+    const deployed = results.filter(r => r.deployed).length;
+    const skipped = results.filter(r => r.skipped).length;
+    const failed = results.filter(r => !r.success || r.executionResult?.success === false).length;
+    res.json({ success: true, total: results.length, deployed, skipped, failed, results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Helper: load the git config for a client (or null) ───
+async function loadGitConfigForClient(clientId) {
+  const { data: cw } = await supabase.from('client_websites')
+    .select('id').eq('client_id', clientId).maybeSingle();
+  if (!cw?.id) return null;
+  const { data: gitConn } = await supabase.from('website_git_connections')
+    .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
+    .eq('client_website_id', cw.id).maybeSingle();
+  if (gitConn?.provider !== 'github') return null;
+  return {
+    repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
+    repo_owner: gitConn.repo_owner,
+    repo_name: gitConn.repo_name,
+    default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
+    // ─── force auto-merge — approval IS consent to deploy ───
+    access_mode: 'branch_pr_and_merge',
+  };
+}
+
+// ─── Helper: run the github push for a change row (shared) ───
+// RE-DETECTS the git connection at execution time, so a change stored with
+// platform='manual' still deploys if the client has a git conn NOW. This is
+// the fix for the 36 stuck Yaniv Gil approvals.
+async function pushChangeToGit(change) {
+  const gitConfig = await loadGitConfigForClient(change.client_id);
+  if (!gitConfig) {
+    return { success: true, skipped: true, deployed: false, message: 'No GitHub connection for this client — manual apply required' };
+  }
+  const { executeGitHubChange } = await import('../functions/tools.js');
+  const executionResult = await executeGitHubChange(change.client_id, change, gitConfig);
+
+  if (executionResult?.success) {
+    // Also flip platform to 'github' if it was stored wrong — keeps the audit trail honest.
+    await supabase.from('proposed_changes').update({
+      status: 'executed',
+      platform: 'github',
+      platform_ref: executionResult.ref,
+      executed_at: new Date().toISOString(),
+      execution_result: executionResult,
+    }).eq('id', change.id);
+    return { success: true, executionResult, deployed: !!executionResult.merged };
+  }
+  await supabase.from('proposed_changes').update({ execution_result: executionResult }).eq('id', change.id);
+  return { success: false, executionResult, deployed: false, error: executionResult?.error };
+}
+
 // ─── Helper: approve a single change and deploy it ───
 async function approveAndDeployChange(changeId, approvedBy) {
   const { data: change, error } = await supabase.from('proposed_changes')
     .update({ status: 'approved', approved_by: approvedBy, approved_at: new Date().toISOString() })
     .eq('id', changeId).select().single();
   if (error) return { success: false, error: error.message };
+  const pushResult = await pushChangeToGit(change);
+  return { ...pushResult, change };
+}
 
-  // Only GitHub-backed changes can be auto-deployed. Anything else stays approved for manual apply.
-  if (change.platform !== 'github') {
-    return { success: true, change, executionResult: null, deployed: false, message: 'Approved — manual apply required (non-GitHub platform)' };
+// ─── Helper: deploy an already-approved change (idempotent retry) ───
+async function deployApprovedChange(changeId) {
+  const { data: change, error } = await supabase.from('proposed_changes')
+    .select('*').eq('id', changeId).single();
+  if (error) return { success: false, error: error.message };
+  if (change.status === 'executed') {
+    return { success: true, change, deployed: true, skipped: true, message: 'Already executed' };
   }
-
-  const { data: cw } = await supabase.from('client_websites')
-    .select('id').eq('client_id', change.client_id).maybeSingle();
-  const { data: gitConn } = cw?.id
-    ? await supabase.from('website_git_connections')
-        .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
-        .eq('client_website_id', cw.id).maybeSingle()
-    : { data: null };
-
-  if (gitConn?.provider !== 'github') {
-    return { success: true, change, executionResult: null, deployed: false, message: 'Approved — no GitHub connection configured' };
+  if (change.status !== 'approved') {
+    return { success: false, change, error: `Cannot deploy change in status '${change.status}'` };
   }
-
-  const { executeGitHubChange } = await import('../functions/tools.js');
-  const gitConfig = {
-    repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
-    repo_owner: gitConn.repo_owner,
-    repo_name: gitConn.repo_name,
-    default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
-    // ─── force auto-merge — the user explicitly approved, so deploy it ───
-    access_mode: 'branch_pr_and_merge',
-  };
-  const executionResult = await executeGitHubChange(change.client_id, change, gitConfig);
-
-  if (executionResult?.success) {
-    await supabase.from('proposed_changes').update({
-      status: 'executed',
-      platform_ref: executionResult.ref,
-      executed_at: new Date().toISOString(),
-      execution_result: executionResult,
-    }).eq('id', change.id);
-    return { success: true, change, executionResult, deployed: !!executionResult.merged };
-  }
-  await supabase.from('proposed_changes').update({ execution_result: executionResult }).eq('id', change.id);
-  return { success: false, change, executionResult, deployed: false, error: executionResult?.error };
+  const pushResult = await pushChangeToGit(change);
+  return { ...pushResult, change };
 }
 
 router.post('/proposed-changes/:id/reject', async (req, res) => {

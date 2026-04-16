@@ -251,57 +251,70 @@ function AgentInspector({ info, clientId, onClose, onNavigate }) {
   const envelopeSummary = details?.output?._tool_envelopes_summary || [];
   const truthWarning = details?.output?._truth_warning;
 
-  async function runDiagnostic() {
+  // Both buttons spawn an agent run and POLL for its result (instead of silent close).
+  // The modal transitions to a "running → result" state so the user sees real feedback.
+  const [actionState, setActionState] = useState(null); // { kind, status, runId, result, error }
+
+  async function runAgentAndWatch(kind, agentSlug, payloadExtras) {
     if (!clientId) return;
     setRunning(true);
+    setActionState({ kind, status: 'starting', runId: null });
     try {
-      // Pick the best diagnostic agent based on the problem
-      const diagnosticAgent = isBlocked ? 'credential-health-agent' : 'credential-health-agent';
-      await api(`/runs/execute`, {
+      const resp = await api('/runs/execute', {
         method: 'POST',
         body: {
           clientId,
-          agentSlug: diagnosticAgent,
+          agentSlug,
           taskPayload: {
             triggered_by: 'mission_control_inspector',
             investigating: info.slug,
-            reason: error || blockers.map(b => b.reason).join(', ') || 'User requested investigation',
+            ...payloadExtras,
           },
         },
       });
-      // Close after a moment so user sees the diagnostic queued
-      setTimeout(() => onClose?.(), 500);
+      const runId = resp?.runId || resp?.run_id;
+      setActionState({ kind, status: 'running', runId, agentSlug });
+
+      // Poll for completion
+      let attempts = 0;
+      const maxAttempts = 60; // ~60 * 2s = 2 min max
+      while (attempts < maxAttempts) {
+        await new Promise(r => setTimeout(r, 2000));
+        attempts++;
+        try {
+          const run = await api(`/runs/${runId}`);
+          if (!run) continue;
+          if (['success', 'failed', 'blocked', 'partial', 'cancelled'].includes(run.status)) {
+            setActionState({ kind, status: run.status, runId, agentSlug, result: run });
+            break;
+          }
+        } catch {
+          // continue polling
+        }
+      }
+      if (attempts >= maxAttempts) {
+        setActionState(s => ({ ...s, status: 'timeout' }));
+      }
     } catch (e) {
-      alert(`Failed to start diagnostic: ${e.message}`);
+      setActionState({ kind, status: 'error', error: e.message });
     } finally {
       setRunning(false);
     }
   }
 
+  async function runDiagnostic() {
+    return runAgentAndWatch('investigate', 'credential-health-agent', {
+      reason: error || blockers.map(b => b.reason).join(', ') || 'User requested investigation',
+      failing_agent: info.slug,
+    });
+  }
+
   async function runFix() {
-    if (!clientId) return;
-    setRunning(true);
-    try {
-      // Route to code-fix-agent if available, otherwise app-qa-agent for UI issues, otherwise technical-seo-crawl-agent for site issues
-      await api(`/runs/execute`, {
-        method: 'POST',
-        body: {
-          clientId,
-          agentSlug: 'code-fix-agent',
-          taskPayload: {
-            triggered_by: 'mission_control_inspector',
-            failing_agent: info.slug,
-            error_to_fix: error || blockers.map(b => b.reason).join(', '),
-            last_run_id: details?.id,
-          },
-        },
-      });
-      setTimeout(() => onClose?.(), 500);
-    } catch (e) {
-      alert(`Fix agent unavailable or failed: ${e.message}`);
-    } finally {
-      setRunning(false);
-    }
+    return runAgentAndWatch('fix', 'code-fix-agent', {
+      failing_agent: info.slug,
+      error_to_fix: error || blockers.map(b => b.reason).join(', '),
+      last_run_id: details?.id,
+    });
   }
 
   return (
@@ -473,8 +486,73 @@ function AgentInspector({ info, clientId, onClose, onNavigate }) {
           </div>
         )}
 
+        {/* ACTION RESULT — shown when a button was clicked and we're polling/done */}
+        {actionState && (
+          <div style={{
+            background: actionState.status === 'success' ? '#10B98115'
+              : actionState.status === 'failed' || actionState.status === 'error' ? '#FF174415'
+              : actionState.status === 'blocked' ? '#FFAB0015'
+              : '#4285F415',
+            border: `1px solid ${
+              actionState.status === 'success' ? '#10B98155'
+              : actionState.status === 'failed' || actionState.status === 'error' ? '#FF174455'
+              : actionState.status === 'blocked' ? '#FFAB0055'
+              : '#4285F455'
+            }`,
+            borderRadius: 8, padding: 14, marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 10, letterSpacing: 2, fontWeight: 700, marginBottom: 8,
+              color: actionState.status === 'success' ? '#10B981'
+                : actionState.status === 'failed' || actionState.status === 'error' ? '#FF1744'
+                : actionState.status === 'blocked' ? '#FFAB00'
+                : '#4285F4',
+            }}>
+              {actionState.kind === 'fix' ? '🔧 CODE FIX AGENT' : '🔍 CREDENTIAL HEALTH AGENT'} — {actionState.status?.toUpperCase()}
+            </div>
+            {['starting', 'running'].includes(actionState.status) && (
+              <div style={{ fontSize: 11, color: '#cfd6e6', lineHeight: 1.5 }}>
+                <span style={{ display: 'inline-block', animation: 'pulse 1.2s ease-in-out infinite', marginRight: 8 }}>●</span>
+                Agent is running{actionState.runId ? ` (run ${actionState.runId.slice(0, 8)})` : ''}. This can take 30–60 seconds. Watching for the result...
+              </div>
+            )}
+            {actionState.status === 'success' && actionState.result && (
+              <div>
+                <div style={{ fontSize: 11, color: '#10B981', marginBottom: 6 }}>✓ Run completed successfully</div>
+                {actionState.result.output?.summary && (
+                  <div style={{ fontSize: 10, color: '#cfd6e6', lineHeight: 1.5 }}>{actionState.result.output.summary}</div>
+                )}
+                {Array.isArray(actionState.result.output?.actions_taken) && actionState.result.output.actions_taken.length > 0 && (
+                  <div style={{ marginTop: 8, fontSize: 10, color: dark.textMuted }}>
+                    Actions: {actionState.result.output.actions_taken.map((a,i) => <div key={i}>• {typeof a === 'string' ? a : a.action || JSON.stringify(a).slice(0,80)}</div>)}
+                  </div>
+                )}
+              </div>
+            )}
+            {actionState.status === 'blocked' && actionState.result && (
+              <div style={{ fontSize: 11, color: '#fde68a', lineHeight: 1.5 }}>
+                Agent could not run — it ran into the same type of problem: {actionState.result.output?.message || actionState.result.error || 'preflight blocked'}.
+              </div>
+            )}
+            {actionState.status === 'partial' && actionState.result?.output?._truth_warning && (
+              <div style={{ fontSize: 11, color: '#fde68a', lineHeight: 1.5 }}>
+                ⚠ {actionState.result.output._truth_warning}
+              </div>
+            )}
+            {['failed', 'error'].includes(actionState.status) && (
+              <div style={{ fontSize: 11, color: '#fecaca', lineHeight: 1.5 }}>
+                {actionState.error || actionState.result?.error || 'Agent run failed. Check the full run details for more info.'}
+              </div>
+            )}
+            {actionState.status === 'timeout' && (
+              <div style={{ fontSize: 11, color: '#fde68a', lineHeight: 1.5 }}>
+                Still running after 2 minutes. The run is queued — check back later in the Runs view.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ACTION BUTTONS */}
-        {!loading && (isError || isBlocked) && (
+        {!loading && (isError || isBlocked) && !actionState && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {isBlocked && (
               <button

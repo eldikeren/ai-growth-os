@@ -393,12 +393,27 @@ router.post('/runs/:id/retry', async (req, res) => {
 
 router.get('/clients/:clientId/runs', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    let q = supabase
       .from('runs')
       .select('*, agent_templates(name, slug, lane, role_type)')
       .eq('client_id', req.params.clientId)
       .order('created_at', { ascending: false })
       .limit(parseInt(req.query.limit) || 50);
+
+    // Filter by agent_slug if provided (used by Mission Control inspector)
+    if (req.query.agent_slug) {
+      // Look up the agent_template_id by slug first, then filter
+      const { data: tpl } = await supabase.from('agent_templates')
+        .select('id').eq('slug', req.query.agent_slug).maybeSingle();
+      if (tpl?.id) {
+        q = q.eq('agent_template_id', tpl.id);
+      } else {
+        // Unknown slug → return empty rather than all rows
+        return res.json([]);
+      }
+    }
+
+    const { data, error } = await q;
     if (error) throw error;
     res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -984,6 +999,24 @@ router.get('/clients/:clientId/baselines', async (req, res) => {
         else if (ageHours < 72) freshness = 'stale';
         else freshness = 'critical_stale';
       }
+
+      // TRUTH ENFORCEMENT: if the source string explicitly says "STALE" or contains
+      // a multi-day-old cache marker, downgrade the freshness regardless of recorded_at.
+      // This prevents "Up to date" lies when a stale cache was recently copied.
+      const src = String(b.source || '').toLowerCase();
+      if (src.includes('stale') || /\d+d old/.test(src) || src.includes('cache')) {
+        // The source is explicitly marked as a cache or stale — downgrade freshness
+        if (src.includes('stale')) freshness = 'critical_stale';
+        else if (src.includes('cache') && freshness === 'fresh') freshness = 'stale';
+      }
+
+      const freshnessLabel =
+        freshness === 'fresh' ? 'Up to date'
+        : freshness === 'aging' ? 'Updated today'
+        : freshness === 'stale' ? (ageHours >= 24 ? `${Math.round(ageHours / 24)}d since last sync` : 'Data may be stale')
+        : freshness === 'critical_stale' ? (ageHours >= 24 ? `${Math.round(ageHours / 24)}d — needs refresh` : 'Needs refresh')
+        : 'Never synced';
+
       return {
         ...b,
         provenance: {
@@ -991,7 +1024,7 @@ router.get('/clients/:clientId/baselines', async (req, res) => {
           last_sync: b.recorded_at || null,
           age_hours: ageHours,
           freshness,
-          freshness_label: freshness === 'fresh' ? 'Up to date' : freshness === 'aging' ? 'Updated today' : freshness === 'stale' ? `${Math.round(ageHours / 24)}d since last sync` : freshness === 'critical_stale' ? `${Math.round(ageHours / 24)}d — needs refresh` : 'Never synced',
+          freshness_label: freshnessLabel,
         }
       };
     });
@@ -1535,7 +1568,10 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
           }
         }
 
-        // Fallback 2: use cached DataForSEO response if we have one (already verified data)
+        // Fallback 2: use cached DataForSEO response — BUT preserve the original
+        // cache timestamp so the freshness label reflects the real age of the data,
+        // not the time we copied it. "Up to date" must mean the data is current,
+        // not that we recently re-stamped a stale cache.
         if (!reviewsFound) {
           const { data: cached } = await supabase.from('baselines')
             .select('metric_value, metric_text, recorded_at')
@@ -1545,10 +1581,38 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
               const cachedData = typeof cached.metric_value === 'object' ? cached.metric_value : JSON.parse(cached.metric_text || '{}');
               const count = cachedData.total_reviews || 0;
               const rating = cachedData.rating || 0;
+              const cacheAgeHours = cached.recorded_at ? (Date.now() - new Date(cached.recorded_at).getTime()) / 3600000 : null;
+
               if (count > 0) {
-                await storeMetric('google_reviews_count', count, `${count} reviews`, 'DataForSEO cache', null);
-                if (rating > 0) await storeMetric('google_reviews_rating', rating, `${rating}/5`, 'DataForSEO cache', 5);
-                results.push({ metric: 'google_reviews_count', value: count, rating, source: 'DataForSEO cache', status: 'ok' });
+                // CRITICAL: preserve the original cache timestamp. If the cache is older
+                // than 48h, this metric is STALE — it must not be shown as "Up to date".
+                const origRecordedAt = cached.recorded_at;
+                const sourceLabel = cacheAgeHours !== null && cacheAgeHours > 48
+                  ? `DataForSEO cache (${Math.round(cacheAgeHours/24)}d old — STALE)`
+                  : 'DataForSEO cache';
+                await supabase.from('baselines').upsert({
+                  client_id: clientId,
+                  metric_name: 'google_reviews_count',
+                  metric_value: count,
+                  metric_text: `${count} reviews`,
+                  metric_value_numeric: count,
+                  source: sourceLabel,
+                  recorded_at: origRecordedAt,        // <-- preserve original age, DO NOT re-stamp
+                  target_value: null,
+                }, { onConflict: 'client_id,metric_name' });
+                if (rating > 0) {
+                  await supabase.from('baselines').upsert({
+                    client_id: clientId,
+                    metric_name: 'google_reviews_rating',
+                    metric_value: rating,
+                    metric_text: `${rating}/5`,
+                    metric_value_numeric: rating,
+                    source: sourceLabel,
+                    recorded_at: origRecordedAt,
+                    target_value: 5,
+                  }, { onConflict: 'client_id,metric_name' });
+                }
+                results.push({ metric: 'google_reviews_count', value: count, rating, source: sourceLabel, status: 'ok', cache_age_hours: Math.round(cacheAgeHours || 0) });
                 reviewsFound = true;
               }
             } catch (_) {}

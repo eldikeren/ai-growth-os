@@ -7,6 +7,7 @@ import additionalRoutes from './routes/additional.js';
 import magicLinkRoutes from './routes/magic-link.js';
 import onboardingRoutes from './routes/onboarding.js';
 import websiteAccessRoutes from './routes/website-access.js';
+import gt3Routes from './routes/gt3.js';
 dotenv.config();
 const app = express();
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -18,6 +19,7 @@ app.use('/api', additionalRoutes);
 app.use('/api', magicLinkRoutes);
 app.use('/api', onboardingRoutes);
 app.use('/api', websiteAccessRoutes);
+app.use('/api', gt3Routes);
 // Serve onboarding portal as static HTML
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';

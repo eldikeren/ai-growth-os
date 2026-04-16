@@ -563,16 +563,22 @@ export async function syncBacklinkIntelligence(clientId) {
     }
 
     // Merge all SERP results from multiple queries, deduplicate by URL
+    // Track which query found each result — name-based results are trusted more
     const allSerpItems = [];
     const seenUrls = new Set();
-    for (const query of searchQueries) {
+    const nameQueryUrls = new Set(); // URLs found by the name-based query
+    for (let qi = 0; qi < searchQueries.length; qi++) {
+      const query = searchQueries[qi];
       try {
         const serpResult = await _dfsPost('https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
           [{ keyword: query, location_code: 2376, language_code: profile?.language === 'he' ? 'he' : 'en', depth: 30 }]);
         for (const item of (serpResult.items || [])) {
-          if (item.type === 'organic' && !seenUrls.has(item.url)) {
-            seenUrls.add(item.url);
-            allSerpItems.push(item);
+          if (item.type === 'organic') {
+            if (qi > 0) nameQueryUrls.add(item.url); // name-based query
+            if (!seenUrls.has(item.url)) {
+              seenUrls.add(item.url);
+              allSerpItems.push(item);
+            }
           }
         }
         await new Promise(r => setTimeout(r, 300));
@@ -581,11 +587,15 @@ export async function syncBacklinkIntelligence(clientId) {
     const serpItems = allSerpItems;
     const discoveredLinks = [];
 
-    for (const item of serpItems.slice(0, 20)) {
-      const sourceUrl = item.url;
-      const sourceDomain = item.domain || (new URL(sourceUrl)).hostname.replace(/^www\./, '');
+    // Skip social media and the client's own domain
+    const skipDomains = new Set([clientDomain, 'facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com']);
 
-      // Skip if this domain is already in our backlinks from DataForSEO
+    for (const item of serpItems.slice(0, 30)) {
+      const sourceUrl = item.url;
+      const sourceDomain = (item.domain || (() => { try { return new URL(sourceUrl).hostname; } catch { return ''; } })()).replace(/^www\./, '');
+
+      // Skip social media and client's own domain
+      if (skipDomains.has(sourceDomain) || [...skipDomains].some(sd => sourceDomain.endsWith('.' + sd))) continue;
       if (sourceDomain === clientDomain) continue;
 
       try {
@@ -647,13 +657,19 @@ export async function syncBacklinkIntelligence(clientId) {
         // Rate limit: small pause between fetches
         await new Promise(r => setTimeout(r, 300));
       } catch (fetchErr) {
-        // Fallback for paywalled / bot-protected sites: if the SERP snippet or title
-        // mentions the client domain or name, trust it as a likely backlink
+        // Fallback for paywalled / bot-protected sites:
+        // 1. If this URL came from the name-based search query, trust it — Google found
+        //    this page by searching the client name, so it's highly relevant
+        // 2. If the snippet/title mentions the client domain, trust it
+        const fromNameQuery = nameQueryUrls.has(sourceUrl);
         const snippet = (item.description || '') + ' ' + (item.title || '');
-        const domainInSnippet = snippet.toLowerCase().includes(clientDomain.toLowerCase());
+        const domainSlug = clientDomain.split('.')[0]; // e.g. "yanivgil" from "yanivgil.co.il"
+        const domainInSnippet = snippet.toLowerCase().includes(clientDomain.toLowerCase()) ||
+          snippet.toLowerCase().includes(domainSlug.toLowerCase());
         const nameInSnippet = clientNameClean && clientNameClean.length > 2 &&
-          snippet.includes(clientNameClean);
-        if (domainInSnippet || nameInSnippet) {
+          snippet.toLowerCase().includes(clientNameClean.toLowerCase());
+
+        if (fromNameQuery || domainInSnippet || nameInSnippet) {
           discoveredLinks.push({
             client_id: clientId,
             source_domain: sourceDomain,

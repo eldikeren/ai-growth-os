@@ -592,9 +592,13 @@ export async function syncBacklinkIntelligence(clientId) {
         // Fetch the page and check for actual links to the client domain
         const pageRes = await fetch(sourceUrl, {
           signal: AbortSignal.timeout(8000),
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AIGrowthOS/1.0)' },
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml',
+            'Accept-Language': 'he,en;q=0.9',
+          },
         });
-        if (!pageRes.ok) continue;
+        if (!pageRes.ok) throw new Error(`HTTP ${pageRes.status}`);
         const html = await pageRes.text();
 
         // Find all links to the client domain
@@ -643,7 +647,27 @@ export async function syncBacklinkIntelligence(clientId) {
         // Rate limit: small pause between fetches
         await new Promise(r => setTimeout(r, 300));
       } catch (fetchErr) {
-        // Skip pages that can't be fetched (paywall, timeout, etc.)
+        // Fallback for paywalled / bot-protected sites: if the SERP snippet or title
+        // mentions the client domain or name, trust it as a likely backlink
+        const snippet = (item.description || '') + ' ' + (item.title || '');
+        const domainInSnippet = snippet.toLowerCase().includes(clientDomain.toLowerCase());
+        const nameInSnippet = clientNameClean && clientNameClean.length > 2 &&
+          snippet.includes(clientNameClean);
+        if (domainInSnippet || nameInSnippet) {
+          discoveredLinks.push({
+            client_id: clientId,
+            source_domain: sourceDomain,
+            source_url: sourceUrl,
+            target_url: `https://${clientDomain}`,
+            anchor_text: item.title || null,
+            domain_authority: Math.min(100, Math.round((item.rank_absolute || item.rank_group || 0) * 3)),
+            page_authority: 0,
+            is_dofollow: true, // assume dofollow unless verified otherwise
+            is_sponsored: false,
+            first_seen: new Date().toISOString(),
+            last_seen: new Date().toISOString(),
+          });
+        }
         continue;
       }
     }

@@ -172,6 +172,12 @@ export const NAV_GROUPS = [
     ],
   },
   {
+    label: 'Tasks & Ideas',
+    items: [
+      { id: 'tasks', label: 'Tasks & Ideas', emoji: '📝' },
+    ],
+  },
+  {
     label: 'Content',
     items: [
       { id: 'reports', label: 'Reports', emoji: '📈' },

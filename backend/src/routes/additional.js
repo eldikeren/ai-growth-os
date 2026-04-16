@@ -3107,4 +3107,268 @@ IMPORTANT RULES:
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ════════════════════════════════════════════════════════════════
+// TASKS & IDEAS — Per-client task board with AI assistance
+// ════════════════════════════════════════════════════════════════
+
+// ── LIST TASKS ──────────────────────────────────────────────────
+router.get('/clients/:clientId/tasks', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { status, type, limit } = req.query;
+    let q = supabase.from('client_tasks').select('*').eq('client_id', clientId);
+    if (status && status !== 'all') q = q.eq('status', status);
+    if (type && type !== 'all') q = q.eq('type', type);
+    q = q.order('sort_order', { ascending: true })
+         .order('created_at', { ascending: false })
+         .limit(parseInt(limit) || 200);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET SINGLE TASK WITH COMMENTS ───────────────────────────────
+router.get('/clients/:clientId/tasks/:taskId', async (req, res) => {
+  try {
+    const { clientId, taskId } = req.params;
+    const [{ data: task }, { data: comments }] = await Promise.all([
+      supabase.from('client_tasks').select('*').eq('id', taskId).eq('client_id', clientId).single(),
+      supabase.from('client_task_comments').select('*').eq('task_id', taskId).order('created_at'),
+    ]);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json({ ...task, comments: comments || [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── CREATE TASK ─────────────────────────────────────────────────
+router.post('/clients/:clientId/tasks', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { title, description, type, category, priority, due_date, tags, related_url, notes } = req.body;
+    if (!title?.trim()) return res.status(400).json({ error: 'Title is required' });
+    const { data, error } = await supabase.from('client_tasks').insert({
+      client_id: clientId,
+      title: title.trim(),
+      description: description || null,
+      type: type || 'task',
+      category: category || 'general',
+      priority: priority || 'medium',
+      due_date: due_date || null,
+      tags: tags || [],
+      related_url: related_url || null,
+      notes: notes || null,
+      status: 'open',
+    }).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── UPDATE TASK ─────────────────────────────────────────────────
+router.patch('/clients/:clientId/tasks/:taskId', async (req, res) => {
+  try {
+    const { clientId, taskId } = req.params;
+    const allowed = ['title', 'description', 'type', 'category', 'status', 'priority',
+      'due_date', 'tags', 'related_url', 'notes', 'assigned_to', 'sort_order'];
+    const updates = {};
+    for (const k of allowed) { if (req.body[k] !== undefined) updates[k] = req.body[k]; }
+    updates.updated_at = new Date().toISOString();
+    // Auto-set completed_at when marking done
+    if (updates.status === 'done' && !req.body.completed_at) {
+      updates.completed_at = new Date().toISOString();
+    } else if (updates.status && updates.status !== 'done') {
+      updates.completed_at = null;
+    }
+    const { data, error } = await supabase.from('client_tasks')
+      .update(updates).eq('id', taskId).eq('client_id', clientId).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── DELETE TASK ──────────────────────────────────────────────────
+router.delete('/clients/:clientId/tasks/:taskId', async (req, res) => {
+  try {
+    const { taskId, clientId } = req.params;
+    await supabase.from('client_tasks').delete().eq('id', taskId).eq('client_id', clientId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── ADD COMMENT TO TASK ─────────────────────────────────────────
+router.post('/clients/:clientId/tasks/:taskId/comments', async (req, res) => {
+  try {
+    const { clientId, taskId } = req.params;
+    const { content, author } = req.body;
+    if (!content?.trim()) return res.status(400).json({ error: 'Content is required' });
+    const { data, error } = await supabase.from('client_task_comments').insert({
+      task_id: taskId, client_id: clientId,
+      content: content.trim(), author: author || 'admin',
+    }).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── AI ANALYZE TASK / IDEA ──────────────────────────────────────
+// Uses Claude to evaluate an idea, suggest improvements, or create an action plan
+router.post('/clients/:clientId/tasks/:taskId/ai-analyze', async (req, res) => {
+  try {
+    const { clientId, taskId } = req.params;
+
+    // Get task
+    const { data: task } = await supabase.from('client_tasks')
+      .select('*').eq('id', taskId).eq('client_id', clientId).single();
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    // Get client context
+    const { data: client } = await supabase.from('clients')
+      .select('name, domain, business_type, target_audience, niche, language, country')
+      .eq('id', clientId).single();
+
+    const { data: profile } = await supabase.from('client_profiles')
+      .select('business_type, industry, language').eq('client_id', clientId).maybeSingle();
+
+    // Get memory for context
+    const { data: memories } = await supabase.from('memory_items')
+      .select('key, value').eq('client_id', clientId).limit(15);
+    const memCtx = (memories || []).map(m => `${m.key}: ${m.value}`).join('\n');
+
+    // Get SEO data for context
+    const { data: seoData } = await supabase.from('seo_data')
+      .select('page_url, seo_title, meta_description, h1_text')
+      .eq('client_id', clientId).limit(10);
+    const seoCtx = (seoData || []).map(s =>
+      `${s.page_url}: title="${s.seo_title}" h1="${s.h1_text}"`
+    ).join('\n');
+
+    // Get existing tasks for context
+    const { data: otherTasks } = await supabase.from('client_tasks')
+      .select('title, type, status, priority, category')
+      .eq('client_id', clientId).neq('id', taskId).limit(10);
+    const tasksCtx = (otherTasks || []).map(t =>
+      `[${t.status}] ${t.type}: ${t.title} (${t.priority})`
+    ).join('\n');
+
+    const lang = profile?.language || client?.language || 'he';
+
+    const prompt = `You are an expert digital growth consultant specializing in web, SEO, marketing and business strategy. A client has submitted the following ${task.type || 'task'}. Analyze it and provide actionable guidance.
+
+CLIENT:
+- Business: ${client?.name || 'Unknown'} (${client?.domain || 'Unknown'})
+- Industry: ${profile?.business_type || client?.business_type || 'Unknown'}
+- Niche: ${client?.niche || 'Unknown'}
+- Country: ${client?.country || 'IL'}
+- Language: ${lang}
+
+THE ${(task.type || 'task').toUpperCase()}:
+Title: ${task.title}
+Description: ${task.description || 'No description'}
+Category: ${task.category || 'general'}
+Priority: ${task.priority || 'medium'}
+Related URL: ${task.related_url || 'None'}
+Notes: ${task.notes || 'None'}
+
+CLIENT MEMORY/CONTEXT:
+${memCtx || 'None'}
+
+CURRENT WEBSITE SEO:
+${seoCtx || 'No SEO data'}
+
+OTHER OPEN TASKS:
+${tasksCtx || 'None'}
+
+Provide your analysis in ${lang === 'he' ? 'Hebrew' : 'English'}. Return ONLY a valid JSON object (no markdown, no backticks):
+{
+  "evaluation": "Your overall assessment of this ${task.type || 'task'} — is it a good idea? What's the potential impact?",
+  "feasibility": "high/medium/low — how easy is this to implement?",
+  "impact": "high/medium/low — what's the expected business impact?",
+  "recommended_priority": "low/medium/high/critical",
+  "action_plan": [
+    { "step": 1, "action": "Specific action to take", "details": "How to do it", "effort": "small/medium/large" },
+    { "step": 2, "action": "Next action", "details": "Details", "effort": "small" }
+  ],
+  "suggestions": "Additional improvements or related ideas the client should consider",
+  "risks": "Any risks or things to watch out for",
+  "estimated_timeline": "How long this would take to implement (e.g. '2-3 days', '1 week')"
+}`;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'AI not configured' });
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const aiData = await aiRes.json();
+    const text = aiData?.content?.[0]?.text || '';
+
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const analysis = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+
+      // Save AI analysis to the task
+      await supabase.from('client_tasks').update({
+        ai_analysis: analysis.evaluation || text,
+        ai_action_plan: analysis,
+        ai_analyzed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq('id', taskId);
+
+      // Add as AI comment
+      await supabase.from('client_task_comments').insert({
+        task_id: taskId, client_id: clientId,
+        content: analysis.evaluation || text,
+        author: 'ai', is_ai_response: true,
+      });
+
+      // Update priority if AI recommends differently
+      if (analysis.recommended_priority && analysis.recommended_priority !== task.priority) {
+        await supabase.from('client_tasks').update({
+          priority: analysis.recommended_priority,
+        }).eq('id', taskId);
+      }
+
+      res.json({ success: true, analysis });
+    } catch (parseErr) {
+      // Save raw text if JSON parsing fails
+      await supabase.from('client_tasks').update({
+        ai_analysis: text,
+        ai_analyzed_at: new Date().toISOString(),
+      }).eq('id', taskId);
+      await supabase.from('client_task_comments').insert({
+        task_id: taskId, client_id: clientId,
+        content: text, author: 'ai', is_ai_response: true,
+      });
+      res.json({ success: true, analysis: { evaluation: text } });
+    }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── BULK UPDATE TASKS STATUS ────────────────────────────────────
+router.post('/clients/:clientId/tasks/bulk-update', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { ids, status } = req.body;
+    if (!ids?.length) return res.status(400).json({ error: 'No task IDs provided' });
+    const updates = { status, updated_at: new Date().toISOString() };
+    if (status === 'done') updates.completed_at = new Date().toISOString();
+    else updates.completed_at = null;
+    const { error } = await supabase.from('client_tasks')
+      .update(updates).in('id', ids).eq('client_id', clientId);
+    if (error) throw error;
+    res.json({ success: true, updated: ids.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 export default router;

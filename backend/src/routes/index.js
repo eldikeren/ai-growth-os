@@ -1515,7 +1515,28 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
               } catch (_) { /* skip individual keyword errors */ }
             }
           } else {
-            results.push({ metric: 'page1_keyword_count', status: 'api_error', detail: `GSC returned ${gscRes.status}` });
+            const gscErrBody = await gscRes.text().catch(() => '');
+            const gscErrMsg = (() => { try { return JSON.parse(gscErrBody)?.error?.message || ''; } catch { return gscErrBody.slice(0, 200); } })();
+            // 403 can be transient (quota) — retry once after 2s
+            if (gscRes.status === 403 && !gscErrMsg.includes('insufficientPermissions')) {
+              await new Promise(r => setTimeout(r, 2000));
+              const gscRetry = await fetchWithTimeout(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(propertyUrl)}/searchAnalytics/query`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${gscToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ startDate, endDate, dimensions: ['query'], rowLimit: 500, startRow: 0 })
+              });
+              if (gscRetry.ok) {
+                const retryData = await gscRetry.json();
+                const rows = retryData.rows || [];
+                const page1Keywords = rows.filter(r => r.position <= 10).length;
+                await storeMetric('page1_keyword_count', page1Keywords, `${page1Keywords} keywords`, 'Google Search Console API', null);
+                results.push({ metric: 'page1_keyword_count', value: page1Keywords, total: rows.length, source: 'GSC API (retry)', status: 'ok' });
+              } else {
+                results.push({ metric: 'page1_keyword_count', status: 'api_error', detail: `GSC returned ${gscRes.status}: ${gscErrMsg}` });
+              }
+            } else {
+              results.push({ metric: 'page1_keyword_count', status: 'api_error', detail: `GSC returned ${gscRes.status}: ${gscErrMsg}` });
+            }
           }
         } else {
           results.push({ metric: 'page1_keyword_count', status: 'no_property', detail: 'No GSC property selected — check integration_assets' });

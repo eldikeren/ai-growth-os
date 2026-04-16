@@ -1,3 +1,4 @@
+import * as Phaser from 'phaser';
 import { createCharacterCanvas, FRAME_W, FRAME_H } from './sprites.js';
 import { calculateDeskPositions, LANE_CONFIG, DEFAULT_LANE, GRID_PADDING } from './layout.js';
 

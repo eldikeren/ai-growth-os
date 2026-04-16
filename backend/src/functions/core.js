@@ -7,6 +7,46 @@
 import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { getToolDefinitions, executeTool } from './tools.js';
+import { finalizeToolResult, runPreflight, classifyRunGrounding, DATA_QUALITY } from './truthEnvelope.js';
+
+// ── Map tool names to their source + asset extraction logic ──
+const TOOL_SOURCE_MAP = {
+  fetch_pagespeed:           (args, raw) => ({ source: 'pagespeed', source_asset_id: args?.url || raw?.url, checked_at: raw?.fetched_at }),
+  fetch_serp_rankings:       (args, raw) => ({ source: 'dataforseo_rankings', source_asset_id: args?.domain || args?.keyword, checked_at: raw?.fetched_at }),
+  fetch_backlink_data:       (args, raw) => ({ source: 'dataforseo_backlinks', source_asset_id: args?.target_domain || args?.domain, checked_at: raw?.fetched_at }),
+  fetch_gsc_search_analytics:(args, raw) => ({ source: 'gsc', source_asset_id: raw?.site_url || args?.site_url, checked_at: raw?.fetched_at }),
+  fetch_gsc_url_inspection:  (args, raw) => ({ source: 'gsc', source_asset_id: args?.url, checked_at: raw?.fetched_at }),
+  fetch_ga4_report:          (args, raw) => ({ source: 'ga4', source_asset_id: raw?.property_id || args?.property_id, checked_at: raw?.fetched_at }),
+  fetch_google_ads_data:     (args, raw) => ({ source: 'google_ads', source_asset_id: raw?.customer_id || args?.customer_id, checked_at: raw?.fetched_at }),
+  fetch_google_reviews:      (args, raw) => ({ source: 'gbp', source_asset_id: args?.place_id || raw?.place_id, checked_at: raw?.fetched_at }),
+  fetch_local_serp:          (args, raw) => ({ source: 'dataforseo_rankings', source_asset_id: args?.keyword, checked_at: raw?.fetched_at }),
+  scan_website:              (args, raw) => ({ source: 'scan', source_asset_id: args?.url || raw?.url, checked_at: raw?.scanned_at || raw?.fetched_at }),
+  search_perplexity:         (args, raw) => ({ source: 'perplexity', source_asset_id: args?.query, checked_at: raw?.fetched_at }),
+  ask_chatgpt_visibility:    (args, raw) => ({ source: 'perplexity', source_asset_id: args?.question, checked_at: raw?.fetched_at }),
+  submit_browser_task:       (args, raw) => ({ source: 'browser', source_asset_id: args?.task_type, checked_at: raw?.submitted_at }),
+};
+
+function wrapToolResult(toolName, args, raw) {
+  const extractor = TOOL_SOURCE_MAP[toolName];
+  const meta = extractor ? extractor(args, raw) : { source: 'internal' };
+  // Infer misconfiguration from common error messages
+  let data_quality = null;
+  let blocking_reason = null;
+  if (raw && typeof raw === 'object' && raw.error) {
+    const err = String(raw.error).toLowerCase();
+    if (err.includes('no selected') || err.includes('not configured') || err.includes('no credential') || err.includes('not connected')) {
+      data_quality = DATA_QUALITY.MISCONFIGURED;
+      blocking_reason = raw.error;
+    } else if (err.includes('timed_out') || raw.timed_out) {
+      data_quality = DATA_QUALITY.INVALID;
+      blocking_reason = 'tool_timeout';
+    } else {
+      data_quality = DATA_QUALITY.INVALID;
+      blocking_reason = raw.error;
+    }
+  }
+  return finalizeToolResult(raw, { ...meta, data_quality, blocking_reason });
+}
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -309,6 +349,38 @@ ${scopeGuardrails.map((g, i) => `--- GUARDRAIL ${i + 1} ---\n${g.content}`).join
 
   emitAgentEvent(clientId, agent, 'started', run.id, `${agent.name} started executing`);
 
+  // ──────────────────────────────────────────────────────────
+  // PREFLIGHT: Truth enforcement layer
+  // If the agent cannot produce verified output (missing
+  // connectors, missing selected assets, etc.), block the run
+  // BEFORE calling OpenAI. No more hallucinated authority.
+  // ──────────────────────────────────────────────────────────
+  try {
+    const preflight = await runPreflight(supabase, clientId, agent.slug);
+    if (!preflight.passed) {
+      const blockedOutput = {
+        status: 'execution_blocked',
+        reason: 'preflight_failed',
+        preflight,
+        blockers: preflight.blockers,
+        required_actions: preflight.blockers.map(b =>
+          b.kind === 'connector' ? `Connect or reselect ${b.provider} account` : `Complete client profile field: ${b.field}`
+        ),
+        message: `Agent ${agent.name} cannot run because required data sources are not verified. ${preflight.blockers.length} blocker(s).`,
+      };
+      await supabase.from('runs').update({
+        status: 'blocked',
+        output: blockedOutput,
+        completed_at: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+      }).eq('id', run.id);
+      emitAgentEvent(clientId, agent, 'blocked', run.id, `Preflight failed: ${preflight.blockers.map(b => b.reason).join(', ')}`, { blockers: preflight.blockers });
+      return { success: false, runId: run.id, output: blockedOutput, blocked: true };
+    }
+  } catch (pfErr) {
+    console.warn(`[PREFLIGHT] ${agent.slug} preflight errored, continuing anyway:`, pfErr.message);
+  }
+
   try {
     let output, outputText, tokensUsed = 0, promptTokens = 0, completionTokens = 0;
 
@@ -337,6 +409,7 @@ ${scopeGuardrails.map((g, i) => `--- GUARDRAIL ${i + 1} ---\n${g.content}`).join
     // 10. Call OpenAI WITH TOOL CALLING
     const tools = getToolDefinitions(agent.slug, clientId);
     const toolCallLog = []; // Track all tool calls for audit
+    const toolEnvelopes = []; // Truth envelopes for each tool call (used for grounding validation)
 
     const messages = [
       {
@@ -353,12 +426,32 @@ TOOL USAGE RULES:
 - You may call multiple tools in sequence — fetch data first, then act on it
 - Each tool call returns real results that you should incorporate into your analysis
 
+TRUTH ENVELOPE — READ CAREFULLY:
+Every tool response is wrapped with truth metadata:
+  { "_truth": "valid"|"empty"|"stale"|"invalid"|"misconfigured"|"unverified"|"BLOCKED",
+    "_source": "gsc"|"ga4"|"dataforseo_rankings"|... ,
+    "_checked_at": "ISO timestamp",
+    "_confidence": 0..1,
+    "data": ...the actual payload... }
+
+HARD RULES:
+- If _truth is "BLOCKED", "invalid", "misconfigured", "unverified", or "empty":
+  → DO NOT use that tool's data as factual basis for any claim.
+  → Note the missing source in your output under "data_gaps".
+  → If ALL your tools returned non-valid data, set status="execution_blocked" and
+    do NOT fabricate findings.
+- If _truth is "stale": you may reference the data but must label it as stale in your output.
+- Only make numeric claims (rankings, scores, counts) when a tool returned _truth="valid"
+  and you include the source in your "tools_used" array.
+
 FINAL OUTPUT RULES:
 - After all tool calls, produce your final response as valid JSON
 - Match the output contract specified in your instructions
-- Your final JSON response should reflect REAL data obtained from tool calls
+- Your final JSON response must include a "sources_used" array with {source, asset, checked_at}
+  for every numeric claim you make
 - Include a "tools_used" array listing which tools you called and what they returned
 - Include an "actions_taken" array listing what you changed/stored/created
+- Include a "data_gaps" array listing any sources that were blocked/empty/stale
 - Never add commentary outside the JSON structure`
       },
       { role: 'user', content: fullPrompt }
@@ -456,8 +549,12 @@ FINAL OUTPUT RULES:
             toolResult = { error: toolErr.message, tool: fnName, timed_out: true };
           }
 
+          // Wrap the raw result in the truth envelope (source/timestamp/quality/confidence)
+          const envelope = wrapToolResult(fnName, fnArgs, toolResult);
+          toolEnvelopes.push(envelope);
+
           // Track consecutive errors — if all tools in first iteration fail, abort early to save quota
-          if (toolResult?.error) {
+          if (envelope.blocking || toolResult?.error) {
             consecutiveToolErrors++;
           } else {
             consecutiveToolErrors = 0;
@@ -467,16 +564,35 @@ FINAL OUTPUT RULES:
             tool: fnName,
             args: fnArgs,
             result_preview: JSON.stringify(toolResult).slice(0, 500),
+            envelope: {
+              source: envelope.source,
+              data_quality: envelope.data_quality,
+              freshness_state: envelope.freshness_state,
+              confidence: envelope.confidence,
+              row_count: envelope.row_count,
+              blocking: envelope.blocking,
+              blocking_reason: envelope.blocking_reason,
+            },
             iteration
           });
 
-          emitAgentEvent(clientId, agent, 'tool_call', run.id, `Called ${fnName}`, { tool_name: fnName });
+          emitAgentEvent(clientId, agent, 'tool_call', run.id, `Called ${fnName} [${envelope.data_quality}]`, {
+            tool_name: fnName,
+            source: envelope.source,
+            data_quality: envelope.data_quality,
+            confidence: envelope.confidence,
+          });
+
+          // Tell the LLM about the envelope so it knows whether to trust the data
+          const contentForLLM = envelope.blocking
+            ? { _truth: 'BLOCKED', _reason: envelope.blocking_reason, _source: envelope.source, _do_not_use_as_fact: true, raw: toolResult }
+            : { _truth: envelope.data_quality, _source: envelope.source, _checked_at: envelope.checked_at, _confidence: envelope.confidence, data: toolResult };
 
           // Add tool result to messages
           messages.push({
             role: 'tool',
             tool_call_id: toolCall.id,
-            content: JSON.stringify(toolResult)
+            content: JSON.stringify(contentForLLM)
           });
         }
 
@@ -587,9 +703,30 @@ FINAL OUTPUT RULES:
       );
     }
 
+    // ──────────────────────────────────────────────────────────
+    // GROUNDING CLASSIFICATION: Did the agent base its output on
+    // real, valid data? If not, downgrade the status.
+    // ──────────────────────────────────────────────────────────
+    const grounding = classifyRunGrounding(toolEnvelopes);
+    output._grounding = grounding;
+    output._tool_envelopes_summary = toolEnvelopes.map(e => ({
+      source: e.source, asset: e.source_asset_id,
+      quality: e.data_quality, fresh: e.freshness_state,
+      confidence: e.confidence, rows: e.row_count,
+    }));
+
+    // If grounding is 'unsupported' (no valid sources) and the agent made claims,
+    // downgrade the run status so UI knows not to trust the output.
+    if (grounding.grounding === 'unsupported' && toolEnvelopes.length > 0) {
+      console.warn(`[TRUTH_GATE] Run ${run.id} marked invalid_output — no valid data sources backed the output`);
+      finalStatus = 'partial';
+      output._truth_warning = 'Output generated without any validated data source. Displayed as advisory only — do not treat as verified truth.';
+      emitAgentEvent(clientId, agent, 'failed', run.id, 'Output not grounded in valid data', grounding);
+    }
+
     // 12. CRITICAL: Save run output to DB IMMEDIATELY
     // Ensure finalStatus is a valid DB enum value — truthGate may return 'partial'
-    const VALID_STATUSES = ['running','success','failed','pending_approval','dry_run','cancelled','executed_pending_validation','validation_failed','partial'];
+    const VALID_STATUSES = ['running','success','failed','pending_approval','dry_run','cancelled','executed_pending_validation','validation_failed','partial','blocked'];
     if (!VALID_STATUSES.includes(finalStatus)) {
       console.warn(`[RUN_SAVE] Invalid status "${finalStatus}" — falling back to "success"`);
       finalStatus = 'success';

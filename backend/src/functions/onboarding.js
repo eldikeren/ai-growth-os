@@ -460,7 +460,7 @@ async function discoverGoogleAdsAccounts(accessToken, clientId) {
     ...(managerId ? { 'login-customer-id': managerId } : {}),
   };
   try {
-    const res = await fetch('https://googleads.googleapis.com/v19/customers:listAccessibleCustomers', { headers });
+    const res = await fetch('https://googleads.googleapis.com/v20/customers:listAccessibleCustomers', { headers });
     if (!res.ok) {
       const errText = await res.text();
       return { count: 0, error: `Google Ads listAccessibleCustomers failed: HTTP ${res.status} — ${errText.slice(0, 400)}` };

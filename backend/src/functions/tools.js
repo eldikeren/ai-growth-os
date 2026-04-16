@@ -2374,7 +2374,7 @@ export async function executeTool(toolName, args, clientId, runId) {
           ...(managerId ? { 'login-customer-id': managerId } : {}),
         };
         const resp = await fetchWithTimeout(
-          `https://googleads.googleapis.com/v19/customers/${customerId}/googleAds:search`,
+          `https://googleads.googleapis.com/v20/customers/${customerId}/googleAds:search`,
           { method: 'POST', headers: adsHeaders,
             body: JSON.stringify({ query: queries[reportType] }) },
           20000

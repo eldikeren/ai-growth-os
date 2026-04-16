@@ -235,6 +235,17 @@ router.post('/clients/:clientId/rediscover-google', async (req, res) => {
   }
 });
 
+// ── REDISCOVER META ASSETS ───────────────────────────────────
+router.post('/clients/:clientId/rediscover-meta', async (req, res) => {
+  try {
+    const { rediscoverMetaAssets } = await import('../functions/onboarding.js');
+    const results = await rediscoverMetaAssets(req.params.clientId);
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Select an integration asset (page, property, etc.)
 router.patch('/clients/:clientId/integration-assets/:assetId/select', async (req, res) => {
   try {

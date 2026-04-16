@@ -1211,6 +1211,41 @@ export async function rediscoverGoogleAssets(clientId, subProviders = ['search_c
 }
 
 // ============================================================
+// REDISCOVER META ASSETS (post-onboarding)
+// ============================================================
+export async function rediscoverMetaAssets(clientId) {
+  const { data: cred } = await supabase.from('oauth_credentials')
+    .select('*').eq('client_id', clientId).eq('provider', 'meta').single();
+  if (!cred?.access_token_encrypted) throw new Error('No Meta credentials found for this client');
+
+  // Meta stores a single IV (not colon-separated like Google)
+  const iv = cred.encryption_iv.includes(':') ? cred.encryption_iv.split(':')[0] : cred.encryption_iv;
+  const accessToken = decryptToken(cred.access_token_encrypted, iv);
+
+  // Verify token is still valid
+  const debugRes = await fetch(`https://graph.facebook.com/v19.0/me?fields=id,name&access_token=${accessToken}`);
+  if (!debugRes.ok) {
+    const errText = await debugRes.text();
+    throw new Error(`Meta token invalid or expired: ${errText}`);
+  }
+  const me = await debugRes.json();
+
+  // Discover pages and Instagram accounts
+  const discoveries = await discoverMetaAssets(accessToken, clientId);
+
+  // Update integration status
+  await supabase.from('client_integrations').upsert({
+    client_id: clientId, provider: 'meta', sub_provider: 'facebook',
+    status: discoveries.pages_found > 0 ? 'connected' : 'limited',
+    discovery_summary: discoveries,
+    external_account_name: me.name,
+    connected_at: new Date().toISOString()
+  }, { onConflict: 'client_id,provider,sub_provider' });
+
+  return { account_name: me.name, ...discoveries };
+}
+
+// ============================================================
 // REFRESH GOOGLE TOKEN
 // ============================================================
 export async function refreshGoogleToken(clientId) {

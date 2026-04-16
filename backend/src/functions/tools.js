@@ -549,6 +549,42 @@ export function getToolDefinitions(agentSlug, clientId) {
       },
       allowed_agents: ['facebook-agent', 'instagram-agent', 'google-ads-campaign-agent', 'content-distribution-agent', 'website-content-agent', 'seo-core-agent', 'cro-agent']
     },
+    // --- POST TO FACEBOOK PAGE ---
+    {
+      type: 'function',
+      function: {
+        name: 'post_to_facebook',
+        description: 'Publish a post to the client Facebook Business Page via the Meta Graph API. Supports text posts and photo posts with images. The post goes live immediately — use only AFTER approval. For drafts, use propose_website_change or store in content calendar.',
+        parameters: {
+          type: 'object',
+          properties: {
+            message: { type: 'string', description: 'Post text content (Hebrew). Include hashtags at the end.' },
+            image_url: { type: 'string', description: 'Optional: public URL of an image to attach. Use the URL returned by generate_premium_visual.' },
+            link: { type: 'string', description: 'Optional: URL to share as a link post (e.g. blog article link).' },
+            scheduled_publish_time: { type: 'number', description: 'Optional: Unix timestamp to schedule the post for future. Must be 10min-6months in the future.' },
+          },
+          required: ['message']
+        }
+      },
+      allowed_agents: ['facebook-agent', 'content-distribution-agent', 'master-orchestrator']
+    },
+    // --- REPLY TO GOOGLE REVIEW ---
+    {
+      type: 'function',
+      function: {
+        name: 'reply_to_review',
+        description: 'Reply to a Google Business Profile review via the GBP API. Use the review name/ID from fetch_google_reviews. Responds as the business owner.',
+        parameters: {
+          type: 'object',
+          properties: {
+            review_name: { type: 'string', description: 'The review resource name from GBP API (e.g. accounts/123/locations/456/reviews/789)' },
+            reply_text: { type: 'string', description: 'The reply text in Hebrew. Professional, thankful tone. Plural office voice.' },
+          },
+          required: ['review_name', 'reply_text']
+        }
+      },
+      allowed_agents: ['reviews-gbp-authority-agent', 'local-seo-agent', 'master-orchestrator']
+    },
     // --- BROWSER TASK SUBMISSION (MANUS) ---
     {
       type: 'function',
@@ -2230,6 +2266,86 @@ export async function executeTool(toolName, args, clientId, runId) {
           };
         } catch (e) {
           return { error: `Failed to scan ${url}: ${e.message}`, page_url: url };
+        }
+      }
+
+      // ========================================
+      // post_to_facebook
+      // ========================================
+      case 'post_to_facebook': {
+        if (!clientId) return { error: 'No client context' };
+        // Get page access token from integration_assets
+        const { data: fbAsset } = await supabase.from('integration_assets')
+          .select('external_id, metadata_json, label')
+          .eq('client_id', clientId).eq('provider', 'meta').eq('sub_provider', 'facebook')
+          .eq('is_selected', true).maybeSingle();
+        if (!fbAsset?.metadata_json?.page_access_token) {
+          return { error: 'No Facebook page connected or no page access token. Reconnect Meta OAuth and select the page.' };
+        }
+        const pageId = fbAsset.external_id;
+        const pageToken = fbAsset.metadata_json.page_access_token;
+        try {
+          let endpoint, body;
+          if (args.image_url) {
+            // Photo post
+            endpoint = `https://graph.facebook.com/v21.0/${pageId}/photos`;
+            body = new URLSearchParams({
+              url: args.image_url,
+              message: args.message || '',
+              access_token: pageToken,
+              ...(args.scheduled_publish_time ? { scheduled_publish_time: String(args.scheduled_publish_time), published: 'false' } : {}),
+            });
+          } else {
+            // Text/link post
+            endpoint = `https://graph.facebook.com/v21.0/${pageId}/feed`;
+            body = new URLSearchParams({
+              message: args.message,
+              access_token: pageToken,
+              ...(args.link ? { link: args.link } : {}),
+              ...(args.scheduled_publish_time ? { scheduled_publish_time: String(args.scheduled_publish_time), published: 'false' } : {}),
+            });
+          }
+          const resp = await fetchWithTimeout(endpoint, { method: 'POST', body }, 20000);
+          const data = await resp.json();
+          if (data.error) {
+            return { error: `Facebook API error: ${data.error.message}`, code: data.error.code };
+          }
+          return {
+            success: true,
+            post_id: data.id || data.post_id,
+            page: fbAsset.label,
+            scheduled: !!args.scheduled_publish_time,
+            posted_at: new Date().toISOString()
+          };
+        } catch (e) {
+          return { error: `Facebook post failed: ${e.message}` };
+        }
+      }
+
+      // ========================================
+      // reply_to_review (GBP)
+      // ========================================
+      case 'reply_to_review': {
+        if (!clientId) return { error: 'No client context' };
+        const googleToken = await getValidGoogleToken(clientId);
+        if (!googleToken) return { error: 'Google OAuth not connected or token expired' };
+        try {
+          const resp = await fetchWithTimeout(
+            `https://mybusiness.googleapis.com/v4/${args.review_name}/reply`,
+            {
+              method: 'PUT',
+              headers: { Authorization: `Bearer ${googleToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ comment: args.reply_text })
+            },
+            15000
+          );
+          const data = await resp.json();
+          if (!resp.ok) {
+            return { error: `GBP reply error ${resp.status}: ${data.error?.message || JSON.stringify(data)}` };
+          }
+          return { success: true, review_name: args.review_name, replied_at: new Date().toISOString() };
+        } catch (e) {
+          return { error: `GBP reply failed: ${e.message}` };
         }
       }
 

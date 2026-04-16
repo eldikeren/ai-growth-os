@@ -692,6 +692,45 @@ async function discoverMetaAssets(accessToken, clientId) {
       }
     }
   } catch (e) { console.error('Meta discovery error:', e.message); }
+
+  // Fallback: if me/accounts returned 0 pages, try via Business Manager
+  if (pagesFound === 0) {
+    try {
+      const bizRes = await fetch(`https://graph.facebook.com/v21.0/me/businesses?access_token=${accessToken}`);
+      if (bizRes.ok) {
+        const bizData = await bizRes.json();
+        for (const biz of (bizData.data || [])) {
+          // Try client_pages (pages the business has access to)
+          for (const endpoint of ['client_pages', 'owned_pages']) {
+            const pRes = await fetch(`https://graph.facebook.com/v21.0/${biz.id}/${endpoint}?fields=id,name,category,access_token,instagram_business_account{id,username}&access_token=${accessToken}`);
+            if (pRes.ok) {
+              const pData = await pRes.json();
+              for (const page of (pData.data || [])) {
+                pagesFound++;
+                await supabase.from('integration_assets').upsert({
+                  client_id: clientId, provider: 'meta', sub_provider: 'facebook',
+                  asset_type: 'page', external_id: page.id,
+                  label: page.name,
+                  metadata_json: { category: page.category, page_access_token: page.access_token, source: 'business_manager' },
+                  is_selected: pagesFound === 1
+                }, { onConflict: 'client_id,provider,external_id' });
+                if (page.instagram_business_account) {
+                  instagramFound++;
+                  await supabase.from('integration_assets').upsert({
+                    client_id: clientId, provider: 'meta', sub_provider: 'instagram',
+                    asset_type: 'profile', external_id: page.instagram_business_account.id,
+                    label: page.instagram_business_account.username || `Instagram (${page.name})`,
+                    is_selected: instagramFound === 1
+                  }, { onConflict: 'client_id,provider,external_id' });
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (e) { console.error('Meta business fallback error:', e.message); }
+  }
+
   return {
     pages_found: pagesFound,
     instagram_found: instagramFound,

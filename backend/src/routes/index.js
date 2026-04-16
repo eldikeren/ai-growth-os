@@ -223,6 +223,99 @@ router.get('/clients/:clientId/now-running', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── MISSION CONTROL STATE ─────────────────────────────────
+router.get('/clients/:clientId/mission-control/state', async (req, res) => {
+  try {
+    const clientId = req.params.clientId;
+    const now = Date.now();
+
+    const [assignmentsRes, runningRes, queuedRes, recentRes, eventsRes] = await Promise.all([
+      supabase.from('client_agent_assignments')
+        .select('enabled, last_run_at, run_count, agent_templates(id, name, slug, lane, role_type, is_active)')
+        .eq('client_id', clientId),
+      supabase.from('runs')
+        .select('id, status, created_at, updated_at, agent_template_id, agent_templates(name, slug, lane)')
+        .eq('client_id', clientId).eq('status', 'running')
+        .order('created_at', { ascending: false }),
+      supabase.from('run_queue')
+        .select('id, status, created_at, priority, agent_template_id, agent_templates(name, slug, lane)')
+        .eq('client_id', clientId).in('status', ['queued', 'blocked_dependency'])
+        .order('priority', { ascending: true }),
+      supabase.from('runs')
+        .select('id, status, created_at, updated_at, agent_template_id, error, agent_templates(name, slug, lane)')
+        .eq('client_id', clientId)
+        .in('status', ['success', 'failed', 'partial', 'pending_approval', 'executed_pending_validation'])
+        .gte('created_at', new Date(now - 24 * 60 * 60 * 1000).toISOString())
+        .order('created_at', { ascending: false }).limit(20),
+      supabase.from('agent_events')
+        .select('id, agent_slug, agent_name, lane, event_type, message, metadata, created_at')
+        .eq('client_id', clientId)
+        .order('created_at', { ascending: false }).limit(50),
+    ]);
+
+    const assignments = assignmentsRes.data || [];
+    const running = runningRes.data || [];
+    const queued = queuedRes.data || [];
+    const recent = recentRes.data || [];
+    const events = eventsRes.data || [];
+
+    // Build per-agent state maps
+    const runningByAgent = {};
+    for (const r of running) {
+      const slug = r.agent_templates?.slug;
+      if (slug) runningByAgent[slug] = { runId: r.id, status: 'running', startedAt: r.created_at, elapsedSeconds: Math.round((now - new Date(r.created_at).getTime()) / 1000) };
+    }
+    const queuedByAgent = {};
+    for (const q of queued) {
+      const slug = q.agent_templates?.slug;
+      if (slug && !queuedByAgent[slug]) queuedByAgent[slug] = { queueId: q.id, status: q.status === 'blocked_dependency' ? 'blocked' : 'queued', queuedAt: q.created_at };
+    }
+    const recentByAgent = {};
+    for (const r of recent) {
+      const slug = r.agent_templates?.slug;
+      if (slug && !recentByAgent[slug]) recentByAgent[slug] = { runId: r.id, status: r.status, completedAt: r.updated_at || r.created_at, error: r.error };
+    }
+
+    // Assemble agents with animation state
+    const agents = assignments.map(a => {
+      const t = a.agent_templates;
+      if (!t) return null;
+      const slug = t.slug;
+      let animState = 'idle', stateDetail = null;
+
+      if (runningByAgent[slug]) {
+        animState = 'working'; stateDetail = runningByAgent[slug];
+      } else if (queuedByAgent[slug]) {
+        animState = queuedByAgent[slug].status; stateDetail = queuedByAgent[slug];
+      } else if (recentByAgent[slug]) {
+        const r = recentByAgent[slug];
+        if (r.status === 'failed') animState = 'error';
+        else if (r.status === 'pending_approval') animState = 'reporting';
+        else if (r.status === 'executed_pending_validation') animState = 'validating';
+        else if (r.status === 'success' || r.status === 'partial') {
+          const completedAgo = (now - new Date(r.completedAt).getTime()) / 1000;
+          animState = completedAgo < 300 ? 'done' : 'idle';
+        }
+        stateDetail = r;
+      }
+
+      return { slug, name: t.name, lane: t.lane, roleType: t.role_type, enabled: a.enabled, isActive: t.is_active, lastRunAt: a.last_run_at, runCount: a.run_count, animState, stateDetail };
+    }).filter(Boolean);
+
+    const summary = {
+      total: agents.length,
+      working: agents.filter(a => a.animState === 'working').length,
+      queued: agents.filter(a => a.animState === 'queued').length,
+      done: agents.filter(a => a.animState === 'done').length,
+      errors: agents.filter(a => a.animState === 'error').length,
+      blocked: agents.filter(a => a.animState === 'blocked').length,
+      idle: agents.filter(a => a.animState === 'idle').length,
+    };
+
+    res.json({ agents, events, summary });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 router.get('/clients/:clientId/agents', async (req, res) => {
   try {
     const { data, error } = await supabase

@@ -32,6 +32,7 @@ const ProposedChangesView = lazy(() => import('./views/ProposedChangesView.jsx')
 const CampaignsView = lazy(() => import('./views/CampaignsView.jsx'));
 const TasksView = lazy(() => import('./views/TasksView.jsx'));
 const SocialView = lazy(() => import('./views/SocialView.jsx'));
+const MissionControlView = lazy(() => import('./views/MissionControlView.jsx'));
 
 function ViewLoader() {
   return (
@@ -236,6 +237,7 @@ export default function App() {
               {view === 'campaigns' && <CampaignsView clientId={clientId} />}
               {view === 'tasks' && <TasksView clientId={clientId} />}
               {view === 'social' && <SocialView clientId={clientId} />}
+              {view === 'mission-control' && <MissionControlView clientId={clientId} clients={clients} setClientId={setClientId} />}
             </div>
           </Suspense>
         )}

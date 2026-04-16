@@ -13,6 +13,24 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+// ── Agent event logger (for Mission Control live feed) ──
+async function emitAgentEvent(clientId, agent, eventType, runId, message, metadata = {}) {
+  try {
+    await supabase.from('agent_events').insert({
+      client_id: clientId,
+      agent_slug: agent.slug || agent,
+      agent_name: agent.name || agent,
+      lane: agent.lane || null,
+      event_type: eventType,
+      run_id: runId || null,
+      message,
+      metadata,
+    });
+  } catch (e) {
+    console.warn(`[EVENT_EMIT] Failed: ${e.message}`);
+  }
+}
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   timeout: 35000,    // 35s per call — tight budget to fit under 300s Vercel limit even in worst case
@@ -289,6 +307,8 @@ ${scopeGuardrails.map((g, i) => `--- GUARDRAIL ${i + 1} ---\n${g.content}`).join
 
   if (!run) throw new Error('Failed to create run record');
 
+  emitAgentEvent(clientId, agent, 'started', run.id, `${agent.name} started executing`);
+
   try {
     let output, outputText, tokensUsed = 0, promptTokens = 0, completionTokens = 0;
 
@@ -449,6 +469,8 @@ FINAL OUTPUT RULES:
             result_preview: JSON.stringify(toolResult).slice(0, 500),
             iteration
           });
+
+          emitAgentEvent(clientId, agent, 'tool_call', run.id, `Called ${fnName}`, { tool_name: fnName });
 
           // Add tool result to messages
           messages.push({
@@ -771,9 +793,18 @@ FINAL OUTPUT RULES:
       }
     }
 
+    const durationMs = Date.now() - startTime;
+    if (needsApproval) {
+      emitAgentEvent(clientId, agent, 'reporting', run.id, `Awaiting approval`);
+    } else {
+      emitAgentEvent(clientId, agent, 'completed', run.id, `Completed successfully`, { duration_ms: durationMs, tokens_used: tokensUsed });
+    }
+
     return { success: true, runId: run.id, output, needsApproval, triggeredValidation: triggerValidation };
 
   } catch (err) {
+    emitAgentEvent(clientId, agent, 'failed', run.id, `Failed: ${err.message}`, { error: err.message });
+
     await supabase.from('runs').update({
       status: 'failed',
       error: err.message,

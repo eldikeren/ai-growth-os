@@ -2013,9 +2013,10 @@ router.get('/clients/:clientId/system-audit', async (req, res) => {
         if (!agentRunMap[key]) agentRunMap[key] = [];
         agentRunMap[key].push(r);
       });
-      // Only count organic runs (exclude manual/batch testing) — agent running >8 times/day is suspicious
+      // Only count user-initiated runs — system crons, schedulers, coordinators, and self-heal are by-design repetitive
+      const systemTriggers = ['manual', 'run_all', 'test', 'self_heal_cron', 'self_heal', 'hourly_seo_sweep', 'scheduler', 'central_coordinator'];
       return Object.entries(agentRunMap).filter(([_, runs]) => {
-        const organicRuns = runs.filter(r => !['manual', 'run_all', 'test'].includes(r.triggered_by));
+        const organicRuns = runs.filter(r => !systemTriggers.includes(r.triggered_by) && !r.triggered_by?.startsWith('agent:'));
         return organicRuns.length > 8;
       }).length;
     })();

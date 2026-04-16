@@ -514,8 +514,7 @@ export async function syncBacklinkIntelligence(clientId) {
   // 4) Client BACKLINKS (per-link detail) → backlinks (replace, capped at 500)
   try {
     const bl = await _dfsPost('https://api.dataforseo.com/v3/backlinks/backlinks/live',
-      [{ target: clientDomain, limit: 500, order_by: ['rank,desc'], mode: 'as_is',
-         backlinks_filters: ['dofollow', '=', true] }]);
+      [{ target: clientDomain, limit: 500, order_by: ['rank,desc'], mode: 'as_is' }]);
     const items = bl.items || [];
     if (items.length > 0) {
       await supabase.from('backlinks').delete().eq('client_id', clientId);
@@ -546,6 +545,123 @@ export async function syncBacklinkIntelligence(clientId) {
       summary.tables_written.backlinks = rows.length;
     }
   } catch (e) { summary.errors.push(`backlinks: ${e.message}`); }
+
+  // 4b) GOOGLE-BASED BACKLINK DISCOVERY
+  // DataForSEO's backlink index misses many real links (especially from major news sites).
+  // Supplement by searching Google for pages that mention the client domain, then
+  // verify each result by fetching the page and checking for actual links.
+  try {
+    const searchQuery = `"${clientDomain}" -site:${clientDomain}`;
+    const serpResult = await _dfsPost('https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
+      [{ keyword: searchQuery, location_code: 2376, language_code: 'he', depth: 30 }]);
+    const serpItems = (serpResult.items || []).filter(i => i.type === 'organic');
+    const discoveredLinks = [];
+
+    for (const item of serpItems.slice(0, 20)) {
+      const sourceUrl = item.url;
+      const sourceDomain = item.domain || (new URL(sourceUrl)).hostname.replace(/^www\./, '');
+
+      // Skip if this domain is already in our backlinks from DataForSEO
+      if (sourceDomain === clientDomain) continue;
+
+      try {
+        // Fetch the page and check for actual links to the client domain
+        const pageRes = await fetch(sourceUrl, {
+          signal: AbortSignal.timeout(8000),
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AIGrowthOS/1.0)' },
+        });
+        if (!pageRes.ok) continue;
+        const html = await pageRes.text();
+
+        // Find all links to the client domain
+        const linkRegex = new RegExp(`href=["'](https?://(?:www\\.)?${clientDomain.replace(/\./g, '\\.')}[^"']*?)["']`, 'gi');
+        const anchors = [];
+        let match;
+        while ((match = linkRegex.exec(html)) !== null) {
+          // Extract anchor text (approximate — look for >text</a> after the href)
+          const hrefEnd = match.index + match[0].length;
+          const afterHref = html.slice(hrefEnd, hrefEnd + 500);
+          const closeTag = afterHref.indexOf('>');
+          const anchorEnd = afterHref.indexOf('</a>', closeTag);
+          let anchorText = '';
+          if (closeTag >= 0 && anchorEnd >= 0) {
+            anchorText = afterHref.slice(closeTag + 1, anchorEnd).replace(/<[^>]*>/g, '').trim();
+          }
+          // Check if nofollow
+          const linkTagStart = html.lastIndexOf('<a', match.index);
+          const linkTag = html.slice(linkTagStart, hrefEnd + 200);
+          const isNofollow = /rel=["'][^"']*nofollow[^"']*["']/i.test(linkTag);
+
+          anchors.push({
+            target_url: match[1],
+            anchor_text: anchorText || null,
+            is_dofollow: !isNofollow,
+          });
+        }
+
+        if (anchors.length > 0) {
+          // Use the first link found as representative
+          const primary = anchors[0];
+          discoveredLinks.push({
+            client_id: clientId,
+            source_domain: sourceDomain,
+            source_url: sourceUrl,
+            target_url: primary.target_url,
+            anchor_text: primary.anchor_text,
+            domain_authority: Math.min(100, Math.round((item.rank_absolute || item.rank_group || 0) * 3)),
+            page_authority: 0,
+            is_dofollow: primary.is_dofollow,
+            is_sponsored: false,
+            first_seen: new Date().toISOString(),
+            last_seen: new Date().toISOString(),
+          });
+        }
+        // Rate limit: small pause between fetches
+        await new Promise(r => setTimeout(r, 300));
+      } catch (fetchErr) {
+        // Skip pages that can't be fetched (paywall, timeout, etc.)
+        continue;
+      }
+    }
+
+    // Insert discovered backlinks (upsert to avoid duplicates with DataForSEO data)
+    if (discoveredLinks.length > 0) {
+      for (let i = 0; i < discoveredLinks.length; i += 200) {
+        await supabase.from('backlinks').upsert(
+          discoveredLinks.slice(i, i + 200),
+          { onConflict: 'client_id,source_domain,target_url' }
+        );
+      }
+      // Also add to referring_domains if not already there
+      const { data: existingRD } = await supabase.from('referring_domains')
+        .select('domain').eq('client_id', clientId);
+      const existingSet = new Set((existingRD || []).map(r => r.domain));
+      const newRDs = discoveredLinks
+        .filter(l => !existingSet.has(l.source_domain))
+        .map(l => ({
+          client_id: clientId,
+          domain: l.source_domain,
+          domain_authority: l.domain_authority,
+          backlink_count: 1,
+          dofollow_count: l.is_dofollow ? 1 : 0,
+          is_competitor: false,
+          first_seen: new Date().toISOString(),
+          last_updated: new Date().toISOString(),
+        }));
+      if (newRDs.length > 0) {
+        // Deduplicate by domain
+        const seen = new Set();
+        const deduped = newRDs.filter(r => { if (seen.has(r.domain)) return false; seen.add(r.domain); return true; });
+        await supabase.from('referring_domains').upsert(deduped, { onConflict: 'client_id,domain' });
+      }
+      summary.tables_written.google_discovered_backlinks = discoveredLinks.length;
+      summary.google_discovery = {
+        serp_results_checked: serpItems.length,
+        verified_backlinks_found: discoveredLinks.length,
+        domains: discoveredLinks.map(l => l.source_domain),
+      };
+    }
+  } catch (e) { summary.errors.push(`google_discovery: ${e.message}`); }
 
   // 5) COMPETITOR LINK GAP — per competitor, fetch their referring_domains and
   //    compute set-diff vs ours. Writes competitor_link_gap + missing_referring_domains.

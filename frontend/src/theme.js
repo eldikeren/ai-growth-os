@@ -141,6 +141,7 @@ export const NAV_GROUPS = [
     label: 'Overview',
     items: [
       { id: 'dashboard', label: 'Dashboard', emoji: '📊' },
+      { id: 'gt3', label: 'GT3 Command', emoji: '🎯' },
       { id: 'mission-control', label: 'Mission Control', emoji: '🎮' },
       { id: 'system-audit', label: 'System Audit', emoji: '🔬' },
       { id: 'verification', label: 'Verification', emoji: '✅' },

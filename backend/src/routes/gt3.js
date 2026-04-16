@@ -17,10 +17,22 @@ import { getGT3Supabase } from '../gt3/services/supabaseClient.js';
 
 const router = express.Router();
 
+// Helper: resolve legacy → gt3 id at the top of any pipeline route
+async function resolveOr404(req, res) {
+  const sb = getGT3Supabase();
+  const id = await resolveGt3Customer(sb, req.params.customerId);
+  if (!id) {
+    res.status(404).json({ error: 'No GT3 customer found. Legacy client needs to be onboarded to GT3 first.' });
+    return null;
+  }
+  return id;
+}
+
 // ─── Run full pipeline for a customer ───────────────────────
 router.post('/customers/:customerId/pipeline/run', async (req, res) => {
   try {
-    const { customerId } = req.params;
+    const customerId = await resolveOr404(req, res);
+    if (!customerId) return;
     const { skipCrawl, skipDiscovery, maxPages } = req.body || {};
     const report = await runGT3Pipeline(customerId, { skipCrawl, skipDiscovery, maxPages });
     res.json(report);
@@ -29,35 +41,72 @@ router.post('/customers/:customerId/pipeline/run', async (req, res) => {
 
 // ─── Individual pipeline stages ─────────────────────────────
 router.post('/customers/:customerId/pipeline/onboarding', async (req, res) => {
-  try { res.json(await ensureCustomerProfile(req.params.customerId, { refresh: !!req.body?.refresh })); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const id = await resolveOr404(req, res);
+    if (!id) return;
+    res.json(await ensureCustomerProfile(id, { refresh: !!req.body?.refresh }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/customers/:customerId/pipeline/crawl', async (req, res) => {
-  try { res.json(await crawlCustomerSite(req.params.customerId, req.body || {})); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const id = await resolveOr404(req, res);
+    if (!id) return;
+    res.json(await crawlCustomerSite(id, req.body || {}));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/customers/:customerId/pipeline/discover', async (req, res) => {
-  try { res.json(await discoverKeywords(req.params.customerId, req.body || {})); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const id = await resolveOr404(req, res);
+    if (!id) return;
+    res.json(await discoverKeywords(id, req.body || {}));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/customers/:customerId/pipeline/score', async (req, res) => {
-  try { res.json(await scoreAllKeywords(req.params.customerId, req.body || {})); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const id = await resolveOr404(req, res);
+    if (!id) return;
+    res.json(await scoreAllKeywords(id, req.body || {}));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/customers/:customerId/pipeline/plan', async (req, res) => {
-  try { res.json(await planMissions(req.params.customerId)); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const id = await resolveOr404(req, res);
+    if (!id) return;
+    res.json(await planMissions(id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Resolve legacy client_id → gt3 customer_id ─────────────
+async function resolveGt3Customer(sb, id) {
+  // Try as gt3 customer id first
+  const { data: byId } = await sb.from('gt3_customers').select('id').eq('id', id).maybeSingle();
+  if (byId) return byId.id;
+  // Fallback: resolve as legacy client id
+  const { data: byLegacy } = await sb.from('gt3_customers').select('id').eq('legacy_client_id', id).maybeSingle();
+  return byLegacy?.id || null;
+}
+
+router.get('/gt3/resolve-customer', async (req, res) => {
+  try {
+    const sb = getGT3Supabase();
+    const id = req.query.legacy_client_id || req.query.id;
+    const customerId = await resolveGt3Customer(sb, id);
+    res.json({ customer_id: customerId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── Command Center data endpoints (used by Phase 5 UI) ─────
+// Accepts either gt3 customer_id OR legacy client_id (resolves automatically)
 router.get('/customers/:customerId/gt3/dashboard', async (req, res) => {
   try {
     const sb = getGT3Supabase();
-    const cid = req.params.customerId;
+    const resolvedId = await resolveGt3Customer(sb, req.params.customerId);
+    if (!resolvedId) return res.status(404).json({ error: 'No GT3 customer found for this client. Run the onboarding pipeline first.' });
+    const cid = resolvedId;
     const [customer, primary, supportClusters, missingPages, quickWins, defense, actionTasks, channelTasks] = await Promise.all([
       sb.from('gt3_customers').select('*').eq('id', cid).single(),
       sb.from('gt3_v_primary_missions').select('*').eq('customer_id', cid).order('strategic_priority_score', { ascending: false }),

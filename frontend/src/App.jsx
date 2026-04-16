@@ -33,6 +33,7 @@ const CampaignsView = lazy(() => import('./views/CampaignsView.jsx'));
 const TasksView = lazy(() => import('./views/TasksView.jsx'));
 const SocialView = lazy(() => import('./views/SocialView.jsx'));
 const MissionControlView = lazy(() => import('./views/MissionControlView.jsx'));
+const GT3CommandCenterView = lazy(() => import('./views/GT3CommandCenterView.jsx'));
 
 function ViewLoader() {
   return (
@@ -238,6 +239,7 @@ export default function App() {
               {view === 'tasks' && <TasksView clientId={clientId} />}
               {view === 'social' && <SocialView clientId={clientId} />}
               {view === 'mission-control' && <MissionControlView clientId={clientId} clients={clients} setClientId={setClientId} />}
+              {view === 'gt3' && <GT3CommandCenterView clientId={clientId} clients={clients} />}
             </div>
           </Suspense>
         )}

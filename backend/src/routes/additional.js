@@ -2801,6 +2801,20 @@ router.post('/clients/:clientId/campaigns/:campaignId/publish-meta', async (req,
 
     await supabase.from('campaigns').update(updateData).eq('id', campaignId);
 
+    // Emit Mission Control event (fire-and-forget)
+    try {
+      const { emitSystemEvent } = await import('../functions/events.js');
+      await emitSystemEvent({
+        clientId,
+        source: 'campaign_published_meta',
+        eventType: errors.length > 0 ? 'failed' : 'completed',
+        message: errors.length > 0
+          ? `Campaign publish failed: ${errors[0]?.error || 'unknown'}`
+          : `Campaign "${campaign.name}" published to Meta`,
+        metadata: { campaign_id: campaignId, meta_campaign_id: metaCampaignId, errors_count: errors.length },
+      });
+    } catch {}
+
     if (errors.length > 0) {
       return res.status(400).json({ success: false, errors, meta_campaign_id: metaCampaignId, meta_adset_id: metaAdsetId });
     }
@@ -3552,6 +3566,23 @@ router.post('/clients/:clientId/social/:postId/publish', async (req, res) => {
       publish_error: hasError ? JSON.stringify({ facebook: results.facebook_error, instagram: results.instagram_error }) : null,
       updated_at: new Date().toISOString(),
     }).eq('id', postId);
+
+    // Emit Mission Control events (fire-and-forget)
+    try {
+      const { emitSystemEvent } = await import('../functions/events.js');
+      if (results.facebook) {
+        await emitSystemEvent({ clientId: post.client_id, source: 'social_post_published_facebook', eventType: 'completed', message: `Facebook post published`, metadata: { post_id: postId, fb_post_id: results.facebook.post_id } });
+      }
+      if (results.instagram) {
+        await emitSystemEvent({ clientId: post.client_id, source: 'social_post_published_instagram', eventType: 'completed', message: `Instagram post published`, metadata: { post_id: postId, ig_post_id: results.instagram.post_id } });
+      }
+      if (results.facebook_error) {
+        await emitSystemEvent({ clientId: post.client_id, source: 'social_post_published_facebook', eventType: 'failed', message: `Facebook publish failed: ${results.facebook_error}`, metadata: { post_id: postId } });
+      }
+      if (results.instagram_error) {
+        await emitSystemEvent({ clientId: post.client_id, source: 'social_post_published_instagram', eventType: 'failed', message: `Instagram publish failed: ${results.instagram_error}`, metadata: { post_id: postId } });
+      }
+    } catch {}
 
     res.json({ success: hasSuccess, results });
   } catch (err) {

@@ -166,9 +166,10 @@ export const NAV_GROUPS = [
     ],
   },
   {
-    label: 'Campaigns',
+    label: 'Campaigns & Social',
     items: [
       { id: 'campaigns', label: 'Campaigns', emoji: '📣' },
+      { id: 'social', label: 'Social Posts', emoji: '💬' },
     ],
   },
   {

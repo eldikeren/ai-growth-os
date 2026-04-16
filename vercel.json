@@ -32,7 +32,9 @@
     { "path": "/api/cron/audit-snapshot", "schedule": "0 5 * * *" },
     { "path": "/api/cron/self-heal", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/queue-seo-sweep", "schedule": "7 * * * *" },
-    { "path": "/api/cron/sync-all-backlinks", "schedule": "0 4 * * *" }
+    { "path": "/api/cron/sync-all-backlinks", "schedule": "0 4 * * *" },
+    { "path": "/api/cron/ai-insights", "schedule": "0 6 * * *" },
+    { "path": "/api/cron/publish-scheduled-posts", "schedule": "*/10 * * * *" }
   ],
   "functions": {
     "api/index.mjs": { "maxDuration": 300 }

@@ -618,6 +618,7 @@ export default function TasksView({ clientId }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [selectedTask, setSelectedTask] = useState(null);
   const [analyzingId, setAnalyzingId] = useState(null);
+  const [scanning, setScanning] = useState(false);
 
   const load = useCallback(async () => {
     if (!clientId) return;
@@ -659,6 +660,19 @@ export default function TasksView({ clientId }) {
     setAnalyzingId(null);
   };
 
+  const handleAiScan = async () => {
+    setScanning(true);
+    try {
+      const data = await api(`/clients/${clientId}/ai-insights`, { method: 'POST' });
+      if (data.created > 0) {
+        load();
+      } else {
+        alert('AI scan complete — no new tasks to add.');
+      }
+    } catch (e) { alert('AI scan failed: ' + e.message); }
+    setScanning(false);
+  };
+
   if (!clientId) return <Empty icon={ListTodo} msg="Select a client to view tasks" />;
 
   if (selectedTask) {
@@ -680,10 +694,16 @@ export default function TasksView({ clientId }) {
 
   return (
     <div>
-      <SH
-        title="Tasks & Ideas"
-        sub={`${openCount} open · ${doneCount} done · ${ideasCount} ideas`}
-      />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: spacing.sm }}>
+        <SH
+          title="Tasks & Ideas"
+          sub={`${openCount} open · ${doneCount} done · ${ideasCount} ideas`}
+        />
+        <GradientBtn onClick={handleAiScan} disabled={scanning}
+          style={{ padding: '8px 18px', fontSize: fontSize.sm }}>
+          {scanning ? <><Spin /> Scanning...</> : <><Wand2 size={14} /> AI Scan</>}
+        </GradientBtn>
+      </div>
 
       <QuickAddForm clientId={clientId} onCreated={load} />
 

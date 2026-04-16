@@ -31,6 +31,7 @@ const SystemAuditView = lazy(() => import('./views/SystemAuditView.jsx'));
 const ProposedChangesView = lazy(() => import('./views/ProposedChangesView.jsx'));
 const CampaignsView = lazy(() => import('./views/CampaignsView.jsx'));
 const TasksView = lazy(() => import('./views/TasksView.jsx'));
+const SocialView = lazy(() => import('./views/SocialView.jsx'));
 
 function ViewLoader() {
   return (
@@ -234,6 +235,7 @@ export default function App() {
               {view === 'proposed-changes' && <ProposedChangesView clientId={clientId} />}
               {view === 'campaigns' && <CampaignsView clientId={clientId} />}
               {view === 'tasks' && <TasksView clientId={clientId} />}
+              {view === 'social' && <SocialView clientId={clientId} />}
             </div>
           </Suspense>
         )}

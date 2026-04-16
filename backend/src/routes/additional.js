@@ -3371,4 +3371,456 @@ router.post('/clients/:clientId/tasks/bulk-update', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ════════════════════════════════════════════════════════════════
+// SOCIAL POSTS — Facebook & Instagram organic post management
+// ════════════════════════════════════════════════════════════════
+
+// ── LIST SOCIAL POSTS ──────────────────────────────────────────
+router.get('/clients/:clientId/social', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { status, platform } = req.query;
+    let q = supabase.from('social_posts').select('*')
+      .eq('client_id', clientId).order('created_at', { ascending: false });
+    if (status) q = q.eq('status', status);
+    if (platform) q = q.eq('platform', platform);
+    const { data, error } = await q.limit(100);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── CREATE SOCIAL POST ─────────────────────────────────────────
+router.post('/clients/:clientId/social', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { title, content, platform, post_type, media_urls, link_url, scheduled_at, ai_generated, ai_prompt } = req.body;
+    if (!content?.trim()) return res.status(400).json({ error: 'Content is required' });
+    const status = scheduled_at ? 'scheduled' : 'draft';
+    const { data, error } = await supabase.from('social_posts').insert({
+      client_id: clientId,
+      title: title || null,
+      content: content.trim(),
+      platform: platform || 'facebook',
+      post_type: post_type || (media_urls?.length ? 'image' : link_url ? 'link' : 'text'),
+      media_urls: media_urls || [],
+      link_url: link_url || null,
+      scheduled_at: scheduled_at || null,
+      status,
+      ai_generated: ai_generated || false,
+      ai_prompt: ai_prompt || null,
+    }).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── UPDATE SOCIAL POST ──────────────────────────────────────────
+router.patch('/clients/:clientId/social/:postId', async (req, res) => {
+  try {
+    const { clientId, postId } = req.params;
+    const allowed = ['title', 'content', 'platform', 'post_type', 'media_urls', 'link_url', 'scheduled_at', 'status'];
+    const updates = {};
+    for (const k of allowed) { if (req.body[k] !== undefined) updates[k] = req.body[k]; }
+    updates.updated_at = new Date().toISOString();
+    if (updates.scheduled_at && updates.status === 'draft') updates.status = 'scheduled';
+    const { data, error } = await supabase.from('social_posts')
+      .update(updates).eq('id', postId).eq('client_id', clientId).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── DELETE SOCIAL POST ──────────────────────────────────────────
+router.delete('/clients/:clientId/social/:postId', async (req, res) => {
+  try {
+    const { clientId, postId } = req.params;
+    const { error } = await supabase.from('social_posts')
+      .delete().eq('id', postId).eq('client_id', clientId).in('status', ['draft', 'failed']);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── PUBLISH SOCIAL POST ─────────────────────────────────────────
+router.post('/clients/:clientId/social/:postId/publish', async (req, res) => {
+  try {
+    const { clientId, postId } = req.params;
+
+    // Get the post
+    const { data: post } = await supabase.from('social_posts')
+      .select('*').eq('id', postId).eq('client_id', clientId).single();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    if (post.status === 'published') return res.status(400).json({ error: 'Already published' });
+
+    // Mark as publishing
+    await supabase.from('social_posts').update({ status: 'publishing', updated_at: new Date().toISOString() })
+      .eq('id', postId);
+
+    const results = {};
+
+    // Publish to Facebook
+    if (post.platform === 'facebook' || post.platform === 'both') {
+      const { data: fbAsset } = await supabase.from('integration_assets')
+        .select('external_id, metadata_json, label')
+        .eq('client_id', clientId).eq('provider', 'meta').eq('sub_provider', 'facebook')
+        .eq('is_selected', true).maybeSingle();
+
+      if (!fbAsset?.metadata_json?.page_access_token) {
+        await supabase.from('social_posts').update({
+          status: 'failed', publish_error: 'No Facebook page connected or missing page access token',
+          updated_at: new Date().toISOString(),
+        }).eq('id', postId);
+        return res.status(400).json({ error: 'No Facebook page connected. Reconnect Meta OAuth.' });
+      }
+
+      const pageId = fbAsset.external_id;
+      const pageToken = fbAsset.metadata_json.page_access_token;
+
+      try {
+        let endpoint, body;
+        const hasImage = post.media_urls?.length > 0;
+
+        if (hasImage) {
+          endpoint = `https://graph.facebook.com/v21.0/${pageId}/photos`;
+          body = new URLSearchParams({
+            url: post.media_urls[0].url || post.media_urls[0],
+            message: post.content,
+            access_token: pageToken,
+          });
+        } else {
+          endpoint = `https://graph.facebook.com/v21.0/${pageId}/feed`;
+          body = new URLSearchParams({
+            message: post.content,
+            access_token: pageToken,
+            ...(post.link_url ? { link: post.link_url } : {}),
+          });
+        }
+
+        const fbRes = await fetch(endpoint, { method: 'POST', body });
+        const fbData = await fbRes.json();
+        if (fbData.error) throw new Error(fbData.error.message);
+        results.facebook = { post_id: fbData.id || fbData.post_id, page: fbAsset.label };
+      } catch (e) {
+        results.facebook_error = e.message;
+      }
+    }
+
+    // Publish to Instagram
+    if (post.platform === 'instagram' || post.platform === 'both') {
+      const { data: igAsset } = await supabase.from('integration_assets')
+        .select('external_id, metadata_json, label')
+        .eq('client_id', clientId).eq('provider', 'meta').eq('sub_provider', 'instagram')
+        .eq('is_selected', true).maybeSingle();
+
+      if (igAsset?.external_id && post.media_urls?.length > 0) {
+        // Get page token for IG API calls
+        const { data: fbAsset } = await supabase.from('integration_assets')
+          .select('metadata_json')
+          .eq('client_id', clientId).eq('provider', 'meta').eq('sub_provider', 'facebook')
+          .eq('is_selected', true).maybeSingle();
+        const pageToken = fbAsset?.metadata_json?.page_access_token;
+
+        if (pageToken) {
+          try {
+            // Step 1: Create media container
+            const imgUrl = post.media_urls[0].url || post.media_urls[0];
+            const containerRes = await fetch(
+              `https://graph.facebook.com/v21.0/${igAsset.external_id}/media`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  image_url: imgUrl,
+                  caption: post.content,
+                  access_token: pageToken,
+                }),
+              });
+            const containerData = await containerRes.json();
+            if (containerData.error) throw new Error(containerData.error.message);
+
+            // Step 2: Publish container
+            const publishRes = await fetch(
+              `https://graph.facebook.com/v21.0/${igAsset.external_id}/media_publish`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  creation_id: containerData.id,
+                  access_token: pageToken,
+                }),
+              });
+            const publishData = await publishRes.json();
+            if (publishData.error) throw new Error(publishData.error.message);
+            results.instagram = { post_id: publishData.id };
+          } catch (e) {
+            results.instagram_error = e.message;
+          }
+        }
+      } else if (!post.media_urls?.length) {
+        results.instagram_error = 'Instagram requires an image. Add an image to publish.';
+      }
+    }
+
+    // Update post status
+    const hasError = results.facebook_error || results.instagram_error;
+    const hasSuccess = results.facebook || results.instagram;
+    await supabase.from('social_posts').update({
+      status: hasSuccess ? 'published' : 'failed',
+      published_at: hasSuccess ? new Date().toISOString() : null,
+      facebook_post_id: results.facebook?.post_id || null,
+      instagram_post_id: results.instagram?.post_id || null,
+      publish_error: hasError ? JSON.stringify({ facebook: results.facebook_error, instagram: results.instagram_error }) : null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', postId);
+
+    res.json({ success: hasSuccess, results });
+  } catch (err) {
+    await supabase.from('social_posts').update({
+      status: 'failed', publish_error: err.message, updated_at: new Date().toISOString(),
+    }).eq('id', req.params.postId).catch(() => {});
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── AI GENERATE SOCIAL POST CONTENT ─────────────────────────────
+router.post('/clients/:clientId/social/ai-generate', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { prompt, platform } = req.body;
+    if (!prompt?.trim()) return res.status(400).json({ error: 'Prompt is required' });
+
+    // Get client context
+    const { data: client } = await supabase.from('clients')
+      .select('name, domain, business_type, target_audience, niche, language, country')
+      .eq('id', clientId).single();
+    const { data: profile } = await supabase.from('client_profiles')
+      .select('business_type, industry, language, brand_voice').eq('client_id', clientId).maybeSingle();
+    const { data: rules } = await supabase.from('client_rules')
+      .select('brand_voice, target_audiences, compliance_style').eq('client_id', clientId).maybeSingle();
+
+    const lang = profile?.language || client?.language || 'he';
+    const brandVoice = rules?.brand_voice || profile?.brand_voice || 'professional';
+
+    const aiPrompt = `You are a social media expert. Create a ${platform || 'Facebook'} post for this business.
+
+BUSINESS:
+- Name: ${client?.name || 'Unknown'}
+- Domain: ${client?.domain || 'Unknown'}
+- Industry: ${profile?.business_type || client?.business_type || 'Unknown'}
+- Target Audience: ${JSON.stringify(rules?.target_audiences || client?.target_audience || 'General')}
+- Brand Voice: ${brandVoice}
+
+USER REQUEST: ${prompt}
+
+Write the post in ${lang === 'he' ? 'Hebrew' : 'English'}.
+${platform === 'instagram' ? 'Include relevant hashtags.' : ''}
+Keep it engaging and natural. Return ONLY the post text, no explanations.`;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'AI not configured' });
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 800,
+        messages: [{ role: 'user', content: aiPrompt }],
+      }),
+    });
+    const aiData = await aiRes.json();
+    const content = aiData?.content?.[0]?.text || '';
+    res.json({ content, platform: platform || 'facebook' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ════════════════════════════════════════════════════════════════
+// AI PROACTIVE INSIGHTS — Auto-generate tasks from client data
+// ════════════════════════════════════════════════════════════════
+
+// ── GENERATE AI INSIGHTS FOR A CLIENT ───────────────────────────
+router.post('/clients/:clientId/ai-insights', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+
+    // Gather all client data
+    const [clientRes, profileRes, seoRes, memRes, tasksRes, pagesRes, backlinksRes, proposedRes] = await Promise.all([
+      supabase.from('clients').select('name, domain, business_type, target_audience, niche, language, country').eq('id', clientId).single(),
+      supabase.from('client_profiles').select('business_type, industry, language, brand_voice').eq('client_id', clientId).maybeSingle(),
+      supabase.from('seo_data').select('page_url, seo_title, meta_description, h1_text, word_count, status_code, issues').eq('client_id', clientId).limit(30),
+      supabase.from('memory_items').select('key, value').eq('client_id', clientId).limit(20),
+      supabase.from('client_tasks').select('title, type, status, priority, category, created_by').eq('client_id', clientId).in('status', ['open', 'in_progress']),
+      supabase.from('seo_data').select('page_url, status_code, indexing_status, issues').eq('client_id', clientId).not('status_code', 'eq', 200).limit(20),
+      supabase.from('backlink_intelligence').select('source_url, source_domain, status, anchor_text').eq('client_id', clientId).limit(15),
+      supabase.from('proposed_changes').select('change_type, page_url, status, current_value, proposed_value').eq('client_id', clientId).eq('status', 'pending').limit(10),
+    ]);
+
+    const client = clientRes.data;
+    const profile = profileRes.data;
+    const seoPages = seoRes.data || [];
+    const memories = memRes.data || [];
+    const existingTasks = tasksRes.data || [];
+    const brokenPages = pagesRes.data || [];
+    const backlinks = backlinksRes.data || [];
+    const pendingChanges = proposedRes.data || [];
+
+    const lang = profile?.language || client?.language || 'he';
+
+    const prompt = `You are an AI growth strategist for a digital agency. Analyze this client's data and generate actionable tasks that the team should work on. Be specific and practical.
+
+CLIENT:
+- Business: ${client?.name || 'Unknown'} (${client?.domain || 'Unknown'})
+- Industry: ${profile?.business_type || client?.business_type || 'Unknown'}
+- Niche: ${client?.niche || 'Unknown'}
+- Country: ${client?.country || 'IL'}
+
+SEO PAGES DATA (${seoPages.length} pages):
+${seoPages.map(p => `${p.page_url}: title="${p.seo_title || 'MISSING'}" h1="${p.h1_text || 'MISSING'}" words=${p.word_count || '?'} issues=${JSON.stringify(p.issues || [])}`).join('\n') || 'No data'}
+
+PAGES WITH ISSUES (non-200 status):
+${brokenPages.map(p => `${p.page_url}: status=${p.status_code} indexing=${p.indexing_status || '?'} issues=${JSON.stringify(p.issues || [])}`).join('\n') || 'None found'}
+
+BACKLINK PROFILE (${backlinks.length} links):
+${backlinks.map(b => `${b.source_domain} → anchor="${b.anchor_text}" status=${b.status}`).join('\n') || 'No backlinks tracked'}
+
+PENDING PROPOSED CHANGES (${pendingChanges.length}):
+${pendingChanges.map(c => `${c.change_type} on ${c.page_url}: "${c.current_value}" → "${c.proposed_value}"`).join('\n') || 'None'}
+
+CLIENT MEMORY/NOTES:
+${memories.map(m => `${m.key}: ${m.value}`).join('\n') || 'None'}
+
+ALREADY OPEN TASKS (avoid duplicates):
+${existingTasks.map(t => `[${t.status}] ${t.type}: ${t.title}`).join('\n') || 'None'}
+
+Generate 3-7 actionable tasks/ideas. For EACH, return a JSON object. Focus on:
+1. SEO issues that need fixing (missing titles, broken pages, indexing problems)
+2. Content improvement opportunities (thin content, missing H1s)
+3. Backlink/link building opportunities
+4. Technical issues (redirects, 404s, slow pages)
+5. Strategic growth ideas (new content, new keywords, social presence)
+
+Return ONLY a JSON array (no markdown):
+[
+  {
+    "title": "Concise task title",
+    "description": "Detailed description of what needs to be done and why",
+    "type": "task|idea|improvement|bug",
+    "category": "seo|content|technical|marketing|design|social|analytics|general",
+    "priority": "low|medium|high|critical",
+    "related_url": "specific page URL if applicable, or null"
+  }
+]
+
+Write titles and descriptions in ${lang === 'he' ? 'Hebrew' : 'English'}.
+Be specific — reference actual pages and data. Don't be generic.`;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'AI not configured' });
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 3000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const aiData = await aiRes.json();
+    const text = aiData?.content?.[0]?.text || '';
+
+    let tasks = [];
+    try {
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      tasks = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    } catch (e) {
+      return res.status(500).json({ error: 'Failed to parse AI response', raw: text });
+    }
+
+    // Create tasks, avoiding duplicates
+    const existingTitles = new Set(existingTasks.map(t => t.title.toLowerCase()));
+    const created = [];
+    for (const t of tasks) {
+      if (existingTitles.has(t.title?.toLowerCase())) continue;
+      const { data, error } = await supabase.from('client_tasks').insert({
+        client_id: clientId,
+        title: t.title,
+        description: t.description,
+        type: t.type || 'task',
+        category: t.category || 'general',
+        priority: t.priority || 'medium',
+        related_url: t.related_url || null,
+        status: 'open',
+        created_by: 'ai',
+        related_agent: 'ai-insights',
+        tags: ['auto-generated'],
+      }).select().single();
+      if (data) created.push(data);
+    }
+
+    res.json({ success: true, generated: tasks.length, created: created.length, tasks: created });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── CRON: GENERATE AI INSIGHTS FOR ALL CLIENTS ──────────────────
+router.get('/cron/ai-insights', async (req, res) => {
+  try {
+    const { data: clients } = await supabase.from('clients').select('id, name').in('status', ['active', null]);
+    if (!clients?.length) return res.json({ processed: 0, reason: 'No active clients' });
+
+    const results = [];
+    for (const client of clients) {
+      try {
+        // Check if we generated insights recently (skip if < 24h ago)
+        const { data: recentTask } = await supabase.from('client_tasks')
+          .select('created_at')
+          .eq('client_id', client.id).eq('related_agent', 'ai-insights')
+          .order('created_at', { ascending: false }).limit(1).maybeSingle();
+        if (recentTask && new Date(recentTask.created_at) > new Date(Date.now() - 24 * 60 * 60 * 1000)) {
+          results.push({ client: client.name, skipped: true, reason: 'Generated < 24h ago' });
+          continue;
+        }
+
+        // Call the insights endpoint internally
+        const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3001';
+        const insightRes = await fetch(`${baseUrl}/api/clients/${client.id}/ai-insights`, { method: 'POST' });
+        const data = await insightRes.json();
+        results.push({ client: client.name, success: true, created: data.created || 0 });
+      } catch (e) {
+        results.push({ client: client.name, success: false, error: e.message });
+      }
+      await new Promise(r => setTimeout(r, 3000)); // Rate limit between clients
+    }
+
+    res.json({ processed: results.length, results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── CRON: PUBLISH SCHEDULED SOCIAL POSTS ────────────────────────
+router.get('/cron/publish-scheduled-posts', async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const { data: posts } = await supabase.from('social_posts')
+      .select('id, client_id')
+      .eq('status', 'scheduled')
+      .lte('scheduled_at', now)
+      .limit(10);
+
+    if (!posts?.length) return res.json({ published: 0 });
+
+    const results = [];
+    for (const post of posts) {
+      try {
+        const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3001';
+        const pubRes = await fetch(`${baseUrl}/api/clients/${post.client_id}/social/${post.id}/publish`, { method: 'POST' });
+        const data = await pubRes.json();
+        results.push({ post_id: post.id, success: data.success });
+      } catch (e) {
+        results.push({ post_id: post.id, error: e.message });
+      }
+    }
+
+    res.json({ published: results.filter(r => r.success).length, results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 export default router;

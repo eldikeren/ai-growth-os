@@ -219,6 +219,22 @@ router.get('/clients/:clientId/oauth-status', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Re-run Google asset discovery without forcing another OAuth dance.
+// Useful after the user is added as a GA4/GBP user, or after the Ads
+// developer token is configured. Idempotent.
+router.post('/clients/:clientId/rediscover-google', async (req, res) => {
+  try {
+    const { rediscoverGoogleAssets } = await import('../functions/onboarding.js');
+    const subProviders = Array.isArray(req.body?.subProviders) && req.body.subProviders.length
+      ? req.body.subProviders
+      : ['search_console', 'ads', 'business_profile', 'analytics'];
+    const results = await rediscoverGoogleAssets(req.params.clientId, subProviders);
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Select an integration asset (page, property, etc.)
 router.patch('/clients/:clientId/integration-assets/:assetId/select', async (req, res) => {
   try {

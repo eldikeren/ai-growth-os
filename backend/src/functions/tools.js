@@ -2100,9 +2100,14 @@ export async function executeTool(toolName, args, clientId, runId) {
           ads: `SELECT ad_group_ad.ad.final_urls, ad_group_ad.ad.text_ad.headline, ad_group_ad.ad.responsive_search_ad.headlines, metrics.impressions, metrics.clicks, metrics.ctr, metrics.conversions FROM ad_group_ad WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' AND ad_group_ad.status = 'ENABLED' ORDER BY metrics.impressions DESC LIMIT 50`
         };
 
+        const { getGoogleAdsDeveloperToken } = await import('./onboarding.js');
+        const devToken = await getGoogleAdsDeveloperToken();
+        if (!devToken) {
+          return { error: 'Google Ads developer token missing — set system_settings.google_ads_developer_token or GOOGLE_ADS_DEVELOPER_TOKEN env var' };
+        }
         const resp = await fetchWithTimeout(
           `https://googleads.googleapis.com/v16/customers/${customerId}/googleAds:search`,
-          { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '' },
+          { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'developer-token': devToken },
             body: JSON.stringify({ query: queries[reportType] }) },
           20000
         );

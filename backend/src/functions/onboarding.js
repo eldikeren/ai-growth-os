@@ -59,6 +59,25 @@ const META_SCOPES = [
   'business_management'
 ];
 
+// ── GLOBAL SYSTEM SETTINGS LOOKUP ─────────────────────────────
+// Cache: 5-min TTL keeps Supabase load low while still picking up rotations.
+const _settingsCache = new Map();
+export async function getSystemSetting(key) {
+  const cached = _settingsCache.get(key);
+  if (cached && (Date.now() - cached.at) < 5 * 60 * 1000) return cached.value;
+  const { data } = await supabase.from('system_settings').select('value').eq('key', key).maybeSingle();
+  const value = data?.value || null;
+  _settingsCache.set(key, { value, at: Date.now() });
+  return value;
+}
+
+// Prefer Vercel env var when set (operator override), fall back to Supabase.
+export async function getGoogleAdsDeveloperToken() {
+  const envToken = (process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '').trim();
+  if (envToken) return envToken;
+  return (await getSystemSetting('google_ads_developer_token')) || '';
+}
+
 // ============================================================
 // SESSION MANAGEMENT
 // ============================================================
@@ -390,7 +409,10 @@ async function discoverSearchConsoleProperties(accessToken, clientId) {
   const res = await fetch('https://www.googleapis.com/webmasters/v3/sites', {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  if (!res.ok) return { count: 0, error: await res.text() };
+  if (!res.ok) {
+    const errText = await res.text();
+    return { count: 0, error: `GSC list sites failed: HTTP ${res.status} — ${errText.slice(0, 300)}` };
+  }
   const data = await res.json();
   const sites = data.siteEntry || [];
   // Store as assets
@@ -415,16 +437,23 @@ async function discoverSearchConsoleProperties(accessToken, clientId) {
 }
 
 async function discoverGoogleAdsAccounts(accessToken, clientId) {
-  // Google Ads requires developer token + OAuth
-  // List accessible customer accounts
+  // Google Ads requires developer token + OAuth.
+  // Dev token lookup: env var first, then system_settings (Supabase).
+  const devToken = await getGoogleAdsDeveloperToken();
+  if (!devToken) {
+    return { count: 0, error: 'Google Ads developer token missing — set system_settings.google_ads_developer_token or GOOGLE_ADS_DEVELOPER_TOKEN env var' };
+  }
   const headers = {
     Authorization: `Bearer ${accessToken}`,
-    'developer-token': process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '',
-    'Content-Type': 'application/json'
+    'developer-token': devToken,
+    'Content-Type': 'application/json',
   };
   try {
     const res = await fetch('https://googleads.googleapis.com/v17/customers:listAccessibleCustomers', { headers });
-    if (!res.ok) return { count: 0, note: 'Google Ads developer token required' };
+    if (!res.ok) {
+      const errText = await res.text();
+      return { count: 0, error: `Google Ads listAccessibleCustomers failed: HTTP ${res.status} — ${errText.slice(0, 400)}` };
+    }
     const data = await res.json();
     const accounts = data.resourceNames || [];
     for (const resourceName of accounts) {
@@ -437,22 +466,42 @@ async function discoverGoogleAdsAccounts(accessToken, clientId) {
       }, { onConflict: 'client_id,provider,external_id' });
     }
     return { count: accounts.length, accounts: accounts.map(r => r.split('/').pop()), label: `${accounts.length} account${accounts.length !== 1 ? 's' : ''} found` };
-  } catch (e) { return { count: 0, error: e.message }; }
+  } catch (e) { return { count: 0, error: `Google Ads discovery exception: ${e.message}` }; }
 }
 
 async function discoverGBPLocations(accessToken, clientId) {
+  // Step 1: list GBP accounts the OAuth user manages.
   const res = await fetch('https://mybusinessaccountmanagement.googleapis.com/v1/accounts', {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  if (!res.ok) return { count: 0, error: 'GBP access error' };
+  if (!res.ok) {
+    const errText = await res.text();
+    // 403 PERMISSION_DENIED usually means "Google My Business Account Management API"
+    // is not enabled in the Cloud project. 401 means scope issue.
+    return {
+      count: 0,
+      error: `GBP list accounts failed: HTTP ${res.status} — ${errText.slice(0, 400)}`,
+      hint: res.status === 403 || res.status === 401
+        ? 'Enable "My Business Account Management API" + "My Business Business Information API" in the Google Cloud project.'
+        : null,
+    };
+  }
   const accountData = await res.json();
   const accounts = accountData.accounts || [];
+  if (accounts.length === 0) {
+    return { count: 0, error: 'GBP: OAuth user is not a manager of any Business Profile account' };
+  }
+  const perAccountErrors = [];
   let totalLocations = 0;
   for (const account of accounts) {
     const locRes = await fetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${account.name}/locations?readMask=name,title,storefrontAddress,websiteUri`, {
       headers: { Authorization: `Bearer ${accessToken}` }
     });
-    if (!locRes.ok) continue;
+    if (!locRes.ok) {
+      const errText = await locRes.text();
+      perAccountErrors.push(`${account.name}: HTTP ${locRes.status} — ${errText.slice(0, 200)}`);
+      continue;
+    }
     const locData = await locRes.json();
     for (const loc of (locData.locations || [])) {
       totalLocations++;
@@ -467,21 +516,46 @@ async function discoverGBPLocations(accessToken, clientId) {
       }, { onConflict: 'client_id,provider,external_id' });
     }
   }
-  return { count: totalLocations, accounts: accounts.length, label: `${totalLocations} location${totalLocations !== 1 ? 's' : ''} found` };
+  const result = { count: totalLocations, accounts: accounts.length, label: `${totalLocations} location${totalLocations !== 1 ? 's' : ''} found across ${accounts.length} account(s)` };
+  if (totalLocations === 0) {
+    result.error = `GBP: found ${accounts.length} account(s) but zero locations. Per-account errors: ${perAccountErrors.join('; ') || 'none'}`;
+  }
+  return result;
 }
 
 async function discoverGA4Properties(accessToken, clientId) {
   const res = await fetch('https://analyticsadmin.googleapis.com/v1beta/accounts', {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
-  if (!res.ok) return { count: 0 };
+  if (!res.ok) {
+    const errText = await res.text();
+    return {
+      count: 0,
+      error: `GA4 list accounts failed: HTTP ${res.status} — ${errText.slice(0, 400)}`,
+      hint: res.status === 403 ? 'Enable "Google Analytics Admin API" in the Google Cloud project.' : null,
+    };
+  }
   const data = await res.json();
+  const accounts = data.accounts || [];
+  // Handle the case where the properties call requires a filter instead of being nested
+  // Try the nested path first, fall back to the flat filter if needed.
   let propCount = 0;
-  for (const account of (data.accounts || []).slice(0, 5)) {
-    const propRes = await fetch(`https://analyticsadmin.googleapis.com/v1beta/${account.name}/properties`, {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
-    if (!propRes.ok) continue;
+  const perAccountErrors = [];
+  // If no accounts returned, the user has no GA4 access — try the flat /properties list too (filter-based)
+  if (accounts.length === 0) {
+    return { count: 0, error: 'GA4: OAuth user has access to zero Analytics accounts' };
+  }
+  for (const account of accounts.slice(0, 10)) {
+    // v1beta list filters require `?filter=parent:accounts/XXX` on the properties endpoint
+    const propRes = await fetch(
+      `https://analyticsadmin.googleapis.com/v1beta/properties?filter=parent:${encodeURIComponent(account.name)}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!propRes.ok) {
+      const errText = await propRes.text();
+      perAccountErrors.push(`${account.name}: HTTP ${propRes.status} — ${errText.slice(0, 200)}`);
+      continue;
+    }
     const propData = await propRes.json();
     for (const prop of (propData.properties || [])) {
       propCount++;
@@ -495,7 +569,11 @@ async function discoverGA4Properties(accessToken, clientId) {
       }, { onConflict: 'client_id,provider,external_id' });
     }
   }
-  return { count: propCount, label: `${propCount} GA4 propert${propCount !== 1 ? 'ies' : 'y'} found` };
+  const result = { count: propCount, label: `${propCount} GA4 propert${propCount !== 1 ? 'ies' : 'y'} found across ${accounts.length} account(s)` };
+  if (propCount === 0) {
+    result.error = `GA4: found ${accounts.length} account(s) but zero properties. Per-account errors: ${perAccountErrors.join('; ') || 'none'}`;
+  }
+  return result;
 }
 
 // ============================================================
@@ -1052,6 +1130,34 @@ async function sendAdminNotification(toEmail, clientName, connectorsCount, agent
       </div>`
     })
   });
+}
+
+// ============================================================
+// REDISCOVER GOOGLE ASSETS — re-runs the 4 discovery calls
+// without forcing the user through another OAuth dance.
+// Uses the stored refresh_token to get a fresh access token,
+// then calls each discover* function and updates client_integrations.
+// ============================================================
+export async function rediscoverGoogleAssets(clientId, subProviders = ['search_console', 'ads', 'business_profile', 'analytics']) {
+  const accessToken = await refreshGoogleToken(clientId);
+  const results = {};
+  for (const sp of subProviders) {
+    try {
+      const result = await discoverGoogleAssets(accessToken, sp, clientId);
+      results[sp] = result;
+      await supabase.from('client_integrations').upsert({
+        client_id: clientId,
+        provider: 'google',
+        sub_provider: sp,
+        status: result.count > 0 ? 'connected' : 'limited',
+        discovery_summary: result,
+        connected_at: new Date().toISOString(),
+      }, { onConflict: 'client_id,provider,sub_provider' });
+    } catch (e) {
+      results[sp] = { count: 0, error: `Rediscover exception: ${e.message}` };
+    }
+  }
+  return results;
 }
 
 // ============================================================

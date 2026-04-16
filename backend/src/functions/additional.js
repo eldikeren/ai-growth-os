@@ -921,11 +921,13 @@ export async function generateFullLinkIntelligence(clientId) {
   const location = profile.city || profile.location || 'Israel';
   const lang = profile.language || 'he';
 
-  const prompt = `You are a senior link building strategist specializing in ${bizType} SEO in ${location}.
+  const prompt = `CRITICAL LANGUAGE RULE: Write ALL user-facing text fields in HEBREW (עברית). This includes: executive_summary, why_it_matters, outreach_strategy, authority_gap_summary, recommended_next_action, quick_wins descriptions. The UI is Hebrew and all clients are Hebrew-speaking Israeli businesses. Domain names and technical IDs stay in English, but all human-readable explanations MUST be in Hebrew. Do NOT use English for any explanatory text.
+
+You are a senior link building strategist specializing in ${bizType} SEO in ${location}.
 
 CLIENT: ${client?.name} (${client?.domain})
 INDUSTRY: ${bizType}
-LANGUAGE: ${lang} | MARKET: Israel | LOCATION: ${location}
+LANGUAGE: Hebrew | MARKET: Israel | LOCATION: ${location}
 
 MISSING REFERRING DOMAINS (competitors have, we don't):
 ${JSON.stringify(missingDomains.data?.slice(0, 30), null, 2)}
@@ -1028,7 +1030,9 @@ export async function generateSeoActionPlan(clientId) {
   const location = profile.city || profile.location || 'Israel';
   const lang = profile.language || 'he';
 
-  const prompt = `You are a senior SEO strategist for ${client?.name || 'this client'} (${client?.domain}), a ${bizType} in ${location}.
+  const prompt = `CRITICAL LANGUAGE RULE: Write ALL user-facing text (title, description, target_keyword descriptions, every human-readable string) in HEBREW (עברית). All clients are Hebrew-speaking Israeli businesses. Domain names and technical IDs stay in English, but all explanations MUST be in Hebrew.
+
+You are a senior SEO strategist for ${client?.name || 'this client'} (${client?.domain}), a ${bizType} in ${location}.
 
 CURRENT SEO STATUS:
 - Mobile PageSpeed: ${baselines.data?.find(b => b.metric_name === 'mobile_pagespeed')?.metric_value || '~60'}/100

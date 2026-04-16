@@ -16,10 +16,10 @@ const dark = {
   bg: '#07070f',
   surface: '#0d1117',
   surfaceLight: '#161b22',
-  border: '#ffffff0a',
-  text: '#e0e0e0',
-  textMuted: '#666',
-  textDim: '#444',
+  border: '#ffffff1a',
+  text: '#f0f0f0',
+  textMuted: '#b0b0b0',   // bumped from #666 for readability
+  textDim: '#909090',     // bumped from #444
 };
 
 // ── Event type colors and labels ────────────────────────────
@@ -67,31 +67,31 @@ function OrchestratorBar({ state }) {
 
   return (
     <div style={{
-      padding: '6px 16px',
+      padding: '10px 16px',
       background: '#0a1628ee',
-      borderBottom: '1px solid #4285F422',
-      display: 'flex', alignItems: 'center', gap: 10,
+      borderBottom: '1px solid #4285F433',
+      display: 'flex', alignItems: 'center', gap: 12,
       fontFamily: "'Courier New', monospace",
-      fontSize: '9px', color: '#4285F4',
+      fontSize: '13px', color: '#4285F4',
       backdropFilter: 'blur(4px)',
       flexShrink: 0,
     }}>
-      <span style={{ fontSize: 14 }}>🤖</span>
-      <span style={{ fontWeight: 700, letterSpacing: 2, color: '#4285F4aa', fontSize: 8 }}>ORCHESTRATOR</span>
-      <span style={{ flex: 1, fontStyle: 'italic', color: '#667' }}>{message}</span>
+      <span style={{ fontSize: 18 }}>🤖</span>
+      <span style={{ fontWeight: 700, letterSpacing: 2, color: '#7aaefe', fontSize: 11 }}>ORCHESTRATOR</span>
+      <span style={{ flex: 1, fontStyle: 'italic', color: '#cfd6e6', fontSize: 13 }}>{message}</span>
       <div style={{
-        width: 120, height: 3,
-        background: '#ffffff08', borderRadius: 2, overflow: 'hidden',
+        width: 160, height: 6,
+        background: '#ffffff14', borderRadius: 3, overflow: 'hidden',
       }}>
         <div style={{
           height: '100%', width: `${pct}%`,
           background: 'linear-gradient(90deg, #4285F4, #00E676)',
-          borderRadius: 2,
+          borderRadius: 3,
           transition: 'width 0.5s ease',
-          boxShadow: '0 0 6px #4285F4',
+          boxShadow: '0 0 8px #4285F4',
         }} />
       </div>
-      <span style={{ fontSize: 10, color: '#4285F4', fontWeight: 700, minWidth: 30, textAlign: 'right' }}>{pct}%</span>
+      <span style={{ fontSize: 14, color: '#4285F4', fontWeight: 700, minWidth: 40, textAlign: 'right' }}>{pct}%</span>
     </div>
   );
 }
@@ -109,26 +109,26 @@ function StatsBar({ summary }) {
 
   return (
     <div style={{
-      padding: '5px 16px',
+      padding: '10px 16px',
       background: dark.surface,
       borderBottom: `1px solid ${dark.border}`,
-      display: 'flex', gap: 8, alignItems: 'center',
+      display: 'flex', gap: 10, alignItems: 'center',
       fontFamily: "'Courier New', monospace",
       flexShrink: 0,
     }}>
-      <span style={{ fontSize: 8, color: dark.textDim, letterSpacing: 2, marginRight: 8 }}>
+      <span style={{ fontSize: 12, color: '#d0d0d0', letterSpacing: 2, marginRight: 12, fontWeight: 700 }}>
         AGENTS: {summary?.total || 0}
       </span>
       {stats.map(s => (
         <div key={s.key} style={{
           textAlign: 'center',
-          background: '#ffffff05',
-          borderRadius: 6, padding: '3px 10px',
-          border: '1px solid #ffffff0a',
-          minWidth: 48,
+          background: `${s.color}18`,
+          borderRadius: 8, padding: '6px 14px',
+          border: `1px solid ${s.color}44`,
+          minWidth: 64,
         }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: s.color }}>{s.value}</div>
-          <div style={{ fontSize: 7, color: dark.textDim, letterSpacing: 2 }}>{s.label}</div>
+          <div style={{ fontSize: 22, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.value}</div>
+          <div style={{ fontSize: 10, color: '#d0d0d0', letterSpacing: 2, marginTop: 4, fontWeight: 600 }}>{s.label}</div>
         </div>
       ))}
     </div>
@@ -139,7 +139,7 @@ function StatsBar({ summary }) {
 function LogPanel({ events }) {
   return (
     <div style={{
-      width: 230,
+      width: 280,
       background: dark.surface,
       borderLeft: `1px solid ${dark.border}`,
       display: 'flex', flexDirection: 'column',
@@ -147,19 +147,23 @@ function LogPanel({ events }) {
       flexShrink: 0,
     }}>
       <div style={{
-        padding: '8px 12px',
-        fontSize: 8, color: dark.textDim, letterSpacing: 3,
+        padding: '12px 14px',
+        fontSize: 11, color: '#d0d0d0', letterSpacing: 3, fontWeight: 700,
         borderBottom: `1px solid ${dark.border}`,
+        background: '#0a1628',
       }}>
         LIVE ACTIVITY LOG
       </div>
 
       <div style={{
-        flex: 1, overflowY: 'auto', padding: '6px 10px',
+        flex: 1, overflowY: 'auto', padding: '8px 12px',
       }}>
         {events.length === 0 && (
-          <div style={{ fontSize: 8, color: dark.textDim, padding: '10px 0', textAlign: 'center' }}>
-            No recent activity
+          <div style={{ fontSize: 12, color: dark.textMuted, padding: '16px 8px', textAlign: 'center', lineHeight: 1.5 }}>
+            No recent activity.<br/>
+            <span style={{ fontSize: 10, color: dark.textDim }}>
+              Events appear when agents start running.
+            </span>
           </div>
         )}
         {events.map((evt, i) => {
@@ -167,14 +171,20 @@ function LogPanel({ events }) {
           const time = new Date(evt.created_at).toLocaleTimeString('en-GB', { hour12: false });
           return (
             <div key={evt.id || i} style={{
-              padding: '4px 0',
-              borderBottom: '1px solid #ffffff04',
-              fontSize: 8, lineHeight: 1.5,
+              padding: '8px 10px',
+              marginBottom: 6,
+              borderRadius: 6,
+              borderLeft: `3px solid ${style.color}`,
+              background: `${style.color}12`,
+              fontSize: 11, lineHeight: 1.5,
               animation: i === 0 ? 'fadeIn 0.3s ease' : undefined,
             }}>
-              <span style={{ fontWeight: 700, color: style.color }}>{evt.agent_name}</span>
-              <br />
-              <span style={{ color: dark.textDim }}>{time} — {evt.message || style.label}</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                <span style={{ fontWeight: 700, color: style.color, fontSize: 10, letterSpacing: 1 }}>{style.label}</span>
+                <span style={{ color: dark.textDim, fontSize: 10 }}>{time}</span>
+              </div>
+              <div style={{ color: '#f0f0f0', fontWeight: 600, fontSize: 11 }}>{evt.agent_name}</div>
+              {evt.message && <div style={{ color: dark.textMuted, fontSize: 10, marginTop: 2 }}>{evt.message}</div>}
             </div>
           );
         })}
@@ -182,10 +192,14 @@ function LogPanel({ events }) {
 
       {/* Legend */}
       <div style={{
-        padding: '10px 12px',
+        padding: '12px 14px',
         borderTop: `1px solid ${dark.border}`,
+        background: '#0a1628',
         flexShrink: 0,
       }}>
+        <div style={{ fontSize: 9, color: '#8090a0', letterSpacing: 2, marginBottom: 8, fontWeight: 700 }}>
+          LEGEND
+        </div>
         {[
           { color: '#00BCD4', label: 'Walking / Queued' },
           { color: '#9C27B0', label: 'Working' },
@@ -193,9 +207,9 @@ function LogPanel({ events }) {
           { color: '#FF1744', label: 'Error' },
           { color: '#FFD600', label: 'Done' },
         ].map(item => (
-          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-            <div style={{ width: 6, height: 6, borderRadius: '50%', background: item.color, flexShrink: 0 }} />
-            <span style={{ fontSize: 8, color: dark.textDim }}>{item.label}</span>
+          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: item.color, flexShrink: 0, boxShadow: `0 0 6px ${item.color}88` }} />
+            <span style={{ fontSize: 11, color: '#d0d0d0' }}>{item.label}</span>
           </div>
         ))}
       </div>

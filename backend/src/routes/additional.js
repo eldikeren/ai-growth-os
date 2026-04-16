@@ -2946,7 +2946,9 @@ router.post('/clients/:clientId/campaigns/:campaignId/suggest-audience', async (
       .select('key, value').eq('client_id', clientId).limit(10);
     const memoryContext = (memories || []).map(m => `${m.key}: ${m.value}`).join('\n');
 
-    const prompt = `You are an expert Meta Ads audience targeting consultant. Based on the client and campaign details below, suggest the best targeting configuration for maximum ROI.
+    const prompt = `CRITICAL LANGUAGE RULE: Write the 'reasoning' field in HEBREW (עברית). Interest names can stay as Meta's canonical English names, but the 'reasoning' text MUST be in Hebrew — all clients are Hebrew-speaking Israeli businesses.
+
+You are an expert Meta Ads audience targeting consultant. Based on the client and campaign details below, suggest the best targeting configuration for maximum ROI.
 
 CLIENT:
 - Business: ${client?.name || 'Unknown'}
@@ -3044,7 +3046,9 @@ router.post('/clients/:clientId/campaigns/suggest-full', async (req, res) => {
       .eq('client_id', clientId).limit(5);
     const seoContext = (seoData || []).map(s => `${s.page_url}: ${s.seo_title}`).join('\n');
 
-    const prompt = `You are an expert digital marketing strategist specializing in Meta Ads (Facebook + Instagram) and Google Ads. Based on everything you know about this client, suggest a COMPLETE campaign setup.
+    const prompt = `CRITICAL LANGUAGE RULE: Write ALL user-facing text in HEBREW (עברית). This includes: campaign_name, objective_reasoning, targeting_reasoning, creative headlines, primary_text, description, image_suggestions, creative_reasoning, additional_tips. All clients are Hebrew-speaking Israeli businesses and the output is shown in a Hebrew UI. Technical IDs (interest IDs, country codes, enum values like "TRAFFIC"/"LEADS", call_to_action values like "LEARN_MORE") stay in English but every explanation and every piece of ad copy MUST be in Hebrew.
+
+You are an expert digital marketing strategist specializing in Meta Ads (Facebook + Instagram) and Google Ads. Based on everything you know about this client, suggest a COMPLETE campaign setup.
 
 CLIENT:
 - Business: ${client?.name || 'Unknown'}
@@ -3099,7 +3103,7 @@ Return ONLY a valid JSON object with this exact structure (no markdown, no expla
 }
 
 IMPORTANT RULES:
-- Write ALL ad copy in ${client?.language === 'he' ? 'Hebrew' : client?.language === 'ar' ? 'Arabic' : 'English'} since that's the business language
+- Write ALL ad copy and ALL explanations in HEBREW (עברית) — no exceptions
 - Use REAL Meta interest IDs where possible
 - Match the objective to the user's goal and business type
 - If the business is service-based (law, finance, consulting), favor LEADS or TRAFFIC

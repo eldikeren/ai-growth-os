@@ -551,39 +551,110 @@ export async function syncBacklinkIntelligence(clientId) {
   // Supplement by searching Google for pages that mention the client domain OR name, then
   // verify each result by fetching the page and checking for actual links.
   try {
-    // Build search queries: domain-based + name-based
+    // Build search queries: domain-based + name-based (including local language names)
     const searchQueries = [`"${clientDomain}" -site:${clientDomain}`];
-    // Add client name search (e.g. "יניב גיל" for Hebrew clients)
     const { data: profile } = await supabase.from('client_profiles')
       .select('language, notes').eq('client_id', clientId).maybeSingle();
-    // Extract business name (strip common suffixes like "Law Firm", "Finance", etc.)
     const clientNameClean = client.name.replace(/[-_]/g, ' ').replace(/\b(law firm|finance|agency|group|ltd|inc)\b/gi, '').trim();
     if (clientNameClean.length > 2) {
       searchQueries.push(`"${clientNameClean}" -site:${clientDomain}`);
     }
 
+    // CRITICAL FIX: Extract the local-language name from the client's own website
+    // (Hebrew clients have Hebrew names on their site that differ from English DB name)
+    try {
+      const homeRes = await fetch(`https://${clientDomain}`, {
+        signal: AbortSignal.timeout(8000),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html', 'Accept-Language': 'he,en;q=0.9',
+        },
+      });
+      if (homeRes.ok) {
+        const homeHtml = await homeRes.text();
+        // Extract title tag text
+        const titleMatch = homeHtml.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const titleText = titleMatch?.[1]?.trim() || '';
+        // Extract og:site_name or og:title
+        const ogNameMatch = homeHtml.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([^"']*)["']/i)
+          || homeHtml.match(/<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:site_name["']/i);
+        const ogName = ogNameMatch?.[1]?.trim() || '';
+        // Extract H1
+        const h1Match = homeHtml.match(/<h1[^>]*>([^<]*)<\/h1>/i);
+        const h1Text = h1Match?.[1]?.trim() || '';
+
+        // Build local names from extracted text: pick unique, meaningful strings
+        const localNames = new Set();
+        // From title: take the part before common separators (|, -, –)
+        if (titleText) {
+          const titleParts = titleText.split(/[|–\-]/);
+          for (const part of titleParts) {
+            const clean = part.trim();
+            // Only use if it contains non-ASCII (Hebrew/Arabic) characters and is meaningful
+            if (clean.length > 2 && /[^\x00-\x7F]/.test(clean)) {
+              localNames.add(clean);
+            }
+          }
+        }
+        if (ogName && /[^\x00-\x7F]/.test(ogName)) localNames.add(ogName);
+        if (h1Text && h1Text.length > 2 && /[^\x00-\x7F]/.test(h1Text)) localNames.add(h1Text);
+
+        // Add local names as additional search queries (limit to 3 most unique)
+        let added = 0;
+        for (const localName of localNames) {
+          if (added >= 3) break;
+          // Skip if too similar to existing queries
+          const alreadyCovered = searchQueries.some(q => q.includes(localName));
+          if (!alreadyCovered && localName.length > 2 && localName.length < 60) {
+            searchQueries.push(`"${localName}" -site:${clientDomain}`);
+            added++;
+          }
+        }
+        summary.local_names_extracted = Array.from(localNames);
+      }
+    } catch (homeErr) {
+      summary.errors.push(`local_name_extraction: ${homeErr.message}`);
+    }
+
+    // Also check memory_items for a stored local/Hebrew name
+    const { data: memoryNames } = await supabase.from('memory_items')
+      .select('value').eq('client_id', clientId)
+      .or('key.ilike.%local_name%,key.ilike.%hebrew_name%,key.ilike.%business_name%')
+      .limit(3);
+    for (const mem of (memoryNames || [])) {
+      if (mem.value && mem.value.length > 2 && !searchQueries.some(q => q.includes(mem.value))) {
+        searchQueries.push(`"${mem.value}" -site:${clientDomain}`);
+      }
+    }
+
     // Merge all SERP results from multiple queries, deduplicate by URL
-    // Track which query found each result — name-based results are trusted more
+    // Track which query found each result — name-based results (qi >= 1) are trusted more
+    // because if a page appears in a "client name" search, it's likely relevant
     const allSerpItems = [];
     const seenUrls = new Set();
-    const nameQueryUrls = new Set(); // URLs found by the name-based query
+    const nameQueryUrls = new Set(); // URLs found by ANY name-based query (not the domain query)
+    summary.search_queries = searchQueries;
     for (let qi = 0; qi < searchQueries.length; qi++) {
       const query = searchQueries[qi];
       try {
         const serpResult = await _dfsPost('https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
           [{ keyword: query, location_code: 2376, language_code: profile?.language === 'he' ? 'he' : 'en', depth: 30 }]);
-        for (const item of (serpResult.items || [])) {
+        const queryItems = serpResult.items || [];
+        for (const item of queryItems) {
           if (item.type === 'organic') {
-            if (qi > 0) nameQueryUrls.add(item.url); // name-based query
+            // qi >= 1 = any name-based query (English name, Hebrew name, etc.)
+            if (qi >= 1) nameQueryUrls.add(item.url);
             if (!seenUrls.has(item.url)) {
               seenUrls.add(item.url);
               allSerpItems.push(item);
             }
           }
         }
+        summary[`serp_query_${qi}_results`] = queryItems.filter(i => i.type === 'organic').length;
         await new Promise(r => setTimeout(r, 300));
       } catch (qErr) { summary.errors.push(`serp_query "${query}": ${qErr.message}`); }
     }
+    summary.name_query_urls_count = nameQueryUrls.size;
     const serpItems = allSerpItems;
     const discoveredLinks = [];
 
@@ -657,19 +728,21 @@ export async function syncBacklinkIntelligence(clientId) {
         // Rate limit: small pause between fetches
         await new Promise(r => setTimeout(r, 300));
       } catch (fetchErr) {
-        // Fallback for paywalled / bot-protected sites:
-        // 1. If this URL came from the name-based search query, trust it — Google found
-        //    this page by searching the client name, so it's highly relevant
-        // 2. If the snippet/title mentions the client domain, trust it
+        // Fallback for paywalled / bot-protected sites (Haaretz, TheMarker, WSJ, etc.):
+        // Trust the result if ANY of these conditions is met:
         const fromNameQuery = nameQueryUrls.has(sourceUrl);
-        const snippet = (item.description || '') + ' ' + (item.title || '');
+        const snippet = ((item.description || '') + ' ' + (item.title || '')).toLowerCase();
         const domainSlug = clientDomain.split('.')[0]; // e.g. "yanivgil" from "yanivgil.co.il"
-        const domainInSnippet = snippet.toLowerCase().includes(clientDomain.toLowerCase()) ||
-          snippet.toLowerCase().includes(domainSlug.toLowerCase());
+        const domainInSnippet = snippet.includes(clientDomain.toLowerCase()) ||
+          snippet.includes(domainSlug.toLowerCase());
         const nameInSnippet = clientNameClean && clientNameClean.length > 2 &&
-          snippet.toLowerCase().includes(clientNameClean.toLowerCase());
+          snippet.includes(clientNameClean.toLowerCase());
+        // Also check local names from the website title/H1 extraction
+        const localNameInSnippet = (summary.local_names_extracted || []).some(
+          ln => ln && ln.length > 2 && snippet.includes(ln.toLowerCase())
+        );
 
-        if (fromNameQuery || domainInSnippet || nameInSnippet) {
+        if (fromNameQuery || domainInSnippet || nameInSnippet || localNameInSnippet) {
           discoveredLinks.push({
             client_id: clientId,
             source_domain: sourceDomain,
@@ -682,6 +755,11 @@ export async function syncBacklinkIntelligence(clientId) {
             is_sponsored: false,
             first_seen: new Date().toISOString(),
             last_seen: new Date().toISOString(),
+          });
+          summary.paywall_trusted = summary.paywall_trusted || [];
+          summary.paywall_trusted.push({
+            url: sourceUrl, domain: sourceDomain,
+            reason: fromNameQuery ? 'name_query' : domainInSnippet ? 'domain_in_snippet' : localNameInSnippet ? 'local_name_in_snippet' : 'name_in_snippet',
           });
         }
         continue;

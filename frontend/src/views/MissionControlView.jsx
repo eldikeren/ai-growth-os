@@ -223,13 +223,18 @@ function LogPanel({ events }) {
 // - blockers (missing credentials, expired tokens)
 // - action buttons: Run diagnostic, View full run, Open credentials
 function AgentInspector({ info, clientId, onClose, onNavigate }) {
+  // ALL hooks must be declared at the top, BEFORE any early return (Rules of Hooks).
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  // Both action buttons (Investigate / Propose Fix) spawn an agent run and POLL
+  // for its result. The modal transitions through states for real feedback.
+  const [actionState, setActionState] = useState(null); // { kind, status, runId, result, error }
 
   useEffect(() => {
     if (!info || !clientId) return;
     setLoading(true);
+    setActionState(null); // reset action state when switching agents
     // Pull the latest run for this agent (includes error, tool envelopes, grounding, output)
     api(`/clients/${clientId}/runs?agent_slug=${encodeURIComponent(info.slug)}&limit=1`)
       .then(rows => {
@@ -250,10 +255,6 @@ function AgentInspector({ info, clientId, onClose, onNavigate }) {
   const grounding = details?.output?._grounding;
   const envelopeSummary = details?.output?._tool_envelopes_summary || [];
   const truthWarning = details?.output?._truth_warning;
-
-  // Both buttons spawn an agent run and POLL for its result (instead of silent close).
-  // The modal transitions to a "running → result" state so the user sees real feedback.
-  const [actionState, setActionState] = useState(null); // { kind, status, runId, result, error }
 
   async function runAgentAndWatch(kind, agentSlug, payloadExtras) {
     if (!clientId) return;

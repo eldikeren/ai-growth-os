@@ -548,13 +548,37 @@ export async function syncBacklinkIntelligence(clientId) {
 
   // 4b) GOOGLE-BASED BACKLINK DISCOVERY
   // DataForSEO's backlink index misses many real links (especially from major news sites).
-  // Supplement by searching Google for pages that mention the client domain, then
+  // Supplement by searching Google for pages that mention the client domain OR name, then
   // verify each result by fetching the page and checking for actual links.
   try {
-    const searchQuery = `"${clientDomain}" -site:${clientDomain}`;
-    const serpResult = await _dfsPost('https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
-      [{ keyword: searchQuery, location_code: 2376, language_code: 'he', depth: 30 }]);
-    const serpItems = (serpResult.items || []).filter(i => i.type === 'organic');
+    // Build search queries: domain-based + name-based
+    const searchQueries = [`"${clientDomain}" -site:${clientDomain}`];
+    // Add client name search (e.g. "יניב גיל" for Hebrew clients)
+    const { data: profile } = await supabase.from('client_profiles')
+      .select('language, notes').eq('client_id', clientId).maybeSingle();
+    // Extract business name (strip common suffixes like "Law Firm", "Finance", etc.)
+    const clientNameClean = client.name.replace(/[-_]/g, ' ').replace(/\b(law firm|finance|agency|group|ltd|inc)\b/gi, '').trim();
+    if (clientNameClean.length > 2) {
+      searchQueries.push(`"${clientNameClean}" -site:${clientDomain}`);
+    }
+
+    // Merge all SERP results from multiple queries, deduplicate by URL
+    const allSerpItems = [];
+    const seenUrls = new Set();
+    for (const query of searchQueries) {
+      try {
+        const serpResult = await _dfsPost('https://api.dataforseo.com/v3/serp/google/organic/live/advanced',
+          [{ keyword: query, location_code: 2376, language_code: profile?.language === 'he' ? 'he' : 'en', depth: 30 }]);
+        for (const item of (serpResult.items || [])) {
+          if (item.type === 'organic' && !seenUrls.has(item.url)) {
+            seenUrls.add(item.url);
+            allSerpItems.push(item);
+          }
+        }
+        await new Promise(r => setTimeout(r, 300));
+      } catch (qErr) { summary.errors.push(`serp_query "${query}": ${qErr.message}`); }
+    }
+    const serpItems = allSerpItems;
     const discoveredLinks = [];
 
     for (const item of serpItems.slice(0, 20)) {

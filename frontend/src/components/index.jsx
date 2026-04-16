@@ -106,10 +106,10 @@ export function Btn({ children, onClick, color = colors.primary, disabled, small
 }
 
 // ─── Gradient Button (for primary CTAs) ─────────────────────────
-export function GradientBtn({ children, onClick, disabled, style, ariaLabel }) {
+export function GradientBtn({ children, onClick, disabled, style, ariaLabel, type = 'button' }) {
   const [hovered, setHovered] = useState(false);
   return (
-    <button type="button" onClick={onClick} disabled={disabled} aria-label={ariaLabel}
+    <button type={type} onClick={onClick} disabled={disabled} aria-label={ariaLabel}
       onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
       style={{
         background: disabled ? colors.borderLight : colors.primaryGradient,

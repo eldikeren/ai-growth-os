@@ -1114,6 +1114,75 @@ router.get('/cron/process-onpage-tasks', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── VISUAL VERIFY A METRIC via Manus ─────────────────────────
+// Submits a browser task that visits a public URL and extracts the
+// current value of a named metric. Result feeds back into baselines
+// with source='manus_visual_verification' (highest trust tier).
+router.post('/clients/:clientId/metrics/:metricName/visual-verify', async (req, res) => {
+  try {
+    const { clientId, metricName } = req.params;
+    const { target_url, instructions_override, expected_value } = req.body || {};
+
+    // Get current stored value for comparison
+    const { data: current } = await supabase.from('baselines')
+      .select('metric_value_numeric, metric_text, source, recorded_at')
+      .eq('client_id', clientId).eq('metric_name', metricName).maybeSingle();
+
+    // Get client info to build the URL if not provided
+    const { data: client } = await supabase.from('clients')
+      .select('name, domain').eq('id', clientId).single();
+
+    // Default URLs by metric type
+    let url = target_url;
+    let instructions = instructions_override;
+
+    if (!url) {
+      if (metricName === 'google_reviews_count' || metricName === 'google_reviews_rating') {
+        url = `https://www.google.com/maps/search/${encodeURIComponent(client?.name || '')}`;
+        instructions = instructions
+          || `Visit the Google Maps search result page for "${client?.name}". Find the business listing and extract:
+- total number of Google reviews (integer)
+- star rating (decimal, e.g. 4.8)
+Return a JSON object: { "extracted_value": <review_count_number>, "rating": <rating>, "business_name_found": "<name>", "url_visited": "<final_url>" }`;
+      } else if (metricName === 'domain_authority') {
+        url = `https://ahrefs.com/website-authority-checker`;
+        instructions = instructions
+          || `Go to ${url}, enter the domain "${client?.domain}", wait for the DA score to load, extract the Domain Rating number. Return { "extracted_value": <number> }.`;
+      } else if (metricName === 'indexed_pages_count') {
+        url = `https://www.google.com/search?q=site%3A${encodeURIComponent(client?.domain || '')}`;
+        instructions = instructions
+          || `Visit the Google search results for "site:${client?.domain}". Find the approximate results count (e.g. "About 1,230 results"). Return { "extracted_value": <integer without commas> }.`;
+      } else {
+        return res.status(400).json({ error: `No default visual-verify config for metric "${metricName}". Provide target_url and instructions_override in body.` });
+      }
+    }
+
+    const expected = expected_value ?? current?.metric_value_numeric ?? null;
+
+    const { data: task, error } = await supabase.from('browser_tasks').insert({
+      client_id: clientId,
+      task_type: 'visual_verify_metric',
+      target_url: url,
+      instructions,
+      status: 'pending',
+      verify_metric_name: metricName,
+      verify_expected_value: expected != null ? String(expected) : null,
+    }).select().single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json({
+      task_id: task.id,
+      status: 'pending',
+      metric_name: metricName,
+      target_url: url,
+      current_stored_value: current?.metric_value_numeric,
+      current_source: current?.source,
+      message: 'Visual verification queued. Manus worker runs every 10 min (or trigger /cron/process-browser-tasks to run now).',
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── MANUS BROWSER TASK WORKER — runs every 10 min ───────────
 router.get('/cron/process-browser-tasks', async (req, res) => {
   try {
@@ -1168,6 +1237,56 @@ router.get('/cron/process-browser-tasks', async (req, res) => {
             artifacts: manusData.artifacts || null,
             completed_at: new Date().toISOString(),
           }).eq('id', task.id);
+
+          // VISUAL VERIFICATION: if this task was verifying a metric, write the
+          // extracted value back to baselines as the highest-trust source.
+          if (task.task_type === 'visual_verify_metric' && task.verify_metric_name) {
+            try {
+              const result = manusData.result || manusData;
+              // Expect result to contain an "extracted_value" field (number or string)
+              const extractedRaw = result?.extracted_value ?? result?.value ?? null;
+              const extractedNum = extractedRaw != null ? Number(String(extractedRaw).replace(/[^0-9.\-]/g, '')) : null;
+
+              if (extractedNum != null && !isNaN(extractedNum)) {
+                const expected = task.verify_expected_value ? Number(task.verify_expected_value) : null;
+                const matches = expected != null ? expected === extractedNum : null;
+
+                await supabase.from('browser_tasks').update({
+                  verify_extracted_value: String(extractedRaw),
+                  verify_matches: matches,
+                }).eq('id', task.id);
+
+                // Write back to baselines with the highest-trust source
+                await supabase.from('baselines').upsert({
+                  client_id: task.client_id,
+                  metric_name: task.verify_metric_name,
+                  metric_value: extractedNum,
+                  metric_value_numeric: extractedNum,
+                  metric_text: String(extractedRaw),
+                  source: 'manus_visual_verification',
+                  recorded_at: new Date().toISOString(),
+                  target_value: null,
+                }, { onConflict: 'client_id,metric_name' });
+
+                console.log(`[VISUAL_VERIFY] ${task.verify_metric_name}: expected=${expected} actual=${extractedNum} matches=${matches}`);
+
+                // If mismatch, raise an incident so the user sees the discrepancy
+                if (expected != null && !matches) {
+                  await supabase.from('incidents').insert({
+                    client_id: task.client_id,
+                    title: `Data mismatch: ${task.verify_metric_name}`,
+                    description: `Stored value was ${expected} but visual verification via Manus found ${extractedNum} at ${task.target_url}. The baseline has been updated to the verified value.`,
+                    severity: 'medium',
+                    status: 'open',
+                    category: 'data_integrity',
+                  }).then(() => {}, () => {});
+                }
+              }
+            } catch (ve) {
+              console.warn(`[VISUAL_VERIFY] Failed to process result for task ${task.id}:`, ve.message);
+            }
+          }
+
           results.push({ id: task.id, status: 'completed' });
         } else if (manusData.task_id) {
           // Async task — store external ID for polling

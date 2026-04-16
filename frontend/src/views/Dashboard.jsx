@@ -604,11 +604,30 @@ function CredentialBadge({ cred }) {
   );
 }
 
-function KpiMini({ label, value, target, unit, color, provenance, delta7d }) {
+function KpiMini({ label, value, target, unit, color, provenance, delta7d, metricName, clientId }) {
   const val = value != null ? value : '--';
   const isGood = target && value != null ? value >= target : null;
   const prov = provenance || {};
   const fColor = prov.freshness === 'fresh' ? '#10B981' : prov.freshness === 'aging' ? '#F59E0B' : prov.freshness === 'stale' || prov.freshness === 'critical_stale' ? '#EF4444' : colors.textDisabled;
+  const isStale = prov.freshness === 'stale' || prov.freshness === 'critical_stale';
+  const canVerify = !!(metricName && clientId && VERIFIABLE_METRICS.includes(metricName));
+  const [verifying, setVerifying] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState(null);
+
+  async function handleVerify(e) {
+    e.stopPropagation();
+    setVerifying(true);
+    setVerifyMsg(null);
+    try {
+      const resp = await api(`/clients/${clientId}/metrics/${metricName}/visual-verify`, { method: 'POST', body: {} });
+      setVerifyMsg({ kind: 'queued', text: `Manus task ${String(resp.task_id).slice(0, 8)} queued. Visits the real page to verify. Refreshes within ~10 min.` });
+    } catch (err) {
+      setVerifyMsg({ kind: 'err', text: err.message });
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   return (
     <div style={{ textAlign: 'center', minWidth: 60, position: 'relative' }} title={prov.source ? `Source: ${prov.source}\nLast sync: ${prov.last_sync ? new Date(prov.last_sync).toLocaleString() : 'never'}\nFreshness: ${prov.freshness_label || prov.freshness || 'unknown'}` : undefined}>
       <div style={{
@@ -632,9 +651,39 @@ function KpiMini({ label, value, target, unit, color, provenance, delta7d }) {
           {prov.freshness_label || (prov.age_hours != null ? (prov.age_hours < 1 ? 'Just now' : prov.age_hours < 24 ? `${prov.age_hours}h ago` : `${Math.round(prov.age_hours / 24)}d ago`) : 'Never synced')}
         </div>
       )}
+      {/* Visual Verify button — shown when metric is stale or source looks suspicious */}
+      {canVerify && (isStale || String(prov.source || '').toLowerCase().includes('cache')) && !verifyMsg && (
+        <button
+          onClick={handleVerify}
+          disabled={verifying}
+          title="Send Manus to visit the real page and extract the current value"
+          style={{
+            marginTop: 4, padding: '3px 8px', borderRadius: 4,
+            background: 'linear-gradient(135deg,#6366F1,#8B5CF6)', color: '#fff',
+            border: 'none', fontSize: 8, fontWeight: 700, letterSpacing: 1, cursor: 'pointer',
+            boxShadow: '0 0 8px rgba(99,102,241,0.4)',
+          }}
+        >{verifying ? '...' : '🔎 VERIFY VIA MANUS'}</button>
+      )}
+      {verifyMsg && (
+        <div style={{
+          marginTop: 4, fontSize: 7, color: verifyMsg.kind === 'err' ? '#EF4444' : '#10B981',
+          maxWidth: 120, lineHeight: 1.3, direction: 'ltr',
+        }} title={verifyMsg.text}>
+          {verifyMsg.kind === 'queued' ? '✓ Queued' : '✗ Failed'}
+        </div>
+      )}
     </div>
   );
 }
+
+// Metrics that have a sensible default public-page verification path
+const VERIFIABLE_METRICS = [
+  'google_reviews_count',
+  'google_reviews_rating',
+  'domain_authority',
+  'indexed_pages_count',
+];
 
 function ClientCard({ client, runCount, failCount, agentCount, kpis, isActive, onClick, onRefreshMetrics, refreshingMetrics, onDelete }) {
   const hasFailures = failCount > 0;
@@ -684,11 +733,11 @@ function ClientCard({ client, runCount, failCount, agentCount, kpis, isActive, o
         borderTop: `1px solid ${colors.borderLight}`, borderBottom: `1px solid ${colors.borderLight}`,
         marginBottom: 8,
       }}>
-        <KpiMini label="PageSpeed" value={b.mobile_pagespeed} target={b.mobile_pagespeed_target} provenance={b.mobile_pagespeed_prov} color={b.mobile_pagespeed >= 80 ? '#10B981' : b.mobile_pagespeed >= 50 ? '#F59E0B' : b.mobile_pagespeed ? '#EF4444' : null} />
-        <KpiMini label="Page 1 KWs" value={b.page1_keyword_count} target={b.page1_keyword_count_target} provenance={b.page1_keyword_count_prov} color="#6366F1" />
-        <KpiMini label="Reviews" value={b.google_reviews_count} target={b.google_reviews_count_target} provenance={b.google_reviews_count_prov} />
-        <KpiMini label="DA" value={b.domain_authority} target={b.domain_authority_target} provenance={b.domain_authority_prov} />
-        <KpiMini label="AI Visibility" value={b.ai_visibility_score} target={100} provenance={b.ai_visibility_score_prov} color={b.ai_visibility_score >= 50 ? '#10B981' : b.ai_visibility_score >= 20 ? '#F59E0B' : b.ai_visibility_score !== null ? '#EF4444' : null} />
+        <KpiMini label="PageSpeed" value={b.mobile_pagespeed} target={b.mobile_pagespeed_target} provenance={b.mobile_pagespeed_prov} color={b.mobile_pagespeed >= 80 ? '#10B981' : b.mobile_pagespeed >= 50 ? '#F59E0B' : b.mobile_pagespeed ? '#EF4444' : null} metricName="mobile_pagespeed" clientId={client.id} />
+        <KpiMini label="Page 1 KWs" value={b.page1_keyword_count} target={b.page1_keyword_count_target} provenance={b.page1_keyword_count_prov} color="#6366F1" metricName="page1_keyword_count" clientId={client.id} />
+        <KpiMini label="Reviews" value={b.google_reviews_count} target={b.google_reviews_count_target} provenance={b.google_reviews_count_prov} metricName="google_reviews_count" clientId={client.id} />
+        <KpiMini label="DA" value={b.domain_authority} target={b.domain_authority_target} provenance={b.domain_authority_prov} metricName="domain_authority" clientId={client.id} />
+        <KpiMini label="AI Visibility" value={b.ai_visibility_score} target={100} provenance={b.ai_visibility_score_prov} color={b.ai_visibility_score >= 50 ? '#10B981' : b.ai_visibility_score >= 20 ? '#F59E0B' : b.ai_visibility_score !== null ? '#EF4444' : null} metricName="ai_visibility_score" clientId={client.id} />
       </div>
 
       {/* Operational stats */}

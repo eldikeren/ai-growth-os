@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Image, Send, Pause, Play, Trash2, ChevronLeft, Edit3, Globe, Target,
   DollarSign, Calendar, Eye, Wand2, Search, X, Users, MapPin, Layers, ChevronDown, ChevronUp,
+  AlertCircle, Megaphone,
 } from 'lucide-react';
 import { api } from '../hooks/useApi.js';
 import { colors, spacing, radius, fontSize, fontWeight, transitions, shadows } from '../theme.js';
@@ -734,7 +735,7 @@ function CreativeEditor({ creative, onSave, onDelete, campaignId, clientId }) {
 
       <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.md, justifyContent: 'flex-end' }}>
         {onDelete && (
-          <Btn color="danger" onClick={onDelete} style={{ marginRight: 'auto' }}>
+          <Btn danger onClick={onDelete} style={{ marginRight: 'auto' }}>
             <Trash2 size={12} /> Remove
           </Btn>
         )}
@@ -867,7 +868,7 @@ function CampaignDetail({ campaignId, clientId, onBack }) {
   };
 
   if (loading) return <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>;
-  if (!campaign) return <Empty icon="!" title="Campaign not found" />;
+  if (!campaign) return <Empty icon={AlertCircle} msg="Campaign not found" />;
 
   const sc = STATUS_COLORS[campaign.status] || STATUS_COLORS.draft;
   const isDraft = campaign.status === 'draft' || campaign.status === 'failed';
@@ -913,7 +914,7 @@ function CampaignDetail({ campaignId, clientId, onBack }) {
             </GradientBtn>
           )}
           {isDraft && (
-            <Btn color="danger" onClick={handleDelete}>
+            <Btn danger onClick={handleDelete}>
               <Trash2 size={13} /> Delete
             </Btn>
           )}
@@ -1443,7 +1444,7 @@ export default function CampaignsView({ clientId }) {
     setAiLoading(false);
   };
 
-  if (!clientId) return <Empty icon="📣" title="Select a client" subtitle="Choose a client from the sidebar to manage campaigns" />;
+  if (!clientId) return <Empty icon={Megaphone} msg="Select a client to manage campaigns" />;
 
   // AI loading state
   if (aiLoading) {

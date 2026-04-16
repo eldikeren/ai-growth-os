@@ -486,13 +486,12 @@ export async function syncBacklinkIntelligence(clientId) {
     summary.client_rank = s.rank || 0;
   } catch (e) { summary.errors.push(`summary: ${e.message}`); }
 
-  // 3) Client REFERRING DOMAINS → referring_domains (replace)
+  // 3) Client REFERRING DOMAINS → referring_domains (upsert to preserve Google-discovered entries)
   try {
     const rd = await _dfsPost('https://api.dataforseo.com/v3/backlinks/referring_domains/live',
       [{ target: clientDomain, limit: 500, order_by: ['rank,desc'], exclude_internal_backlinks: true }]);
     const items = rd.items || [];
     if (items.length > 0) {
-      await supabase.from('referring_domains').delete().eq('client_id', clientId);
       const rows = items.map(d => ({
         client_id: clientId,
         domain: d.domain,
@@ -503,21 +502,21 @@ export async function syncBacklinkIntelligence(clientId) {
         first_seen: d.first_seen || null,
         last_updated: new Date().toISOString(),
       }));
-      // chunked insert to avoid payload limits
+      // chunked upsert to avoid payload limits — preserves Google-discovered domains
       for (let i = 0; i < rows.length; i += 200) {
-        await supabase.from('referring_domains').insert(rows.slice(i, i + 200));
+        await supabase.from('referring_domains').upsert(rows.slice(i, i + 200), { onConflict: 'client_id,domain' });
       }
       summary.tables_written.referring_domains = rows.length;
     }
   } catch (e) { summary.errors.push(`referring_domains: ${e.message}`); }
 
-  // 4) Client BACKLINKS (per-link detail) → backlinks (replace, capped at 500)
+  // 4) Client BACKLINKS (per-link detail) → backlinks (upsert, capped at 500)
+  //    NO DELETE — upsert preserves Google-discovered links from step 4b across sync cycles
   try {
     const bl = await _dfsPost('https://api.dataforseo.com/v3/backlinks/backlinks/live',
       [{ target: clientDomain, limit: 500, order_by: ['rank,desc'], mode: 'as_is' }]);
     const items = bl.items || [];
     if (items.length > 0) {
-      await supabase.from('backlinks').delete().eq('client_id', clientId);
       // Deduplicate by (source_domain, target_url) to avoid unique constraint violations
       const seenKeys = new Set();
       const rows = [];

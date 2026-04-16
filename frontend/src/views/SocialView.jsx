@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Facebook, Instagram, Send, Clock, Edit3, Trash2, Wand2, Plus, Eye,
   Image, Link, Calendar, RefreshCw, CheckCircle, AlertTriangle,
-  ChevronLeft, X, MessageCircle, Heart, Share2, Users,
+  ChevronLeft, X, MessageCircle, Heart, Share2, Users, Palette,
 } from 'lucide-react';
 import { api } from '../hooks/useApi.js';
 import { colors, spacing, radius, fontSize, fontWeight, transitions, shadows } from '../theme.js';
@@ -485,14 +485,18 @@ function PostDetail({ post, clientId, onBack, onRefresh }) {
               Media
             </div>
             <div style={{ display: 'flex', gap: spacing.sm, flexWrap: 'wrap' }}>
-              {post.media_urls.map((url, idx) => (
-                <div key={idx} style={{
-                  width: 160, height: 120, borderRadius: radius.md, overflow: 'hidden',
-                  border: `1px solid ${colors.border}`, background: colors.surfaceHover,
-                }}>
-                  <img src={url} alt={`Media ${idx + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                </div>
-              ))}
+              {post.media_urls.map((media, idx) => {
+                const src = typeof media === 'string' ? media : media?.url;
+                return src ? (
+                  <div key={idx} style={{
+                    borderRadius: radius.lg, overflow: 'hidden',
+                    border: `1px solid ${colors.border}`, background: colors.surfaceHover,
+                    maxWidth: 400,
+                  }}>
+                    <img src={src} alt={`Media ${idx + 1}`} style={{ width: '100%', maxHeight: 400, objectFit: 'cover', display: 'block' }} />
+                  </div>
+                ) : null;
+              })}
             </div>
           </div>
         )}
@@ -670,6 +674,173 @@ function StatusSection({ title, icon, posts, onSelect, accentColor }) {
 }
 
 // ── Main SocialView ─────────────────────────────────────────────
+// ── Visual Style Settings ──────────────────────────────────────
+const IMAGE_STYLES = [
+  { id: 'professional_photo', label: 'Professional Photo', emoji: '📸' },
+  { id: 'illustration', label: 'Illustration', emoji: '🎨' },
+  { id: 'minimalist', label: 'Minimalist', emoji: '⬜' },
+  { id: 'branded', label: 'Branded', emoji: '🏷️' },
+  { id: 'realistic', label: 'Realistic', emoji: '🌄' },
+  { id: 'artistic', label: 'Artistic', emoji: '🖼️' },
+];
+const MOODS = ['professional', 'friendly', 'playful', 'serious', 'inspiring', 'warm', 'elegant'];
+
+function VisualStyleEditor({ clientId, onClose }) {
+  const [style, setStyle] = useState({
+    image_style: 'professional_photo',
+    mood: 'professional',
+    color_palette: [],
+    include_logo: false,
+    logo_url: '',
+    custom_instructions: '',
+    avoid: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [colorInput, setColorInput] = useState('');
+  const [avoidInput, setAvoidInput] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await api(`/clients/${clientId}/social/visual-style`);
+        if (data && Object.keys(data).length) setStyle(s => ({ ...s, ...data }));
+      } catch (e) { console.error(e); }
+      setLoading(false);
+    })();
+  }, [clientId]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await api(`/clients/${clientId}/social/visual-style`, { method: 'PUT', body: style });
+      onClose();
+    } catch (e) { alert(e.message); }
+    setSaving(false);
+  };
+
+  if (loading) return <Card><Spin /></Card>;
+
+  return (
+    <Card style={{ border: `2px solid ${colors.primary}`, marginBottom: spacing.xl }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.lg }}>
+        <h3 style={{ margin: 0, fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text }}>
+          Visual Style Settings
+        </h3>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: colors.textMuted }}><X size={18} /></button>
+      </div>
+
+      {/* Image Style */}
+      <div style={{ marginBottom: spacing.lg }}>
+        <label style={{ display: 'block', fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.textSecondary, marginBottom: spacing.sm }}>
+          IMAGE STYLE
+        </label>
+        <div style={{ display: 'flex', gap: spacing.sm, flexWrap: 'wrap' }}>
+          {IMAGE_STYLES.map(s => (
+            <button key={s.id} onClick={() => setStyle(st => ({ ...st, image_style: s.id }))}
+              style={{
+                padding: '8px 16px', borderRadius: radius.md, cursor: 'pointer',
+                border: `2px solid ${style.image_style === s.id ? colors.primary : colors.borderLight}`,
+                background: style.image_style === s.id ? colors.primaryLightest : colors.surface,
+                color: style.image_style === s.id ? colors.primary : colors.text,
+                fontWeight: style.image_style === s.id ? fontWeight.bold : fontWeight.normal,
+                fontSize: fontSize.sm,
+              }}>
+              {s.emoji} {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Mood */}
+      <div style={{ marginBottom: spacing.lg }}>
+        <label style={{ display: 'block', fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.textSecondary, marginBottom: spacing.sm }}>
+          MOOD
+        </label>
+        <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap' }}>
+          {MOODS.map(m => (
+            <button key={m} onClick={() => setStyle(st => ({ ...st, mood: m }))}
+              style={{
+                padding: '6px 14px', borderRadius: radius.full, cursor: 'pointer',
+                border: `1px solid ${style.mood === m ? colors.primary : colors.borderLight}`,
+                background: style.mood === m ? colors.primaryLightest : 'transparent',
+                color: style.mood === m ? colors.primary : colors.textMuted,
+                fontSize: fontSize.xs, textTransform: 'capitalize',
+              }}>
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Brand Colors */}
+      <div style={{ marginBottom: spacing.lg }}>
+        <label style={{ display: 'block', fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.textSecondary, marginBottom: spacing.sm }}>
+          BRAND COLORS
+        </label>
+        <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center', marginBottom: spacing.sm }}>
+          <input type="color" value={colorInput || '#6366f1'} onChange={e => setColorInput(e.target.value)}
+            style={{ width: 40, height: 32, border: 'none', cursor: 'pointer', borderRadius: radius.sm }} />
+          <Btn small onClick={() => { if (colorInput) { setStyle(s => ({ ...s, color_palette: [...(s.color_palette || []), colorInput] })); setColorInput(''); } }}>
+            Add Color
+          </Btn>
+        </div>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(style.color_palette || []).map((c, i) => (
+            <div key={i} onClick={() => setStyle(s => ({ ...s, color_palette: s.color_palette.filter((_, j) => j !== i) }))}
+              style={{
+                width: 32, height: 32, borderRadius: radius.sm, background: c, cursor: 'pointer',
+                border: `2px solid ${colors.border}`, position: 'relative',
+              }}
+              title={`${c} — click to remove`} />
+          ))}
+        </div>
+      </div>
+
+      {/* Custom Instructions */}
+      <div style={{ marginBottom: spacing.lg }}>
+        <label style={{ display: 'block', fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.textSecondary, marginBottom: spacing.sm }}>
+          CUSTOM VISUAL INSTRUCTIONS
+        </label>
+        <textarea
+          style={{ ...inputStyle, minHeight: 60, resize: 'vertical' }}
+          placeholder="e.g., Always include scales of justice imagery, use blue tones, show happy families..."
+          value={style.custom_instructions || ''}
+          onChange={e => setStyle(s => ({ ...s, custom_instructions: e.target.value }))}
+        />
+      </div>
+
+      {/* Avoid */}
+      <div style={{ marginBottom: spacing.lg }}>
+        <label style={{ display: 'block', fontSize: fontSize.sm, fontWeight: fontWeight.bold, color: colors.textSecondary, marginBottom: spacing.sm }}>
+          AVOID IN IMAGES
+        </label>
+        <div style={{ display: 'flex', gap: spacing.sm, marginBottom: spacing.sm }}>
+          <input style={{ ...inputStyle, flex: 1 }} placeholder="e.g., stock photos, text on images..." value={avoidInput}
+            onChange={e => setAvoidInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && avoidInput.trim()) { setStyle(s => ({ ...s, avoid: [...(s.avoid || []), avoidInput.trim()] })); setAvoidInput(''); } }} />
+          <Btn small onClick={() => { if (avoidInput.trim()) { setStyle(s => ({ ...s, avoid: [...(s.avoid || []), avoidInput.trim()] })); setAvoidInput(''); } }}>Add</Btn>
+        </div>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {(style.avoid || []).map((a, i) => (
+            <span key={i} onClick={() => setStyle(s => ({ ...s, avoid: s.avoid.filter((_, j) => j !== i) }))}
+              style={{
+                padding: '3px 10px', borderRadius: radius.full, fontSize: fontSize.xs,
+                background: colors.errorLight, color: colors.errorDark, cursor: 'pointer',
+              }}>
+              {a} ×
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <GradientBtn onClick={handleSave} disabled={saving}>
+        {saving ? <Spin /> : 'Save Visual Style'}
+      </GradientBtn>
+    </Card>
+  );
+}
+
 export default function SocialView({ clientId }) {
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -678,6 +849,7 @@ export default function SocialView({ clientId }) {
   const [refreshing, setRefreshing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [genStatus, setGenStatus] = useState('');
+  const [showStyleSettings, setShowStyleSettings] = useState(false);
 
   const load = useCallback(async () => {
     if (!clientId) return;
@@ -767,6 +939,9 @@ export default function SocialView({ clientId }) {
             <Btn onClick={handleRefresh} disabled={refreshing} secondary>
               {refreshing ? <Spin /> : <RefreshCw size={14} />}
             </Btn>
+            <Btn onClick={() => setShowStyleSettings(s => !s)} secondary title="Visual Style Settings">
+              <Palette size={14} />
+            </Btn>
             <Btn onClick={() => setShowCreate(true)} secondary>
               <Plus size={14} /> Manual Post
             </Btn>
@@ -820,6 +995,9 @@ export default function SocialView({ clientId }) {
           ))}
         </div>
       )}
+
+      {/* Visual Style Settings */}
+      {showStyleSettings && <VisualStyleEditor clientId={clientId} onClose={() => setShowStyleSettings(false)} />}
 
       {/* Create form */}
       {showCreate && (

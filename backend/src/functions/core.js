@@ -234,6 +234,20 @@ ${rules.custom_instructions ? `- Custom Instructions: ${rules.custom_instruction
     ? '\n\n=== APPROVAL STATUS ===\nThis task was previously held for approval and has now been APPROVED. Proceed with full execution and implementation.'
     : '';
 
+  // Fetch existing proposed changes to prevent duplicates
+  const { data: existingProposals } = await supabase.from('proposed_changes')
+    .select('page_url, change_type, status, created_at')
+    .eq('client_id', clientId)
+    .in('status', ['proposed', 'approved', 'executed'])
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  const existingProposalsBlock = existingProposals?.length
+    ? `\n\n=== EXISTING PROPOSED CHANGES (do NOT re-propose these) ===\n${existingProposals.map(p =>
+        `- ${p.change_type} for ${p.page_url} (${p.status}, ${p.created_at?.slice(0, 10)})`
+      ).join('\n')}`
+    : '';
+
   // CONTENT SCOPE GUARDRAIL — sits at the very top of the prompt, non-negotiable.
   // Every agent sees the client's allowed/forbidden topics, brand voice, and canonical
   // facts BEFORE it sees its own base prompt. This prevents cross-client content bleed
@@ -249,7 +263,7 @@ ${scopeGuardrails.map((g, i) => `--- GUARDRAIL ${i + 1} ---\n${g.content}`).join
 === END CONTENT SCOPE GUARDRAIL ===\n\n`
     : '';
 
-  const fullPrompt = scopeBlock + activePrompt + memoryBlock + rulesBlock + keywordsBlock + baselinesBlock + recentRunsBlock + taskBlock + approvalBlock;
+  const fullPrompt = scopeBlock + activePrompt + memoryBlock + rulesBlock + keywordsBlock + baselinesBlock + recentRunsBlock + existingProposalsBlock + taskBlock + approvalBlock;
 
   // 9. Create run record
   const { data: run } = await supabase.from('runs').insert({

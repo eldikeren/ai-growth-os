@@ -2397,6 +2397,42 @@ export async function executeTool(toolName, args, clientId, runId) {
           };
         }
 
+        // ─── 0b. DEDUP CHECK ───
+        // Normalize URLs so www vs non-www and trailing-slash variants match.
+        function normalizeUrl(url) {
+          try {
+            const u = new URL(url);
+            // Remove www prefix for consistency
+            u.hostname = u.hostname.replace(/^www\./, '');
+            // Remove trailing slash except for root
+            let path = u.pathname.replace(/\/+$/, '') || '/';
+            return `${u.protocol}//${u.hostname}${path}`;
+          } catch { return url; }
+        }
+
+        const normalizedUrl = normalizeUrl(args.page_url);
+
+        // Query existing proposals for this client + change_type to detect duplicates
+        const { data: existingChanges } = await supabase.from('proposed_changes')
+          .select('id, status, proposed_value, page_url, created_at')
+          .eq('client_id', clientId)
+          .eq('change_type', args.change_type)
+          .in('status', ['proposed', 'approved', 'executed'])
+          .order('created_at', { ascending: false })
+          .limit(50);
+
+        const duplicate = existingChanges?.find(e => normalizeUrl(e.page_url) === normalizedUrl);
+
+        if (duplicate) {
+          return {
+            created: false,
+            duplicate: true,
+            existing_change_id: duplicate.id,
+            existing_status: duplicate.status,
+            message: `A ${args.change_type} change for ${args.page_url} already exists (status: ${duplicate.status}, created: ${duplicate.created_at}).`
+          };
+        }
+
         // 1. Detect client's website platform
         // NOTE: column is primary_domain, NOT domain. Using the wrong name
         // causes the whole SELECT to fail silently and website stays null.
@@ -2435,12 +2471,12 @@ export async function executeTool(toolName, args, clientId, runId) {
         else if (website?.website_platform_type === 'webflow') platform = 'webflow';
         else if (website?.website_platform_type === 'shopify') platform = 'shopify';
 
-        // 2. Save the proposed change
+        // 2. Save the proposed change (use normalizedUrl for consistency)
         const { data: change, error: changeErr } = await supabase.from('proposed_changes').insert({
           client_id: clientId,
           run_id: runId,
           agent_slug: agentSlug || 'agent',
-          page_url: args.page_url,
+          page_url: normalizedUrl,
           change_type: args.change_type,
           current_value: args.current_value || null,
           proposed_value: args.proposed_value,

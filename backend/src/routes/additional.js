@@ -3567,7 +3567,7 @@ router.post('/clients/:clientId/social/:postId/publish', async (req, res) => {
 async function getSocialClientContext(clientId) {
   const [clientRes, profileRes, rulesRes, memRes, seoRes] = await Promise.all([
     supabase.from('clients').select('name, domain, business_type, target_audience, niche, language, country').eq('id', clientId).single(),
-    supabase.from('client_profiles').select('business_type, industry, language, brand_voice').eq('client_id', clientId).maybeSingle(),
+    supabase.from('client_profiles').select('business_type, industry, language, brand_voice, social_visual_style').eq('client_id', clientId).maybeSingle(),
     supabase.from('client_rules').select('brand_voice, target_audiences, compliance_style, geographies').eq('client_id', clientId).maybeSingle(),
     supabase.from('memory_items').select('key, value').eq('client_id', clientId).limit(15),
     supabase.from('seo_data').select('page_url, seo_title, h1_text').eq('client_id', clientId).limit(10),
@@ -3580,26 +3580,80 @@ async function getSocialClientContext(clientId) {
     seoPages: seoRes.data || [],
     lang: profileRes.data?.language || clientRes.data?.language || 'he',
     brandVoice: rulesRes.data?.brand_voice || profileRes.data?.brand_voice || 'professional',
+    visualStyle: profileRes.data?.social_visual_style || {},
   };
 }
 
-// Helper: generate image with DALL-E
-async function generatePostImage(imagePrompt) {
+// ── GET/SET VISUAL STYLE ─────────────────────────────────────────
+router.get('/clients/:clientId/social/visual-style', async (req, res) => {
+  try {
+    const { data } = await supabase.from('client_profiles')
+      .select('social_visual_style').eq('client_id', req.params.clientId).maybeSingle();
+    res.json(data?.social_visual_style || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.put('/clients/:clientId/social/visual-style', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const style = req.body;
+    const { error } = await supabase.from('client_profiles')
+      .update({ social_visual_style: style }).eq('client_id', clientId);
+    if (error) throw error;
+    res.json({ success: true, style });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Helper: generate image with DALL-E, applying visual style
+async function generatePostImage(imagePrompt, visualStyle = {}) {
   try {
     const openaiKey = process.env.OPENAI_API_KEY;
     if (!openaiKey) return null;
+
+    // Apply visual style to the prompt
+    let styledPrompt = imagePrompt;
+    if (visualStyle.image_style) {
+      const styleMap = {
+        professional_photo: 'Professional high-quality photography style.',
+        illustration: 'Modern flat illustration style with clean lines.',
+        minimalist: 'Minimalist clean design with lots of whitespace.',
+        meme: 'Engaging meme-style visual, bold and eye-catching.',
+        branded: 'Corporate branded style, polished and professional.',
+        realistic: 'Photorealistic style, natural lighting.',
+        artistic: 'Artistic creative style with bold colors and composition.',
+      };
+      styledPrompt += ' ' + (styleMap[visualStyle.image_style] || '');
+    }
+    if (visualStyle.mood) {
+      styledPrompt += ` Mood: ${visualStyle.mood}.`;
+    }
+    if (visualStyle.color_palette?.length) {
+      styledPrompt += ` Use these brand colors: ${visualStyle.color_palette.join(', ')}.`;
+    }
+    if (visualStyle.custom_instructions) {
+      styledPrompt += ` ${visualStyle.custom_instructions}`;
+    }
+    if (visualStyle.avoid?.length) {
+      styledPrompt += ` Avoid: ${visualStyle.avoid.join(', ')}.`;
+    }
+    styledPrompt += ' Do NOT include any text, words, letters, or watermarks in the image.';
+
     const imgRes = await fetch('https://api.openai.com/v1/images/generations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
       body: JSON.stringify({
         model: 'dall-e-3',
-        prompt: imagePrompt,
+        prompt: styledPrompt.substring(0, 4000),
         n: 1,
         size: '1024x1024',
         quality: 'standard',
       }),
     });
     const imgData = await imgRes.json();
+    if (imgData.error) {
+      console.error('DALL-E error:', imgData.error.message);
+      return null;
+    }
     return imgData?.data?.[0]?.url || null;
   } catch (e) {
     console.error('DALL-E image generation failed:', e.message);
@@ -3655,10 +3709,10 @@ Return ONLY a JSON object (no markdown, no backticks):
       parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { content: text };
     } catch { parsed = { content: text }; }
 
-    // Generate image with DALL-E
+    // Generate image with DALL-E (with visual style)
     let imageUrl = null;
     if (parsed.image_prompt) {
-      imageUrl = await generatePostImage(parsed.image_prompt);
+      imageUrl = await generatePostImage(parsed.image_prompt, ctx.visualStyle);
     }
 
     res.json({
@@ -3685,7 +3739,16 @@ router.post('/clients/:clientId/social/ai-batch-generate', async (req, res) => {
       .select('content').eq('client_id', clientId).order('created_at', { ascending: false }).limit(10);
     const recentCtx = (recentPosts || []).map(p => p.content.substring(0, 80)).join('\n');
 
-    const aiPrompt = `You are a social media strategist. Generate ${count} unique, ready-to-publish social media posts for this business.
+    const visualCtx = ctx.visualStyle?.image_style ? `
+VISUAL STYLE PREFERENCES:
+- Image Style: ${ctx.visualStyle.image_style}
+- Mood: ${ctx.visualStyle.mood || 'professional'}
+- Brand Colors: ${ctx.visualStyle.color_palette?.join(', ') || 'use business-appropriate colors'}
+- Include Logo: ${ctx.visualStyle.include_logo ? 'yes' : 'no'}
+- Custom Visual Instructions: ${ctx.visualStyle.custom_instructions || 'none'}
+- Avoid: ${ctx.visualStyle.avoid?.join(', ') || 'none'}` : '';
+
+    const aiPrompt = `You are an expert social media manager running the accounts for a real business. Create ${count} HIGH-QUALITY, ready-to-publish social media posts. Each post should be substantial — the kind that gets real engagement.
 
 BUSINESS:
 - Name: ${ctx.client?.name || 'Unknown'}
@@ -3696,37 +3759,45 @@ BUSINESS:
 - Brand Voice: ${ctx.brandVoice}
 - Country: ${ctx.client?.country || 'IL'}
 - Platforms: ${platforms.join(', ')}
+${visualCtx}
 
-BUSINESS CONTEXT:
+BUSINESS CONTEXT & KNOWLEDGE:
 ${memCtx || 'No additional context'}
 
-WEBSITE PAGES (use these for relevant links):
+WEBSITE PAGES (reference these in posts):
 ${ctx.seoPages.map(p => `${p.page_url}: "${p.seo_title || p.h1_text || ''}"`).join('\n') || 'No pages'}
 
-RECENTLY POSTED (avoid similar content):
+RECENTLY POSTED (avoid repeating):
 ${recentCtx || 'No recent posts'}
 
-Create ${count} diverse posts covering different angles:
-- Educational/tips posts about the industry
-- Behind-the-scenes or team posts
-- Service/product highlights
-- Client success stories or testimonials
-- Seasonal/trending topic posts
-- Engagement posts (questions, polls)
+REQUIREMENTS FOR EACH POST:
+1. Content must be AT LEAST 4-6 sentences (150+ words for Facebook, 100+ for Instagram)
+2. Include a hook/opening line that grabs attention
+3. Provide REAL VALUE — tips, insights, stories, or information people actually want
+4. End with a call-to-action (visit website, comment, share, DM)
+5. For Instagram: include 8-12 relevant hashtags at the end
+6. Reference specific services, expertise areas, or pages from the business
+7. Use emojis naturally and sparingly (2-4 per post)
+8. Write like a human, not a robot — conversational and authentic
 
-Write all content in ${ctx.lang === 'he' ? 'Hebrew' : 'English'}.
-For Instagram posts, include 5-10 relevant hashtags.
+POST VARIETY — create ${count} diverse posts:
+- 1 educational post (teach something valuable about the industry)
+- 1 service/expertise showcase (highlight what makes this business unique)
+- 1 engagement post (ask a question, share a surprising fact, or create a mini-poll)
+- 1 trust/authority post (share an insight that demonstrates deep expertise)
+
+Write ALL content in ${ctx.lang === 'he' ? 'Hebrew' : 'English'}.
 
 Return ONLY a JSON array (no markdown, no backticks):
 [
   {
-    "title": "Short internal title for this post",
-    "content": "Full post text/caption",
+    "title": "Short descriptive internal title",
+    "content": "THE FULL POST — minimum 150 words for Facebook, 100 for Instagram. Must include hook, value, and CTA.",
     "platform": "facebook or instagram",
-    "post_type": "text or image or link",
-    "image_prompt": "Detailed English prompt for DALL-E image generation. Describe scene, style, mood, colors. NO text/words in the image. Professional and business-relevant.",
-    "suggested_link": "relevant page URL or null",
-    "category": "educational|behind_scenes|service_highlight|testimonial|trending|engagement"
+    "post_type": "image",
+    "image_prompt": "Detailed DALL-E prompt in English. Describe: specific scene composition, subjects, lighting, color palette, perspective, mood. Must be relevant to the post topic. NO text/words/letters in the image. Photographic or illustration style as appropriate.",
+    "suggested_link": "relevant page URL from the website or null",
+    "category": "educational|service_highlight|engagement|authority"
   }
 ]`;
 
@@ -3738,8 +3809,8 @@ Return ONLY a JSON array (no markdown, no backticks):
       posts = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
     } catch { return res.status(500).json({ error: 'Failed to parse AI response' }); }
 
-    // Generate images in parallel for all posts via DALL-E
-    const imagePromises = posts.map(p => p.image_prompt ? generatePostImage(p.image_prompt) : Promise.resolve(null));
+    // Generate images in parallel for all posts via DALL-E (with visual style)
+    const imagePromises = posts.map(p => p.image_prompt ? generatePostImage(p.image_prompt, ctx.visualStyle) : Promise.resolve(null));
     const images = await Promise.all(imagePromises);
 
     // Save each post as a draft

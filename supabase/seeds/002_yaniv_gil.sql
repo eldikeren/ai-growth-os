@@ -43,7 +43,7 @@ INSERT INTO client_rules (
     "WhatsApp is a primary contact channel for Israeli users — all CTA strategies must include WhatsApp options.",
     "Hebrew content must use formal register (לשון גבוהה) throughout. No informal language, slang, or colloquialisms.",
     "RTL formatting must be verified on every content change. Hebrew text must render correctly right-to-left.",
-    "Media mentions exist in Ynet, Mako, Walla, TheMarker, PsakDin — these are editorial citations without live URLs and carry no current SEO link value."
+    "Media mentions exist in Ynet, Mako, Walla, TheMarker, PsakDin — these are actual backlinks that should be tracked and monitored for SEO link value."
   ]',
   true,
   'office',
@@ -93,7 +93,7 @@ INSERT INTO memory_items (client_id, scope, type, content, tags, source, approve
 
 -- Backlinks
 ('00000000-0000-0000-0000-000000000001', 'backlinks', 'status',
- 'Backlink profile is thin. Editorial citations exist in Ynet, Mako, Walla, TheMarker, PsakDin — but these are text mentions without live URLs and carry no current SEO link value. The gap between editorial mentions and actual dofollow backlinks is large. Link building from Israeli legal and media sites is a high priority.',
+ 'Backlink profile is thin. Actual backlinks exist from Ynet, Mako, Walla, TheMarker, PsakDin — these are real backlinks that should be tracked and monitored for SEO value. Link building from Israeli legal and media sites remains a high priority to expand the backlink profile further.',
  ARRAY['backlinks', 'link-building', 'priority', 'gap'], 'manual', true, 0.95),
 
 ('00000000-0000-0000-0000-000000000001', 'backlinks', 'targets',

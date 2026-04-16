@@ -374,7 +374,7 @@ function TaskDetail({ task: initialTask, clientId, onClose, onUpdate, onDelete }
           <Btn small onClick={() => editing ? handleSave() : setEditing(true)}>
             {editing ? 'Save' : 'Edit'}
           </Btn>
-          <Btn small color="danger" onClick={handleDelete}>
+          <Btn small danger onClick={handleDelete}>
             <Trash2 size={12} />
           </Btn>
         </div>

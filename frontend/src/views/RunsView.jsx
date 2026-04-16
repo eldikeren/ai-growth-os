@@ -1158,50 +1158,144 @@ function RunListItem({ run, isSelected, onClick }) {
 // ─── Mission Banner ───────────────────────────────────────────
 function MissionBanner({ clientId }) {
   const [keywords, setKeywords] = useState([]);
+  const [drillDown, setDrillDown] = useState(null); // 'top3' | 'top10' | 'outside' | 'notRanking' | null
+
   useEffect(() => {
     if (!clientId) return;
-    api(`/clients/${clientId}/keywords?limit=5`).then(d => setKeywords(d || [])).catch(() => {});
+    // Fix: fetch ALL keywords (not limit=5) so the counts are accurate
+    api(`/clients/${clientId}/keywords?limit=1000`).then(d => setKeywords(d || [])).catch(() => {});
   }, [clientId]);
 
-  const top3 = keywords.filter(k => k.current_position <= 3).length;
-  const top10 = keywords.filter(k => k.current_position <= 10 && k.current_position > 3).length;
-  const outside = keywords.filter(k => !k.current_position || k.current_position > 10).length;
+  const top3List = keywords.filter(k => k.current_position && k.current_position <= 3);
+  const top10List = keywords.filter(k => k.current_position && k.current_position <= 10 && k.current_position > 3);
+  const outsideList = keywords.filter(k => k.current_position && k.current_position > 10);
+  const notRankingList = keywords.filter(k => !k.current_position);
+
+  const buckets = [
+    { key: 'top3', label: 'Top 3', list: top3List, color: '#10B981', icon: '🥇' },
+    { key: 'top10', label: 'Top 10', list: top10List, color: '#F59E0B', icon: '📈' },
+    { key: 'outside', label: 'Outside 10', list: outsideList, color: '#F87171', icon: '⚠️' },
+    { key: 'notRanking', label: 'Not Ranking', list: notRankingList, color: '#9CA3AF', icon: '—' },
+  ];
+
+  const activeBucket = drillDown ? buckets.find(b => b.key === drillDown) : null;
 
   return (
-    <div style={{
-      background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #1e40af 100%)',
-      borderRadius: radius.xl, padding: `${spacing.lg}px ${spacing.xl}px`,
-      marginBottom: spacing.xl, color: '#fff',
-      display: 'flex', alignItems: 'center', gap: spacing.xl, flexWrap: 'wrap',
-    }}>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: fontSize.xs, color: '#a5b4fc', fontWeight: fontWeight.semibold, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
-          Mission
+    <div style={{ marginBottom: spacing.xl }}>
+      <div style={{
+        background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #1e40af 100%)',
+        borderRadius: radius.xl, padding: `${spacing.lg}px ${spacing.xl}px`,
+        color: '#fff',
+        display: 'flex', alignItems: 'center', gap: spacing.xl, flexWrap: 'wrap',
+      }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: fontSize.xs, color: '#a5b4fc', fontWeight: fontWeight.semibold, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+            Mission
+          </div>
+          <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, lineHeight: 1.2 }}>
+            🎯 Get Clients to Top 3
+          </div>
+          <div style={{ fontSize: fontSize.sm, color: '#c7d2fe', marginTop: 4 }}>
+            Every agent action is measured against ranking improvement • {keywords.length} keywords tracked
+          </div>
         </div>
-        <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, lineHeight: 1.2 }}>
-          🎯 Get Clients to Top 3
-        </div>
-        <div style={{ fontSize: fontSize.sm, color: '#c7d2fe', marginTop: 4 }}>
-          Every agent action is measured against ranking improvement
-        </div>
+        {keywords.length > 0 && (
+          <div style={{ display: 'flex', gap: spacing.md }}>
+            {buckets.map(({ key, label, list, color, icon }) => {
+              const isActive = drillDown === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => setDrillDown(isActive ? null : key)}
+                  disabled={list.length === 0}
+                  style={{
+                    background: isActive ? `${color}33` : 'transparent',
+                    border: `1px solid ${isActive ? color : '#ffffff22'}`,
+                    borderRadius: radius.md,
+                    padding: '10px 16px',
+                    textAlign: 'center',
+                    cursor: list.length > 0 ? 'pointer' : 'default',
+                    color: '#fff',
+                    minWidth: 88,
+                    transition: 'all 0.15s',
+                    opacity: list.length === 0 ? 0.4 : 1,
+                  }}
+                  title={list.length > 0 ? `Click to view ${list.length} keyword${list.length === 1 ? '' : 's'}` : ''}
+                >
+                  <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, color }}>{list.length}</div>
+                  <div style={{ fontSize: fontSize.xs, color: '#c7d2fe', marginTop: 2 }}>{icon} {label}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {keywords.length === 0 && (
+          <div style={{ fontSize: fontSize.sm, color: '#a5b4fc' }}>
+            Run SEO Core Agent to track keyword positions →
+          </div>
+        )}
       </div>
-      {keywords.length > 0 && (
-        <div style={{ display: 'flex', gap: spacing.lg }}>
-          {[
-            { label: 'Top 3', count: top3, color: '#10B981', icon: '🥇' },
-            { label: 'Top 10', count: top10, color: '#F59E0B', icon: '📈' },
-            { label: 'Outside 10', count: outside, color: '#F87171', icon: '⚠️' },
-          ].map(({ label, count, color, icon }) => (
-            <div key={label} style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: fontSize['2xl'], fontWeight: fontWeight.extrabold, color }}>{count}</div>
-              <div style={{ fontSize: fontSize.xs, color: '#c7d2fe' }}>{icon} {label}</div>
+
+      {/* Drill-down list of keywords in the clicked bucket */}
+      {activeBucket && (
+        <div style={{
+          marginTop: spacing.sm,
+          background: colors.surface,
+          border: `2px solid ${activeBucket.color}`,
+          borderRadius: radius.lg,
+          padding: spacing.md,
+          maxHeight: 380, overflowY: 'auto',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            marginBottom: spacing.sm, paddingBottom: spacing.xs,
+            borderBottom: `1px solid ${colors.border}`,
+          }}>
+            <div style={{ fontSize: fontSize.md, fontWeight: fontWeight.bold, color: colors.text }}>
+              {activeBucket.icon} {activeBucket.label} — {activeBucket.list.length} keywords
             </div>
-          ))}
-        </div>
-      )}
-      {keywords.length === 0 && (
-        <div style={{ fontSize: fontSize.sm, color: '#a5b4fc' }}>
-          Run SEO Core Agent to track keyword positions →
+            <button
+              onClick={() => setDrillDown(null)}
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                color: colors.textMuted, fontSize: 14, padding: 4,
+              }}
+            >✕</button>
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: fontSize.sm }}>
+            <thead>
+              <tr style={{ textAlign: 'left', color: colors.textMuted, fontSize: fontSize.xs }}>
+                <th style={{ padding: '6px 8px' }}>Position</th>
+                <th style={{ padding: '6px 8px' }}>Keyword</th>
+                <th style={{ padding: '6px 8px', textAlign: 'right' }}>Volume</th>
+                <th style={{ padding: '6px 8px' }}>Source</th>
+                <th style={{ padding: '6px 8px' }}>Last checked</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeBucket.list
+                .sort((a, b) => (a.current_position || 9999) - (b.current_position || 9999))
+                .map(k => (
+                  <tr key={k.id} style={{ borderTop: `1px solid ${colors.borderLight}` }}>
+                    <td style={{ padding: '8px', fontWeight: fontWeight.bold, color: activeBucket.color }}>
+                      {k.current_position ? `#${k.current_position}` : '—'}
+                    </td>
+                    <td style={{ padding: '8px', color: colors.text, direction: /[\u0590-\u05FF]/.test(k.keyword || '') ? 'rtl' : 'ltr' }}>
+                      {k.keyword}
+                    </td>
+                    <td style={{ padding: '8px', textAlign: 'right', color: colors.textSecondary }}>
+                      {k.volume ? k.volume.toLocaleString() : '—'}
+                    </td>
+                    <td style={{ padding: '8px', color: colors.textMuted, fontSize: fontSize.xs }}>
+                      {k.source || 'manual'}
+                    </td>
+                    <td style={{ padding: '8px', color: colors.textMuted, fontSize: fontSize.xs }}>
+                      {k.last_checked_at ? new Date(k.last_checked_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'never'}
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

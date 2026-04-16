@@ -12,7 +12,7 @@ import { crawlCustomerSite } from '../gt3/services/SiteCrawlerService.js';
 import { discoverKeywords } from '../gt3/services/KeywordDiscoveryService.js';
 import { scoreAllKeywords } from '../gt3/services/KeywordScoringService.js';
 import { planMissions } from '../gt3/services/MissionPlannerService.js';
-import { pullNextTaskForAgent, buildTaskContext, claimTask, recordTaskOutcome } from '../gt3/services/GT3TaskExecutorService.js';
+import { pullNextTaskForAgent, buildTaskContext, claimTask, recordTaskOutcome, executeGT3Task, autoExecuteOpenTasks } from '../gt3/services/GT3TaskExecutorService.js';
 import { captureBrandSignals, computeSignalTrend } from '../gt3/services/BrandDemandSignalsService.js';
 import { buildWeeklyReport } from '../gt3/services/WeeklyMissionReportService.js';
 import { getGT3Supabase } from '../gt3/services/supabaseClient.js';
@@ -158,6 +158,31 @@ router.post('/tasks/:taskId/claim', async (req, res) => {
     const { kind } = req.body; // 'action' | 'channel'
     if (!['action', 'channel'].includes(kind)) return res.status(400).json({ error: 'kind must be action or channel' });
     res.json(await claimTask(req.params.taskId, kind));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual execute: dispatches a single GT3 task to the agent runtime.
+// Returns the run_id — the UI can poll /runs/:id to watch progress.
+router.post('/tasks/:taskId/execute', async (req, res) => {
+  try {
+    const { kind } = req.body;
+    if (!['action', 'channel'].includes(kind)) return res.status(400).json({ error: 'kind must be action or channel' });
+    res.json(await executeGT3Task(req.params.taskId, kind));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Auto-execute N open tasks — invoked by the cron or manually.
+router.post('/gt3/auto-execute', async (req, res) => {
+  try {
+    const { maxPerCustomer = 3, maxTotal = 20 } = req.body || {};
+    res.json(await autoExecuteOpenTasks({ maxPerCustomer, maxTotal }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Cron: auto-execute top priority tasks every 30 min
+router.get('/cron/gt3-auto-execute', async (req, res) => {
+  try {
+    res.json(await autoExecuteOpenTasks({ maxPerCustomer: 2, maxTotal: 10 }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

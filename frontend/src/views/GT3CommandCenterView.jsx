@@ -264,8 +264,35 @@ function SectionHeader({ icon: Icon, title, subtitle, count, color = colors.prim
   );
 }
 
-function TaskRow({ task, kind }) {
+function TaskRow({ task, kind, onExecute }) {
   const color = LABEL_COLOR[task.priority_label] || colors.textMuted;
+  const [state, setState] = useState('idle'); // idle | running | dispatched | failed
+  const [runId, setRunId] = useState(null);
+  const [errorMsg, setErrorMsg] = useState(null);
+
+  async function runIt(e) {
+    e.stopPropagation();
+    setState('running');
+    setErrorMsg(null);
+    try {
+      const r = await api(`/tasks/${task.id}/execute`, {
+        method: 'POST',
+        body: { kind },
+      });
+      if (r?.ok && r?.data?.run_id) {
+        setRunId(r.data.run_id);
+        setState('dispatched');
+        if (onExecute) onExecute(task.id);
+      } else {
+        setErrorMsg(r?.errors?.[0] || 'Execute failed');
+        setState('failed');
+      }
+    } catch (e) {
+      setErrorMsg(e.message);
+      setState('failed');
+    }
+  }
+
   return (
     <div style={{
       background: colors.surface,
@@ -275,7 +302,7 @@ function TaskRow({ task, kind }) {
       fontSize: fontSize.sm,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', direction: 'rtl' }}>
-        <span style={{ fontWeight: fontWeight.bold, color: colors.text }}>{task.title_he}</span>
+        <span style={{ fontWeight: fontWeight.bold, color: colors.text, flex: 1 }}>{task.title_he}</span>
         <span style={{
           fontSize: fontSize.xs, fontWeight: fontWeight.semibold,
           background: `${color}22`, color,
@@ -287,6 +314,34 @@ function TaskRow({ task, kind }) {
           <span style={{ fontSize: fontSize.xs, color: colors.textMuted }}>
             👤 {task.assigned_agent}
           </span>
+        )}
+        {state === 'idle' && task.status === 'open' && (
+          <button
+            onClick={runIt}
+            style={{
+              background: 'linear-gradient(135deg,#10B981,#059669)',
+              color: '#fff', border: 'none',
+              padding: '4px 10px', borderRadius: 6,
+              fontSize: fontSize.xs, fontWeight: fontWeight.bold,
+              cursor: 'pointer', direction: 'ltr',
+            }}
+          >▶ הפעל</button>
+        )}
+        {state === 'running' && (
+          <span style={{ fontSize: fontSize.xs, color: '#10B981' }}>⏳ שולח לסוכן...</span>
+        )}
+        {state === 'dispatched' && (
+          <span style={{ fontSize: fontSize.xs, color: '#10B981', fontWeight: fontWeight.bold }}>
+            ✓ רץ ({String(runId || '').slice(0, 8)})
+          </span>
+        )}
+        {state === 'failed' && (
+          <span style={{ fontSize: fontSize.xs, color: '#EF4444' }} title={errorMsg || ''}>
+            ✗ נכשל
+          </span>
+        )}
+        {task.status === 'in_progress' && state === 'idle' && (
+          <span style={{ fontSize: fontSize.xs, color: '#F59E0B' }}>⏳ בתהליך</span>
         )}
       </div>
     </div>
@@ -396,10 +451,33 @@ export default function GT3CommandCenterView({ clientId, clients = [] }) {
               סוג עסק: <strong>{customer.business_type}</strong> · מודל: <strong>{customer.business_model}</strong> · שלב חיים: <strong>{customer.lifecycle_stage}</strong>
             </div>
           </div>
-          <Btn onClick={runPipeline} disabled={running}>
-            <RefreshCw size={14} style={{ marginLeft: 6, animation: running ? 'spin 1s linear infinite' : 'none' }} />
-            {running ? 'מעדכן...' : 'הפעל צינור GT3'}
-          </Btn>
+          <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap' }}>
+            <Btn onClick={runPipeline} disabled={running}>
+              <RefreshCw size={14} style={{ marginLeft: 6, animation: running ? 'spin 1s linear infinite' : 'none' }} />
+              {running ? 'מעדכן...' : 'הפעל צינור GT3'}
+            </Btn>
+            <button
+              onClick={async () => {
+                if (running) return;
+                setRunning(true);
+                try {
+                  const r = await api('/gt3/auto-execute', { method: 'POST', body: { maxPerCustomer: 10, maxTotal: 10 } });
+                  alert(`🚀 נשלחו ${r.dispatched_count || 0} משימות לסוכנים`);
+                  await load();
+                } catch (e) { alert(`שגיאה: ${e.message}`); }
+                finally { setRunning(false); }
+              }}
+              disabled={running}
+              style={{
+                background: 'linear-gradient(135deg,#10B981,#059669)',
+                color: '#fff', border: 'none',
+                padding: '8px 16px', borderRadius: radius.md,
+                fontSize: fontSize.sm, fontWeight: fontWeight.bold,
+                cursor: running ? 'not-allowed' : 'pointer',
+                boxShadow: '0 2px 8px rgba(16,185,129,0.3)',
+              }}
+            >🚀 הפעל 10 משימות הבאות</button>
+          </div>
         </div>
         <div style={{
           display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',

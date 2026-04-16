@@ -74,13 +74,19 @@ export function computeChannelStrategy({
     use_remarketing: false,
   };
 
+  // Supporting flags
+  const isNationalConsultative = customer?.business_model === 'national_lead_gen' ||
+                                 customer?.business_model === 'personal_brand';
+  const isEcommerce = customer?.business_model === 'ecommerce';
+  const isServiceKeyword = k.relevance_score >= 7 && k.business_value_score >= 7;
+  const isStrategicSupport = k.output_label === 'strategic_support';
+
   // Rule 1: mission_critical + high business_value
   if (isMissionCritical && isMoneyKeyword) {
     use.use_seo = true;
     use.use_google_ads = true;
     use.use_organic_social = true;
     if (isLocal && k.local_intent_score >= 5) use.use_local_seo = true;
-    // Meta for trust-heavy or competitive local
     if (isTrustHeavy || (isLocal && k.conversion_intent_score >= 7)) use.use_meta_ads = true;
     if (k.business_value_score >= 7) use.use_remarketing = true;
   }
@@ -89,15 +95,15 @@ export function computeChannelStrategy({
   if (isInformational && hasHighAuthoritySupport) {
     use.use_seo = true;
     use.use_organic_social = true;
-    use.use_meta_ads = true; // content amplification
-    use.use_google_ads = false; // NOT as direct target
+    use.use_meta_ads = true;
+    use.use_google_ads = false;
   }
 
   // Rule 3: rank 4-10 on money keyword
   if (isRank4to10 && isMoneyKeyword) {
     use.use_seo = true;
-    use.use_google_ads = true;  // capture while climbing
-    use.use_meta_ads = true;    // remarketing
+    use.use_google_ads = true;
+    use.use_meta_ads = true;
     use.use_remarketing = true;
     if (isLocal) use.use_local_seo = true;
   }
@@ -114,9 +120,30 @@ export function computeChannelStrategy({
   if (isTrustHeavy && isHighPriority) {
     use.use_seo = true;
     if (isLocal) use.use_local_seo = true;
-    use.use_google_ads = true;     // for message testing + capture
-    use.use_meta_ads = true;        // retargeting
+    use.use_google_ads = true;
+    use.use_meta_ads = true;
     use.use_organic_social = true;
+  }
+
+  // Rule 6 (NEW): ANY service keyword with real commercial value
+  // Even at strategic_support, if it's a legitimate service (rel>=7, bv>=7)
+  // with some commercial intent, we fire the core paid + social channels.
+  // This ensures clients like Homie (national consultant, strategic_support
+  // labels while volume data catches up) still get ads + retargeting + social
+  // demand-building work queued.
+  if (isServiceKeyword && (k.conversion_intent_score >= 5 || k.intent_type === 'commercial' || k.intent_type === 'transactional')) {
+    use.use_google_ads = true;
+    use.use_meta_ads = true;       // brand lift + retargeting
+    use.use_organic_social = true;  // authority content
+    if (k.business_value_score >= 7) use.use_remarketing = true;
+    if (isLocal && k.local_intent_score >= 5) use.use_local_seo = true;
+  }
+
+  // Rule 7 (NEW): Ecommerce always fires Ads + Meta on commercial keywords
+  if (isEcommerce && (k.intent_type === 'transactional' || k.intent_type === 'commercial') && isServiceKeyword) {
+    use.use_google_ads = true;
+    use.use_meta_ads = true;
+    use.use_remarketing = true;
   }
 
   // Hebrew goals per enabled channel

@@ -292,3 +292,118 @@ export async function recordTaskOutcome(taskId, kind, { status, output, error_me
   if (error) return svcResult({ ok: false, source: 'task_outcome', errors: [error.message] });
   return svcResult({ ok: true, source: 'task_outcome', data: { task_id: taskId, status } });
 }
+
+// ═══════════════════════════════════════════════════════════
+// TASK EXECUTION — bridge to the existing agent runtime
+// ═══════════════════════════════════════════════════════════
+//
+// Given a GT3 task, route it to the assigned agent via the
+// existing /runs/execute machinery. Returns the run_id so the UI
+// can poll for the result.
+export async function executeGT3Task(taskId, kind) {
+  const sb = getGT3Supabase();
+  const table = kind === 'channel' ? 'gt3_channel_tasks' : 'gt3_action_tasks';
+
+  // Fetch task
+  const { data: task, error: tErr } = await sb.from(table)
+    .select('*')
+    .eq('id', taskId)
+    .single();
+  if (tErr || !task) return svcResult({ ok: false, source: 'execute', errors: [tErr?.message || 'task not found'] });
+  if (task.status === 'done') return svcResult({ ok: true, source: 'execute', data: { already_done: true, task_id: taskId } });
+
+  // Get the agent_template_id for the assigned agent_slug
+  const { data: agent } = await sb.from('agent_templates')
+    .select('id, name, slug').eq('slug', task.assigned_agent).maybeSingle();
+  if (!agent) {
+    return svcResult({ ok: false, source: 'execute',
+      errors: [`No agent template found for slug="${task.assigned_agent}"`]
+    });
+  }
+
+  // Resolve legacy client_id for the runs table
+  const { data: customer } = await sb.from('gt3_customers')
+    .select('legacy_client_id, name').eq('id', task.customer_id).single();
+  const legacyClientId = customer?.legacy_client_id;
+  if (!legacyClientId) {
+    return svcResult({ ok: false, source: 'execute', errors: ['No legacy_client_id — cannot bridge to runs'] });
+  }
+
+  // Build grounded context for the LLM
+  const context = await buildTaskContext(task, kind);
+
+  // Mark task in_progress immediately
+  await sb.from(table).update({ status: 'in_progress', updated_at: new Date().toISOString() }).eq('id', taskId);
+
+  // Insert a runs row that references the GT3 task
+  const { data: run, error: rErr } = await sb.from('runs').insert({
+    client_id: legacyClientId,
+    agent_template_id: agent.id,
+    status: 'running',
+    input: {
+      source: 'gt3_task',
+      task_id: taskId,
+      task_kind: kind,
+      task_type: task.task_type,
+      priority_label: task.priority_label,
+      title_he: task.title_he,
+      description_he: task.description_he,
+      gt3_context: context,
+    },
+    created_at: new Date().toISOString(),
+  }).select().single();
+  if (rErr) {
+    // Revert the in_progress status so the task can be re-attempted
+    await sb.from(table).update({ status: 'open', updated_at: new Date().toISOString() }).eq('id', taskId);
+    return svcResult({ ok: false, source: 'execute', errors: [`runs insert: ${rErr.message}`] });
+  }
+
+  return svcResult({
+    ok: true, source: 'execute',
+    data: {
+      task_id: taskId,
+      run_id: run.id,
+      agent_slug: task.assigned_agent,
+      agent_name: agent.name,
+      status: 'dispatched',
+      message: 'Task dispatched to agent runtime. Monitor the run to see the agent\'s output.',
+    },
+  });
+}
+
+// Auto-execute the top N open tasks across all customers.
+// Called from the cron. Uses priority + created_at ordering.
+export async function autoExecuteOpenTasks({ maxPerCustomer = 3, maxTotal = 20 } = {}) {
+  const sb = getGT3Supabase();
+  const { data: customers } = await sb.from('gt3_customers').select('id, name');
+  const dispatched = [];
+  let total = 0;
+
+  for (const c of customers || []) {
+    if (total >= maxTotal) break;
+    let perCustomer = 0;
+    // Priority order: mission_critical → high_priority → strategic_support → low_priority
+    for (const priority of ['mission_critical', 'high_priority', 'strategic_support', 'low_priority']) {
+      if (perCustomer >= maxPerCustomer || total >= maxTotal) break;
+      for (const table of [{ name: 'gt3_action_tasks', kind: 'action' }, { name: 'gt3_channel_tasks', kind: 'channel' }]) {
+        if (perCustomer >= maxPerCustomer || total >= maxTotal) break;
+        const { data: tasks } = await sb.from(table.name)
+          .select('id, assigned_agent, task_type')
+          .eq('customer_id', c.id)
+          .eq('status', 'open')
+          .eq('priority_label', priority)
+          .not('assigned_agent', 'is', null)
+          .order('created_at', { ascending: true })
+          .limit(maxPerCustomer - perCustomer);
+        for (const t of tasks || []) {
+          if (perCustomer >= maxPerCustomer || total >= maxTotal) break;
+          const r = await executeGT3Task(t.id, table.kind);
+          dispatched.push({ customer: c.name, task_id: t.id, agent: t.assigned_agent, ok: r.ok, run_id: r.data?.run_id, error: r.errors?.[0] });
+          perCustomer++;
+          total++;
+        }
+      }
+    }
+  }
+  return { dispatched_count: dispatched.length, dispatched };
+}

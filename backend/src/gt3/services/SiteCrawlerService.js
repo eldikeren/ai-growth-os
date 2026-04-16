@@ -120,25 +120,89 @@ function computeConversionReadiness(extracted, pageType) {
   return Math.min(10, Number(score.toFixed(2)));
 }
 
-// Main entry: crawl a customer's site (seed URL = domain root)
-export async function crawlCustomerSite(customerId, { maxPages = 20, timeoutMs = 10000 } = {}) {
+// Try to fetch sitemap.xml and extract all URLs
+async function fetchSitemapUrls(domain, timeoutMs = 15000) {
+  const candidates = [
+    `https://${domain}/sitemap.xml`,
+    `https://${domain}/sitemap_index.xml`,
+    `https://${domain}/sitemap-index.xml`,
+    `https://${domain}/wp-sitemap.xml`,
+    `https://${domain}/robots.txt`,
+  ];
+  const foundSitemaps = new Set();
+  const urls = new Set();
+
+  // Parse robots.txt for Sitemap: lines
+  try {
+    const robots = await fetchPage(`https://${domain}/robots.txt`, timeoutMs);
+    if (robots.html) {
+      const matches = [...robots.html.matchAll(/sitemap:\s*(\S+)/gi)];
+      for (const m of matches) foundSitemaps.add(m[1].trim());
+    }
+  } catch {}
+
+  for (const c of candidates) {
+    if (c.endsWith('robots.txt')) continue;
+    foundSitemaps.add(c);
+  }
+
+  // Recursively expand sitemap index → individual sitemaps
+  const toProcess = [...foundSitemaps];
+  const processed = new Set();
+  while (toProcess.length) {
+    const sm = toProcess.shift();
+    if (processed.has(sm)) continue;
+    processed.add(sm);
+    try {
+      const res = await fetchPage(sm, timeoutMs);
+      if (!res.html || res.status >= 400) continue;
+      // URL-set (<url><loc>URL</loc>)
+      const urlMatches = [...res.html.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/gi)];
+      for (const m of urlMatches) {
+        const u = m[1].trim();
+        // If it's a nested sitemap, queue it; otherwise treat as page URL
+        if (u.endsWith('.xml') || u.includes('sitemap')) toProcess.push(u);
+        else urls.add(u);
+      }
+    } catch {}
+  }
+  return [...urls];
+}
+
+// Main entry: crawl a customer's site. Sitemap-first, BFS fallback.
+export async function crawlCustomerSite(customerId, { maxPages = 500, timeoutMs = 12000 } = {}) {
   const sb = getGT3Supabase();
   const { data: customer } = await sb.from('gt3_customers')
     .select('id, name, domain, primary_language').eq('id', customerId).single();
   if (!customer) return svcResult({ ok: false, source: 'crawler', errors: ['customer not found'] });
 
-  const domain = customer.domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const domain = customer.domain.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/$/, '');
   const rootUrl = `https://${domain}/`;
 
+  // PHASE 1: Try sitemap.xml first (fast, comprehensive)
+  let seedUrls = await fetchSitemapUrls(domain, timeoutMs);
+  const sitemapFound = seedUrls.length > 0;
+  if (!sitemapFound) seedUrls = [rootUrl];
+
   const visited = new Set();
-  const queue = [rootUrl];
+  const queue = [...new Set(seedUrls)];
   const crawled = [];
   const errors = [];
 
+  // PHASE 2: Crawl each URL. If we found a sitemap, we don't need deep link discovery.
   while (queue.length && crawled.length < maxPages) {
     const url = queue.shift();
     if (visited.has(url)) continue;
     visited.add(url);
+
+    // Filter to customer domain only
+    try {
+      const u = new URL(url);
+      const host = u.hostname.replace(/^www\./, '');
+      if (host !== domain) continue;
+      // Skip common non-page URLs
+      if (/\.(pdf|jpg|jpeg|png|gif|svg|css|js|ico|xml|woff2?|ttf|zip)$/i.test(u.pathname)) continue;
+    } catch { continue; }
 
     const res = await fetchPage(url, timeoutMs);
     if (res.error) { errors.push({ url, error: res.error }); continue; }
@@ -169,7 +233,6 @@ export async function crawlCustomerSite(customerId, { maxPages = 20, timeoutMs =
       last_crawled_at: new Date().toISOString(),
     };
 
-    // UPSERT on (customer_id, url) unique key
     const { data: upserted, error } = await sb.from('gt3_site_pages')
       .upsert(pageRow, { onConflict: 'customer_id,url' })
       .select('id').single();
@@ -177,31 +240,27 @@ export async function crawlCustomerSite(customerId, { maxPages = 20, timeoutMs =
 
     crawled.push({ ...pageRow, id: upserted.id });
 
-    // Extract entities (simple heuristic — Phase 4 agents will enrich)
+    // Entities
     const entities = [];
     if (extracted.has_phone) entities.push({ entity_type: 'conversion_element', entity_value: 'phone', confidence_score: 9 });
     if (extracted.has_whatsapp) entities.push({ entity_type: 'conversion_element', entity_value: 'whatsapp', confidence_score: 9 });
     if (extracted.has_form) entities.push({ entity_type: 'conversion_element', entity_value: 'form', confidence_score: 8 });
     if (extracted.has_schema) entities.push({ entity_type: 'trust_signal', entity_value: 'schema_markup', confidence_score: 8 });
-
     if (entities.length) {
-      const { error: eErr } = await sb.from('gt3_page_entities').insert(
-        entities.map(e => ({ page_id: upserted.id, ...e }))
-      );
-      if (eErr) errors.push({ url, entities_error: eErr.message });
+      try { await sb.from('gt3_page_entities').insert(entities.map(e => ({ page_id: upserted.id, ...e }))); } catch {}
     }
 
-    // Discover internal links to add to queue
-    for (const link of extracted.all_links) {
-      try {
-        const absoluteUrl = new URL(link, res.final_url || url).href;
-        const linkDomain = new URL(absoluteUrl).hostname;
-        if (linkDomain === domain || linkDomain === `www.${domain}`) {
-          if (!visited.has(absoluteUrl) && queue.length + crawled.length < maxPages * 2) {
+    // If no sitemap, do BFS link discovery
+    if (!sitemapFound) {
+      for (const link of extracted.all_links) {
+        try {
+          const absoluteUrl = new URL(link, res.final_url || url).href.split('#')[0];
+          const linkDomain = new URL(absoluteUrl).hostname.replace(/^www\./, '');
+          if (linkDomain === domain && !visited.has(absoluteUrl)) {
             queue.push(absoluteUrl);
           }
-        }
-      } catch { /* skip invalid URLs */ }
+        } catch {}
+      }
     }
   }
 
@@ -210,6 +269,9 @@ export async function crawlCustomerSite(customerId, { maxPages = 20, timeoutMs =
     data: {
       customer_id: customerId,
       pages_crawled: crawled.length,
+      sitemap_found: sitemapFound,
+      seed_urls_count: seedUrls.length,
+      max_pages_limit: maxPages,
       pages_by_type: crawled.reduce((acc, p) => { acc[p.page_type] = (acc[p.page_type] || 0) + 1; return acc; }, {}),
       errors_count: errors.length,
       sample_titles: crawled.slice(0, 5).map(p => p.title).filter(Boolean),

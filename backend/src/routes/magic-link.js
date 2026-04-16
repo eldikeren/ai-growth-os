@@ -3,13 +3,17 @@
 // ============================================================
 
 import express from 'express';
+import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 import {
   createSetupLink, getSetupLinkByToken, submitConnectorCredentials,
   getSetupLinksForClient, getAllSetupLinks, revokeSetupLink,
   regenerateSetupLink, getConnectorDefinitions, getDecryptedCredentials
 } from '../functions/magic-link.js';
+import { buildMetaAuthUrl } from '../functions/onboarding.js';
 
 const router = express.Router();
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 // ── ADMIN: GET ALL CONNECTOR DEFINITIONS ─────────────────────
 router.get('/connector-definitions', async (req, res) => {

@@ -97,8 +97,14 @@ export async function planMissions(customerId) {
       existingTaskKeys.add(dedupKey);
     }
 
-    // Generate channel tasks for enabled channels
-    if (mission.mission !== 'none') {
+    // Generate channel tasks for enabled channels.
+    // Now fires on ANY keyword with commercial value (relevance>=7 + business_value>=7)
+    // — not only mission_critical/high_priority. This means national lead-gen and
+    // strategic_support keywords also get paid+social+local coverage.
+    const worthChannelTasks = mission.mission !== 'none' ||
+      (score.relevance_score >= 7 && score.business_value_score >= 7 && score.output_label !== 'deprioritize');
+
+    if (worthChannelTasks) {
       if (strategy.use_google_ads) {
         channelTasks.push(makeChannelTask({
           customer_id: customerId, keyword_id: kw.id,
@@ -119,23 +125,23 @@ export async function planMissions(customerId) {
           target_metric: 'local_pack_visibility',
         }));
       }
-      if (strategy.use_meta_ads && ['mission_critical', 'high_priority'].includes(score.output_label)) {
+      if (strategy.use_meta_ads && score.output_label !== 'deprioritize') {
         channelTasks.push(makeChannelTask({
           customer_id: customerId, keyword_id: kw.id,
           channel_type: 'meta_ads', task_type: 'create_remarketing_audience',
           priority_label: labelFromScore(score.output_label),
           title_he: `רימרקטינג Meta Ads סביב "${kw.keyword}"`,
-          description_he: strategy.meta_ads_goal_he,
+          description_he: strategy.meta_ads_goal_he || 'רימרקטינג למבקרים + חיזוק מותג',
           target_metric: 'returning_user_conversions',
         }));
       }
-      if (strategy.use_organic_social && score.authority_support_score >= 5) {
+      if (strategy.use_organic_social && score.output_label !== 'deprioritize') {
         channelTasks.push(makeChannelTask({
           customer_id: customerId, keyword_id: kw.id,
           channel_type: 'organic_social', task_type: 'publish_social_post',
           priority_label: labelFromScore(score.output_label),
           title_he: `תוכן תומך ברשתות סביב "${kw.keyword}"`,
-          description_he: strategy.organic_social_goal_he,
+          description_he: strategy.organic_social_goal_he || 'תוכן חברתי תומך',
           target_metric: 'brand_demand_growth',
         }));
       }

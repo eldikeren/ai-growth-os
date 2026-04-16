@@ -1506,11 +1506,13 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
 
             // Also update keyword data
             for (const row of rows.slice(0, 100)) {
-              await supabase.from('client_keywords').upsert({
-                client_id: clientId, keyword: row.keys[0],
-                current_position: Math.round(row.position),
-                source: 'gsc_live_check', last_checked: now,
-              }, { onConflict: 'client_id,keyword' }).catch(() => {});
+              try {
+                await supabase.from('client_keywords').upsert({
+                  client_id: clientId, keyword: row.keys[0],
+                  current_position: Math.round(row.position),
+                  source: 'gsc_live_check', last_checked: now,
+                }, { onConflict: 'client_id,keyword' });
+              } catch (_) { /* skip individual keyword errors */ }
             }
           } else {
             results.push({ metric: 'page1_keyword_count', status: 'api_error', detail: `GSC returned ${gscRes.status}` });
@@ -1558,7 +1560,7 @@ router.post('/clients/:clientId/metrics/refresh-all', async (req, res) => {
               const smData = await smRes.json();
               let totalIndexed = 0;
               (smData.sitemap || []).forEach(sm => {
-                (sm.contents || []).forEach(c => { totalIndexed += (c.indexed || 0); });
+                (sm.contents || []).forEach(c => { totalIndexed += parseInt(c.indexed || 0, 10); });
               });
               if (totalIndexed > 0) {
                 await storeMetric('indexed_pages', totalIndexed, `${totalIndexed} pages`, 'Google Search Console Sitemaps', null);

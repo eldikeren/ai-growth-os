@@ -399,15 +399,14 @@ export default function ProposedChangesView({ clientId }) {
               <Btn
                 small
                 onClick={handleApproveSelected}
-                disabled={selectedIds.size === 0 || bulkBusy || pendingIds.size > 0}
+                disabled={selectedIds.size === 0 || bulkBusy}
               >
                 <Check size={11} /> Approve selected ({selectedIds.size})
               </Btn>
               <Btn
                 small
-                secondary
                 onClick={handleApproveAll}
-                disabled={bulkBusy || pendingIds.size > 0}
+                disabled={bulkBusy}
               >
                 <Check size={11} /> Approve all ({awaiting.length})
               </Btn>

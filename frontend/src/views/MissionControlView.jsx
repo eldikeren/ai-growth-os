@@ -303,39 +303,84 @@ function SingleCustomerLive({ clientId }) {
     return () => clearInterval(t);
   }, [load]);
 
-  // Initialize Phaser
+  // Initialize Phaser — wait for container to have real dimensions before starting
   useEffect(() => {
     if (!phaserRef.current || gameRef.current) return;
 
-    import('phaser').then((PhaserModule) => {
-      const Phaser = PhaserModule.default || PhaserModule;
-      import('./mission-control/OfficeScene.js').then((mod) => {
-        const OfficeScene = mod.default;
-        const scene = new OfficeScene();
-        sceneRef.current = scene;
+    let cancelled = false;
+    let rafId = null;
 
-        gameRef.current = new Phaser.Game({
-          type: Phaser.AUTO,
-          parent: phaserRef.current,
-          width: phaserRef.current.clientWidth,
-          height: phaserRef.current.clientHeight,
-          backgroundColor: '#07070f',
-          scene,
-          scale: {
-            mode: Phaser.Scale.RESIZE,
-            autoCenter: Phaser.Scale.CENTER_BOTH,
-          },
-          render: { antialias: false, pixelArt: true },
+    // Wait until the ref has layout dimensions (can be 0 on first paint)
+    const waitForSize = () => {
+      if (cancelled) return;
+      const el = phaserRef.current;
+      if (!el) return;
+      const w = el.clientWidth || el.offsetWidth;
+      const h = el.clientHeight || el.offsetHeight;
+      if (w < 50 || h < 50) {
+        rafId = requestAnimationFrame(waitForSize);
+        return;
+      }
+      startPhaser(w, h);
+    };
+
+    const startPhaser = (initW, initH) => {
+      import('phaser').then((PhaserModule) => {
+        if (cancelled) return;
+        const Phaser = PhaserModule.default || PhaserModule;
+        import('./mission-control/OfficeScene.js').then((mod) => {
+          if (cancelled) return;
+          const OfficeScene = mod.default;
+          const scene = new OfficeScene();
+          sceneRef.current = scene;
+
+          gameRef.current = new Phaser.Game({
+            type: Phaser.AUTO,
+            parent: phaserRef.current,
+            width: initW,
+            height: initH,
+            backgroundColor: '#07070f',
+            scene,
+            scale: {
+              mode: Phaser.Scale.RESIZE,
+              autoCenter: Phaser.Scale.CENTER_BOTH,
+              parent: phaserRef.current,
+              width: initW,
+              height: initH,
+            },
+            render: { antialias: false, pixelArt: true },
+          });
+
+          // If state already loaded before the scene was ready, push it in now
+          setTimeout(() => {
+            if (cancelled || !sceneRef.current) return;
+            if (state?.agents?.length) {
+              try { sceneRef.current.updateAgentStates(state.agents); } catch {}
+            }
+          }, 200);
         });
       });
-    });
+    };
+
+    waitForSize();
 
     return () => {
+      cancelled = true;
+      if (rafId) cancelAnimationFrame(rafId);
       gameRef.current?.destroy(true);
       gameRef.current = null;
       sceneRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Push agent state into the scene whenever state arrives (handles race where
+  // state arrives before Phaser was ready)
+  useEffect(() => {
+    if (!sceneRef.current?.updateAgentStates) return;
+    if (!state?.agents?.length) return;
+    try { sceneRef.current.updateAgentStates(state.agents); } catch {}
+  }, [state]);
 
   // Resize handler
   useEffect(() => {
@@ -394,28 +439,16 @@ function SingleCustomerLive({ clientId }) {
       <OrchestratorBar state={state} />
       <StatsBar summary={state?.summary} />
 
-      <div style={{ flex: 1, display: 'flex', position: 'relative', overflow: 'hidden' }}>
-        {/* Phaser canvas container — with Phase 4 depth overlay */}
+      <div style={{ flex: 1, display: 'flex', position: 'relative', overflow: 'hidden', minHeight: 400 }}>
+        {/* Phaser canvas container */}
         <div
           ref={phaserRef}
           style={{
             flex: 1, position: 'relative',
-            boxShadow: 'inset 0 0 120px rgba(66,133,244,0.08), inset 0 0 40px rgba(0,0,0,0.4)',
+            minWidth: 400, minHeight: 400,
           }}
           onClick={() => setTooltip(null)}
         />
-        {/* Phase 4: Subtle vignette overlay for depth */}
-        <div style={{
-          position: 'absolute', inset: 0, pointerEvents: 'none',
-          background: 'radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.4) 100%)',
-          zIndex: 5,
-        }} />
-        {/* Phase 4: Scanline effect (very subtle) */}
-        <div style={{
-          position: 'absolute', inset: 0, pointerEvents: 'none',
-          background: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(66,133,244,0.015) 2px, rgba(66,133,244,0.015) 3px)',
-          zIndex: 6, mixBlendMode: 'overlay',
-        }} />
 
         {/* Agent tooltip overlay */}
         <AgentTooltip info={tooltip} onClose={() => setTooltip(null)} />

@@ -13,6 +13,8 @@ import { discoverKeywords } from '../gt3/services/KeywordDiscoveryService.js';
 import { scoreAllKeywords } from '../gt3/services/KeywordScoringService.js';
 import { planMissions } from '../gt3/services/MissionPlannerService.js';
 import { pullNextTaskForAgent, buildTaskContext, claimTask, recordTaskOutcome } from '../gt3/services/GT3TaskExecutorService.js';
+import { captureBrandSignals, computeSignalTrend } from '../gt3/services/BrandDemandSignalsService.js';
+import { buildWeeklyReport } from '../gt3/services/WeeklyMissionReportService.js';
 import { getGT3Supabase } from '../gt3/services/supabaseClient.js';
 
 const router = express.Router();
@@ -165,6 +167,44 @@ router.post('/tasks/:taskId/complete', async (req, res) => {
     if (!['action', 'channel'].includes(kind)) return res.status(400).json({ error: 'kind must be action or channel' });
     if (!['done', 'blocked', 'failed', 'cancelled'].includes(status)) return res.status(400).json({ error: 'invalid status' });
     res.json(await recordTaskOutcome(req.params.taskId, kind, { status, output, error_message }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Brand Demand Signals (Phase 6) ─────────────────────────
+router.post('/customers/:customerId/brand-signals/capture', async (req, res) => {
+  try {
+    const id = await resolveOr404(req, res); if (!id) return;
+    res.json(await captureBrandSignals(id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/customers/:customerId/brand-signals/trend/:signalType', async (req, res) => {
+  try {
+    const id = await resolveOr404(req, res); if (!id) return;
+    const days = parseInt(req.query.days) || 30;
+    res.json(await computeSignalTrend(id, req.params.signalType, days));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Weekly Mission Report (Phase 6) ────────────────────────
+router.get('/customers/:customerId/gt3/weekly-report', async (req, res) => {
+  try {
+    const id = await resolveOr404(req, res); if (!id) return;
+    res.json(await buildWeeklyReport(id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Cron: capture brand signals daily ──────────────────────
+router.get('/cron/gt3-brand-signals', async (req, res) => {
+  try {
+    const sb = getGT3Supabase();
+    const { data: customers } = await sb.from('gt3_customers').select('id, name');
+    const results = [];
+    for (const c of customers || []) {
+      try { results.push({ customer: c.name, ...(await captureBrandSignals(c.id)) }); }
+      catch (e) { results.push({ customer: c.name, ok: false, error: e.message }); }
+    }
+    res.json({ ran_at: new Date().toISOString(), processed: results.length, results });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -2986,64 +2986,99 @@ export async function sendClientReport(reportId, recipients) {
 
 // ============================================================
 // REFRESH CREDENTIAL HEALTH
+// Reads the CANONICAL tables (oauth_credentials + client_integrations
+// + integration_assets) — NOT the legacy client_credentials table.
+// Mirrors the logic of the query_credential_health tool so every
+// surface (dashboard, credential-health-agent, /system/refresh cron)
+// agrees on what "connected" means.
 // ============================================================
 export async function refreshCredentialHealth(clientId) {
-  const { data: creds } = await supabase
-    .from('client_credentials')
-    .select('*')
-    .eq('client_id', clientId);
+  try {
+    const [oauthRes, integrationsRes, assetsRes] = await Promise.all([
+      supabase.from('oauth_credentials').select('provider, account_email, scopes, status, error, last_refreshed_at').eq('client_id', clientId),
+      supabase.from('client_integrations').select('provider, sub_provider, status, discovery_summary, error, connected_at').eq('client_id', clientId),
+      supabase.from('integration_assets').select('provider, sub_provider').eq('client_id', clientId),
+    ]);
 
-  if (!creds?.length) return { checked: 0 };
+    const oauthGrants = oauthRes.data || [];
+    const integrations = integrationsRes.data || [];
+    const assets = assetsRes.data || [];
 
-  const results = [];
-
-  for (const cred of creds) {
-    let isConnected = cred.is_connected;
-    let healthScore = cred.health_score || 0;
-    let error = null;
-
-    try {
-      switch (cred.service) {
-        case 'openai':
-          // Test OpenAI connectivity
-          if (process.env.OPENAI_API_KEY) {
-            const testCompletion = await openai.chat.completions.create({
-              model: 'gpt-4.1',
-              messages: [{ role: 'user', content: 'ping' }],
-              max_tokens: 5
-            });
-            isConnected = !!testCompletion.choices[0];
-            healthScore = 100;
-          } else {
-            isConnected = false;
-            healthScore = 0;
-            error = 'OPENAI_API_KEY not set in environment';
-          }
-          break;
-        default:
-          // For other services, we check if credential data is present
-          isConnected = !!(cred.credential_data && Object.keys(cred.credential_data).length > 0);
-          healthScore = isConnected ? 75 : 0;
-          error = isConnected ? null : 'No credentials configured';
-      }
-    } catch (err) {
-      isConnected = false;
-      healthScore = 0;
-      error = err.message;
+    const assetsBySub = {};
+    for (const a of assets) {
+      const k = a.sub_provider || a.provider;
+      assetsBySub[k] = (assetsBySub[k] || 0) + 1;
     }
 
-    await supabase.from('client_credentials').update({
-      is_connected: isConnected,
-      health_score: healthScore,
-      last_checked: new Date().toISOString(),
-      last_successful: isConnected ? new Date().toISOString() : cred.last_successful,
-      error: error
-    }).eq('id', cred.id);
+    const servicesToReport = [
+      { service: 'google_search_console', provider: 'google', sub_provider: 'search_console' },
+      { service: 'google_ads',             provider: 'google', sub_provider: 'ads' },
+      { service: 'google_analytics',       provider: 'google', sub_provider: 'analytics' },
+      { service: 'google_business_profile',provider: 'google', sub_provider: 'business_profile' },
+      { service: 'facebook',               provider: 'meta',   sub_provider: 'facebook' },
+      { service: 'instagram',              provider: 'meta',   sub_provider: 'instagram' },
+      { service: 'openai',                 provider: 'openai', sub_provider: null },
+      { service: 'perplexity',             provider: 'perplexity', sub_provider: null },
+      { service: 'dataforseo',             provider: 'dataforseo', sub_provider: null },
+      { service: 'moz',                    provider: 'moz', sub_provider: null },
+    ];
 
-    results.push({ service: cred.service, is_connected: isConnected, health_score: healthScore });
+    const results = servicesToReport.map(({ service, provider, sub_provider }) => {
+      // Env-var backed
+      if (!sub_provider && ['openai','perplexity','dataforseo','moz'].includes(provider)) {
+        const envMap = {
+          openai: process.env.OPENAI_API_KEY,
+          perplexity: process.env.PERPLEXITY_API_KEY,
+          dataforseo: process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD,
+          moz: process.env.MOZ_API_KEY,
+        };
+        const hasKey = !!envMap[provider];
+        return { service, is_connected: hasKey, health_score: hasKey ? 100 : 0, error: hasKey ? null : `${provider} API key not configured` };
+      }
+
+      const oauth = oauthGrants.find(g => g.provider === provider);
+      const integration = integrations.find(i => i.provider === provider && i.sub_provider === sub_provider);
+      const assetCount = assetsBySub[sub_provider || provider] || 0;
+
+      if (!oauth || oauth.status !== 'active') {
+        return { service, is_connected: false, health_score: 0, error: oauth?.error || 'No active OAuth grant' };
+      }
+      if (!integration) {
+        return { service, is_connected: false, health_score: 25, error: 'OAuth grant exists but no integration row — run rediscovery' };
+      }
+
+      const ds = integration.discovery_summary || {};
+      const discovered = ds.count ?? ds.pages_found ?? assetCount;
+
+      let health_score = 0;
+      let is_connected = false;
+      if (integration.status === 'connected' && discovered > 0) {
+        health_score = 100;
+        is_connected = true;
+      } else if (integration.status === 'connected') {
+        health_score = 60;
+        is_connected = false; // "limited" - oauth ok but no assets
+      } else if (integration.status === 'limited') {
+        health_score = 40;
+      } else {
+        health_score = 10;
+      }
+
+      return {
+        service,
+        is_connected,
+        health_score,
+        error: integration.error || ds.error || null,
+        account_email: oauth.account_email,
+        discovered_count: discovered,
+      };
+    });
+
+    const overall = results.length ? Math.round(results.reduce((a, r) => a + r.health_score, 0) / results.length) : 0;
+    return { checked: results.length, results, overall_health_score: overall, source: 'oauth_credentials+client_integrations+integration_assets' };
+  } catch (err) {
+    return { checked: 0, error: err.message };
   }
-
-  return { checked: results.length, results };
 }
 
 // ============================================================

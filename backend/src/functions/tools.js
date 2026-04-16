@@ -305,6 +305,18 @@ export function getToolDefinitions(agentSlug, clientId) {
       },
       allowed_agents: ['master-orchestrator', 'report-composer-agent', 'kpi-integrity-agent', 'seo-core-agent', 'gsc-daily-monitor', 'website-content-agent', 'technical-seo-crawl-agent']
     },
+    {
+      type: 'function',
+      function: {
+        name: 'query_credential_health',
+        description: 'CANONICAL credential health reader. Reads the REAL source-of-truth tables: oauth_credentials (master OAuth grant), client_integrations (per-service connection state + discovery summary), integration_assets (discovered properties/accounts/locations). ALWAYS call this before deciding whether credentials are missing or broken — never guess. Returns a structured report with per-service status: connected | limited | missing | error. This replaces ALL guesses about credential state.',
+        parameters: {
+          type: 'object',
+          properties: {}
+        }
+      },
+      allowed_agents: ['credential-health-agent', 'master-orchestrator', 'kpi-integrity-agent']
+    },
 
     // --- ACTION TOOLS ---
     {
@@ -1524,6 +1536,155 @@ export async function executeTool(toolName, args, clientId, runId) {
             error: r.error
           }))
         };
+      }
+
+      // ========================================
+      // query_credential_health
+      // Canonical credential health reader — reads REAL tables:
+      //   oauth_credentials (master OAuth grant)
+      //   client_integrations (per-service connection + discovery summary)
+      //   integration_assets (discovered properties / accounts / locations)
+      // Returns per-service state so the credential-health-agent never
+      // has to guess. This replaces the stale `client_credentials` path.
+      // ========================================
+      case 'query_credential_health': {
+        try {
+          const [oauthRes, integrationsRes, assetsRes] = await Promise.all([
+            supabase.from('oauth_credentials').select('provider, account_email, scopes, status, error, last_refreshed_at, expires_at').eq('client_id', clientId),
+            supabase.from('client_integrations').select('provider, sub_provider, status, discovery_summary, error, connected_at').eq('client_id', clientId),
+            supabase.from('integration_assets').select('provider, sub_provider, asset_type, asset_label, asset_id').eq('client_id', clientId),
+          ]);
+
+          const oauthGrants = oauthRes.data || [];
+          const integrations = integrationsRes.data || [];
+          const assets = assetsRes.data || [];
+
+          // Group assets by sub_provider for summary counts
+          const assetsBySubProvider = {};
+          for (const a of assets) {
+            const key = a.sub_provider || a.provider;
+            if (!assetsBySubProvider[key]) assetsBySubProvider[key] = [];
+            assetsBySubProvider[key].push(a);
+          }
+
+          // Build canonical service list
+          const servicesToReport = [
+            { service: 'google_search_console', provider: 'google', sub_provider: 'search_console' },
+            { service: 'google_ads', provider: 'google', sub_provider: 'ads' },
+            { service: 'google_analytics', provider: 'google', sub_provider: 'analytics' },
+            { service: 'google_business_profile', provider: 'google', sub_provider: 'business_profile' },
+            { service: 'facebook', provider: 'meta', sub_provider: 'facebook' },
+            { service: 'instagram', provider: 'meta', sub_provider: 'instagram' },
+            { service: 'openai', provider: 'openai', sub_provider: null },
+            { service: 'perplexity', provider: 'perplexity', sub_provider: null },
+            { service: 'dataforseo', provider: 'dataforseo', sub_provider: null },
+            { service: 'moz', provider: 'moz', sub_provider: null },
+          ];
+
+          const credential_status = servicesToReport.map(({ service, provider, sub_provider }) => {
+            const oauth = oauthGrants.find(g => g.provider === provider);
+            const integration = integrations.find(i => i.provider === provider && (sub_provider ? i.sub_provider === sub_provider : true));
+            const svcAssets = assetsBySubProvider[sub_provider || provider] || [];
+
+            // Env-var-backed services (openai/perplexity/dataforseo/moz)
+            if (!sub_provider && ['openai', 'perplexity', 'dataforseo', 'moz'].includes(provider)) {
+              const envMap = {
+                openai: process.env.OPENAI_API_KEY,
+                perplexity: process.env.PERPLEXITY_API_KEY,
+                dataforseo: process.env.DATAFORSEO_LOGIN && process.env.DATAFORSEO_PASSWORD,
+                moz: process.env.MOZ_API_KEY,
+              };
+              const hasKey = !!envMap[provider];
+              return {
+                service,
+                is_connected: hasKey,
+                health_score: hasKey ? 100 : 0,
+                status: hasKey ? 'connected' : 'missing',
+                error: hasKey ? null : `${provider} API key not configured in environment`,
+                source: 'env',
+              };
+            }
+
+            // OAuth-backed services
+            if (!oauth || oauth.status !== 'active') {
+              return {
+                service,
+                is_connected: false,
+                health_score: 0,
+                status: 'missing',
+                error: oauth?.error || 'No active OAuth grant',
+                source: 'oauth_credentials',
+              };
+            }
+
+            if (!integration) {
+              return {
+                service,
+                is_connected: false,
+                health_score: 25,
+                status: 'limited',
+                error: 'OAuth grant exists but no integration row — run rediscovery',
+                account_email: oauth.account_email,
+                scopes: oauth.scopes,
+                source: 'oauth_credentials',
+              };
+            }
+
+            const assetCount = svcAssets.length;
+            const discoverySummary = integration.discovery_summary || {};
+            const discoveryCount = discoverySummary.count ?? discoverySummary.pages_found ?? assetCount;
+
+            let health_score = 0;
+            let status_label = integration.status;
+            if (integration.status === 'connected' && (discoveryCount > 0 || assetCount > 0)) {
+              health_score = 100;
+              status_label = 'connected';
+            } else if (integration.status === 'connected') {
+              health_score = 60;
+              status_label = 'limited';
+            } else if (integration.status === 'limited') {
+              health_score = 40;
+            } else {
+              health_score = 10;
+            }
+
+            return {
+              service,
+              is_connected: integration.status === 'connected' && health_score >= 60,
+              health_score,
+              status: status_label,
+              error: integration.error || discoverySummary.error || null,
+              hint: discoverySummary.hint || null,
+              account_email: oauth.account_email,
+              scopes: oauth.scopes,
+              discovered_count: discoveryCount,
+              asset_count: assetCount,
+              last_connected_at: integration.connected_at,
+              source: 'client_integrations + integration_assets',
+            };
+          });
+
+          const overall = credential_status.length
+            ? Math.round(credential_status.reduce((a, c) => a + c.health_score, 0) / credential_status.length)
+            : 0;
+
+          const critical_failures = credential_status
+            .filter(c => c.status === 'missing' || c.health_score === 0)
+            .map(c => ({ service: c.service, error: c.error, urgency: 'high' }));
+
+          return {
+            credential_status,
+            overall_health_score: overall,
+            critical_failures,
+            connected_services: credential_status.filter(c => c.is_connected).map(c => c.service),
+            limited_services: credential_status.filter(c => c.status === 'limited').map(c => c.service),
+            missing_services: credential_status.filter(c => c.status === 'missing').map(c => c.service),
+            data_sources: ['oauth_credentials', 'client_integrations', 'integration_assets'],
+            note: 'This is the CANONICAL source of truth. Do NOT create missing-credential incidents for any service returned with status=connected. For status=limited, create at most ONE incident per service explaining the specific error/hint — do not duplicate.',
+          };
+        } catch (err) {
+          return { error: `query_credential_health failed: ${err.message}` };
+        }
       }
 
       // ========================================

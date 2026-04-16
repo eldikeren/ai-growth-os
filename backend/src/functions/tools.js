@@ -45,7 +45,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 25000) {
 // Google access tokens expire in 1 hour. This function always
 // returns a valid token, refreshing silently if needed.
 // ============================================================
-async function getValidGoogleToken(clientId) {
+export async function getValidGoogleToken(clientId) {
   const ENC_KEY = process.env.CREDENTIAL_ENCRYPTION_KEY;
   if (!ENC_KEY || !clientId) return null;
 

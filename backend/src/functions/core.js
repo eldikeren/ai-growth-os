@@ -552,10 +552,17 @@ FINAL OUTPUT RULES:
     }
 
     // 12. CRITICAL: Save run output to DB IMMEDIATELY
-    console.log(`[RUN_SAVE] Starting DB update for run=${run.id}, elapsed=${Date.now()-startTime}ms, output_size=${JSON.stringify(output).length}`);
+    // Ensure finalStatus is a valid DB enum value — truthGate may return 'partial'
+    const VALID_STATUSES = ['running','success','failed','pending_approval','dry_run','cancelled','executed_pending_validation','validation_failed','partial'];
+    if (!VALID_STATUSES.includes(finalStatus)) {
+      console.warn(`[RUN_SAVE] Invalid status "${finalStatus}" — falling back to "success"`);
+      finalStatus = 'success';
+    }
+    const dbStatus = triggerValidation ? 'executed_pending_validation' : finalStatus;
+    console.log(`[RUN_SAVE] Starting DB update for run=${run.id}, status=${dbStatus}, elapsed=${Date.now()-startTime}ms, output_size=${JSON.stringify(output).length}`);
     try {
       const updatePayload = {
-        status: triggerValidation ? 'executed_pending_validation' : finalStatus,
+        status: dbStatus,
         output,
         output_text: outputText,
         changed_anything: changedAnything,
@@ -575,16 +582,30 @@ FINAL OUTPUT RULES:
       const { data: updateData, error: runUpdateErr } = await supabase.from('runs').update(updatePayload).eq('id', run.id).select('id, status').single();
       if (runUpdateErr) {
         console.error(`[RUN_UPDATE_FAIL] run=${run.id}: ${runUpdateErr.message} | ${runUpdateErr.details || ''} | ${runUpdateErr.hint || ''}`);
-        // Retry with smaller output
-        await supabase.from('runs').update({
-          status: finalStatus, output: { _tool_call_count: toolCallLog.length, summary: 'Output saved partial' },
+        // Retry with smaller output AND safe status (always use 'success' or 'failed' for retry)
+        const safeStatus = tokensUsed > 0 ? 'success' : 'partial';
+        const { error: retryErr } = await supabase.from('runs').update({
+          status: safeStatus, output: { _tool_call_count: toolCallLog.length, summary: 'Output saved partial — original update failed: ' + runUpdateErr.message },
           tokens_used: tokensUsed, duration_ms: Date.now() - startTime, completed_at: new Date().toISOString()
         }).eq('id', run.id);
+        if (retryErr) {
+          console.error(`[RUN_UPDATE_RETRY_FAIL] run=${run.id}: ${retryErr.message}`);
+          // Last resort — just mark completed with minimal payload
+          await supabase.from('runs').update({
+            status: 'failed', error: `DB save failed: ${runUpdateErr.message}; retry: ${retryErr.message}`,
+            duration_ms: Date.now() - startTime, completed_at: new Date().toISOString()
+          }).eq('id', run.id).catch(e => console.error(`[RUN_SAVE_LAST_RESORT] ${e.message}`));
+        }
       } else {
         console.log(`[RUN_SAVE_OK] run=${run.id} status=${updateData?.status} elapsed=${Date.now()-startTime}ms`);
       }
     } catch (saveErr) {
       console.error(`[RUN_SAVE_EXCEPTION] run=${run.id}: ${saveErr.message}`);
+      // NEVER leave a run stuck in 'running' — force-mark it
+      await supabase.from('runs').update({
+        status: 'failed', error: `Save exception: ${saveErr.message}`,
+        duration_ms: Date.now() - startTime, completed_at: new Date().toISOString()
+      }).eq('id', run.id).catch(e => console.error(`[RUN_SAVE_EMERGENCY] ${e.message}`));
     }
 
     // 13. Update assignment stats

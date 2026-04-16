@@ -13,21 +13,39 @@ import { createClient } from '@supabase/supabase-js';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 // ─── Load the git config for a client (or null) ───
-// Forces access_mode='branch_pr_and_merge' because approval IS consent to deploy.
+// Reads access_mode from DB so the user can choose branch_only, branch_and_pr, or branch_pr_and_merge.
+// Also reads current_access_level from website_access_profiles so approval → deploy respects the
+// access level the user actually granted (git_edit = PR only; full_control = auto-merge).
 export async function loadGitConfigForClient(clientId) {
   const { data: cw } = await supabase.from('client_websites')
     .select('id').eq('client_id', clientId).maybeSingle();
   if (!cw?.id) return null;
-  const { data: gitConn } = await supabase.from('website_git_connections')
-    .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
-    .eq('client_website_id', cw.id).maybeSingle();
+  const [{ data: gitConn }, { data: profile }] = await Promise.all([
+    supabase.from('website_git_connections')
+      .select('provider, repo_owner, repo_name, repo_url, production_branch, default_branch, access_mode')
+      .eq('client_website_id', cw.id).maybeSingle(),
+    supabase.from('website_access_profiles')
+      .select('current_access_level')
+      .eq('client_website_id', cw.id).maybeSingle(),
+  ]);
   if (gitConn?.provider !== 'github') return null;
+
+  // Derive effective access_mode:
+  //   - full_control   → branch_pr_and_merge (auto-merge)
+  //   - git_edit       → branch_and_pr (open PR, wait for human merge)
+  //   - anything else  → fall back to DB value or branch_and_pr
+  const level = profile?.current_access_level;
+  let effectiveMode = gitConn.access_mode || 'branch_and_pr';
+  if (level === 'full_control') effectiveMode = 'branch_pr_and_merge';
+  else if (level === 'git_edit') effectiveMode = 'branch_and_pr';
+
   return {
     repo_url: gitConn.repo_url || `https://github.com/${gitConn.repo_owner}/${gitConn.repo_name}`,
     repo_owner: gitConn.repo_owner,
     repo_name: gitConn.repo_name,
     default_branch: gitConn.production_branch || gitConn.default_branch || 'main',
-    access_mode: 'branch_pr_and_merge',
+    access_mode: effectiveMode,
+    access_level: level,
   };
 }
 

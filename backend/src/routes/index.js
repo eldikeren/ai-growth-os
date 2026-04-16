@@ -768,11 +768,34 @@ router.patch('/schedules/:id', async (req, res) => {
 });
 
 // ── CREDENTIALS ───────────────────────────────────────────────
+// Returns the canonical live credential health picture by reading oauth_credentials
+// + client_integrations + integration_assets (and env-var fallbacks for services
+// like Perplexity / DataForSEO / Moz). The legacy client_credentials table was the
+// source of the "75%" phantom — this endpoint now reflects reality.
 router.get('/clients/:clientId/credentials', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('client_credentials').select('id, service, label, is_connected, health_score, last_checked, last_successful, error').eq('client_id', req.params.clientId);
-    if (error) throw error;
-    res.json(data);
+    const health = await refreshCredentialHealth(req.params.clientId);
+    // Shape the result into the UI's expected row format
+    const rows = (health.results || []).map((r, idx) => ({
+      id: r.id || `${r.service}-${idx}`,
+      service: r.service,
+      label: r.label || r.service,
+      is_connected: r.status === 'connected',
+      health_score: r.health_score ?? (r.status === 'connected' ? 100 : r.status === 'limited' ? 50 : 0),
+      last_checked: r.last_checked || new Date().toISOString(),
+      last_successful: r.last_successful || null,
+      error: r.error || null,
+      source: r.source || health.source,
+      discovery_summary: r.discovery_summary || null,
+    }));
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Raw health summary (with overall_health_score) for dashboard kpi
+router.get('/clients/:clientId/credentials/health', async (req, res) => {
+  try {
+    res.json(await refreshCredentialHealth(req.params.clientId));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

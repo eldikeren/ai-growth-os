@@ -12,7 +12,7 @@ import {
   createClientOnboarding, syncConnector,
   getActivePrompt, createPromptOverride, diffPrompts,
   createRunStep, completeRunStep, getRunSteps,
-  generateFullLinkIntelligence, generateSeoActionPlan,
+  generateFullLinkIntelligence, syncBacklinkIntelligence, generateSeoActionPlan,
   runFullVerification, snapshotKeywordPositions, recordKpiSnapshot
 } from '../functions/additional.js';
 import { deployApprovedChange } from '../functions/deploy.js';
@@ -315,6 +315,16 @@ router.get('/runs/:runId/steps', async (req, res) => {
 router.post('/clients/:clientId/link-intelligence/generate', async (req, res) => {
   try {
     const result = await generateFullLinkIntelligence(req.params.clientId);
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Pull live backlink / referring-domain / competitor-gap data from DataForSEO
+// and populate the DB. This is what makes the Backlinks / Referring Domains /
+// Link Gap tabs actually show data. The Generate endpoint calls this first.
+router.post('/clients/:clientId/link-intelligence/sync', async (req, res) => {
+  try {
+    const result = await syncBacklinkIntelligence(req.params.clientId);
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

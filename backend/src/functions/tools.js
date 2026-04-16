@@ -6,11 +6,20 @@
 
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
+import OpenAI from 'openai';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
+
+// DALL-E 3 client for generate_premium_visual
+// Uses a separate OpenAI instance with a longer image-gen timeout (image-gen is slower than chat)
+const openaiImages = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 60000,
+  maxRetries: 0,
+});
 
 // ============================================================
 // FETCH WITH TIMEOUT — wraps all external API calls
@@ -499,6 +508,26 @@ export function getToolDefinitions(agentSlug, clientId) {
         }
       },
       allowed_agents: ['technical-seo-crawl-agent', 'website-content-agent', 'cro-agent', 'design-consistency-agent', 'website-qa-agent', 'design-enforcement-agent', 'hebrew-quality-agent', 'seo-core-agent', 'local-seo-agent', 'master-orchestrator', 'regression-agent', 'competitor-intelligence-agent', 'report-composer-agent', 'legal-agent', 'facebook-agent', 'instagram-agent', 'content-distribution-agent']
+    },
+    // --- GENERATE PREMIUM VISUAL (DALL-E 3) ---
+    {
+      type: 'function',
+      function: {
+        name: 'generate_premium_visual',
+        description: 'Generate a PREMIUM social-media-ready visual (image) using DALL-E 3. Use for Facebook/Instagram posts, Google Ads creatives, blog featured images, and designed text cards. Output: stored visual asset with URL ready to attach to a post proposal. MUST follow the client CONTENT SCOPE GUARDRAIL — visuals that depict forbidden topics will be rejected. Every visual must look PREMIUM: no cartoons unless explicitly requested, no childish clipart, no AI-slop aesthetic. Favor photography, editorial illustration, high-end typography, minimal brand graphics.',
+        parameters: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string', description: 'Detailed image prompt in English. Describe subject, style (e.g. "editorial photography", "minimal premium typography card"), composition, mood, and any text overlay. Be explicit about premium quality: studio lighting, sharp focus, magazine-grade aesthetic.' },
+            aspect: { type: 'string', enum: ['square', 'portrait', 'landscape'], description: 'Aspect ratio. square = 1024x1024 (IG feed), portrait = 1024x1792 (IG story/reel), landscape = 1792x1024 (FB cover, ad). Default: square' },
+            style: { type: 'string', enum: ['photo', 'illustration', 'typography_card', 'meme'], description: 'Visual style category. photo = premium photography, illustration = editorial art, typography_card = designed-text-only card, meme = tasteful high-concept meme (still premium). Default: photo' },
+            purpose: { type: 'string', description: 'What this visual is for, e.g. "Instagram feed post about child custody mediation", "Google Ads landing page hero for mortgage calculator".' },
+            intended_platform: { type: 'string', enum: ['instagram_feed', 'instagram_story', 'facebook_feed', 'facebook_cover', 'google_ads', 'blog_hero', 'email_header'], description: 'Where the visual will be used.' },
+          },
+          required: ['prompt', 'purpose', 'intended_platform']
+        }
+      },
+      allowed_agents: ['facebook-agent', 'instagram-agent', 'google-ads-campaign-agent', 'content-distribution-agent', 'website-content-agent', 'seo-core-agent', 'cro-agent']
     },
     // --- BROWSER TASK SUBMISSION (MANUS) ---
     {
@@ -1705,6 +1734,77 @@ export async function executeTool(toolName, args, clientId, runId) {
           count: data?.length || 0,
           incidents: data || []
         };
+      }
+
+      // ========================================
+      // generate_premium_visual — DALL-E 3
+      // Produces a premium social/ad image, stores it in integration_assets,
+      // and returns the URL so the agent can attach it to a proposal.
+      // ========================================
+      case 'generate_premium_visual': {
+        try {
+          const sizeMap = {
+            square: '1024x1024',
+            portrait: '1024x1792',
+            landscape: '1792x1024',
+          };
+          const size = sizeMap[args.aspect || 'square'] || '1024x1024';
+
+          // Premium quality stylistic wrapper — injected into every prompt
+          const stylePrefix = {
+            photo: 'Premium editorial photography, studio lighting, razor-sharp focus, magazine-grade composition, high dynamic range, color-graded, no text overlay unless specified. ',
+            illustration: 'Editorial illustration in a premium minimalist style, sophisticated color palette, refined linework, tasteful negative space, suitable for a high-end brand. No childish or cartoonish elements. ',
+            typography_card: 'Minimalist typography-only card. Premium sans-serif or modern serif, perfect kerning, elegant hierarchy, restrained color palette (max 2 colors + background), generous negative space, magazine cover quality. ',
+            meme: 'Tasteful high-concept meme with premium aesthetic. Clean typography, sharp photography or illustration, clever visual punchline. No low-effort clipart, no pixelated images, no childish faces. ',
+          };
+          const fullPrompt = (stylePrefix[args.style || 'photo'] || stylePrefix.photo) + args.prompt;
+
+          const result = await openaiImages.images.generate({
+            model: 'dall-e-3',
+            prompt: fullPrompt.slice(0, 4000),
+            size,
+            quality: 'hd',
+            style: args.style === 'illustration' || args.style === 'typography_card' ? 'vivid' : 'natural',
+            n: 1,
+          });
+
+          const url = result.data?.[0]?.url;
+          const revisedPrompt = result.data?.[0]?.revised_prompt;
+          if (!url) return { error: 'DALL-E returned no URL' };
+
+          // Persist into integration_assets so visuals are tracked and re-usable
+          const { data: asset } = await supabase.from('integration_assets').insert({
+            client_id: clientId,
+            provider: 'openai',
+            sub_provider: 'dalle3',
+            asset_type: 'image',
+            label: args.purpose?.slice(0, 200) || 'generated visual',
+            external_id: `visual_${Date.now()}`,
+            url,
+            metadata_json: {
+              intended_platform: args.intended_platform,
+              style: args.style || 'photo',
+              aspect: args.aspect || 'square',
+              size,
+              original_prompt: args.prompt,
+              revised_prompt: revisedPrompt,
+              run_id: runId,
+            },
+          }).select().single();
+
+          return {
+            generated: true,
+            url,
+            size,
+            intended_platform: args.intended_platform,
+            style: args.style || 'photo',
+            asset_id: asset?.id,
+            revised_prompt: revisedPrompt,
+            note: 'Visual generated and stored in integration_assets. Attach url to the post/ad proposal.',
+          };
+        } catch (err) {
+          return { error: `generate_premium_visual failed: ${err.message}` };
+        }
       }
 
       // ========================================

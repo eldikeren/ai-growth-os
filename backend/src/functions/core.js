@@ -144,6 +144,19 @@ export async function executeAgent(clientId, agentTemplateId, taskPayload = {}, 
     .order('relevance_score', { ascending: false })
     .limit(25);
 
+  // 4b. Load CONTENT SCOPE GUARDRAILS — tagged memory items that MUST appear at the
+  // top of every prompt so agents can never wander outside the client's content scope
+  // (e.g. Yaniv Gil = family law only, Homie = mortgages only). These are hard gates.
+  const { data: scopeGuardrails } = await supabase
+    .from('memory_items')
+    .select('id, content, tags')
+    .eq('client_id', clientId)
+    .eq('approved', true)
+    .eq('is_stale', false)
+    .overlaps('tags', ['content-scope', 'guardrail', 'canonical', 'forbidden-pattern', 'brand-voice'])
+    .order('relevance_score', { ascending: false })
+    .limit(10);
+
   // 5. Load keywords
   const { data: keywords } = await supabase
     .from('client_keywords')
@@ -221,7 +234,22 @@ ${rules.custom_instructions ? `- Custom Instructions: ${rules.custom_instruction
     ? '\n\n=== APPROVAL STATUS ===\nThis task was previously held for approval and has now been APPROVED. Proceed with full execution and implementation.'
     : '';
 
-  const fullPrompt = activePrompt + memoryBlock + rulesBlock + keywordsBlock + baselinesBlock + recentRunsBlock + taskBlock + approvalBlock;
+  // CONTENT SCOPE GUARDRAIL — sits at the very top of the prompt, non-negotiable.
+  // Every agent sees the client's allowed/forbidden topics, brand voice, and canonical
+  // facts BEFORE it sees its own base prompt. This prevents cross-client content bleed
+  // (e.g. a Yaniv Gil agent proposing mortgage content, or a Homie agent proposing legal content).
+  const scopeBlock = scopeGuardrails?.length
+    ? `=== CONTENT SCOPE GUARDRAIL (HARD GATE — applies to ALL tool calls, proposals, posts, ads, content) ===
+CLIENT: ${client.name} | DOMAIN: ${client.domain} | INDUSTRY: ${profile.industry || 'not set'}
+
+The following are the CANONICAL content-scope rules for this client. You MUST obey them in every action you take. If a proposal references a FORBIDDEN topic, DISCARD it silently and do not submit it. If a proposal omits required canonical facts (phone, domain, voice), FIX it before submitting.
+
+${scopeGuardrails.map((g, i) => `--- GUARDRAIL ${i + 1} ---\n${g.content}`).join('\n\n')}
+
+=== END CONTENT SCOPE GUARDRAIL ===\n\n`
+    : '';
+
+  const fullPrompt = scopeBlock + activePrompt + memoryBlock + rulesBlock + keywordsBlock + baselinesBlock + recentRunsBlock + taskBlock + approvalBlock;
 
   // 9. Create run record
   const { data: run } = await supabase.from('runs').insert({

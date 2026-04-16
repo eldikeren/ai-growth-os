@@ -41,9 +41,12 @@ function AccessLevelEditor({ current, websiteId, onSaved }) {
     <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
       <Field label="Access Level" htmlFor="access-level">
         <select id="access-level" value={level} onChange={e => setLevel(e.target.value)} style={selectStyle}>
-          <option value="read_only">Read Only</option>
-          <option value="read_write">Read & Write</option>
-          <option value="full_access">Full Access</option>
+          <option value="read_only">Read Only (GSC + crawl only)</option>
+          <option value="content_only">Content Only (CMS drafts, no publish)</option>
+          <option value="cms_edit">CMS Edit (WordPress / Webflow direct)</option>
+          <option value="git_edit">Git Edit (branch + PR via GitHub)</option>
+          <option value="server_edit">Server Edit (SSH / SFTP)</option>
+          <option value="full_control">Full Control (merge + deploy autonomously)</option>
         </select>
       </Field>
       <Btn onClick={save} disabled={saving} small style={{ marginTop: 16 }}>{saving ? <Spin /> : <Check size={12} />} Save</Btn>

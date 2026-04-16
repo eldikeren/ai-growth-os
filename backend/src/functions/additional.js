@@ -412,7 +412,235 @@ export async function getRunSteps(runId) {
 // ============================================================
 // LINK INTELLIGENCE — full AI-powered analysis
 // ============================================================
+// ============================================================
+// BACKLINK SYNC — populate backlinks / referring_domains /
+// competitor_link_gap / backlink_snapshots from DataForSEO.
+// This is the PIPELINE the UI Link Intelligence tabs depend on.
+// Without this, `generateFullLinkIntelligence` synthesizes from
+// empty tables and the Backlinks / Referring Domains / Link Gap
+// tabs stay blank forever.
+// ============================================================
+function _cleanDomain(raw) {
+  if (!raw) return '';
+  try {
+    let d = String(raw).trim().toLowerCase();
+    d = d.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '').split('/')[0];
+    return d;
+  } catch { return ''; }
+}
+
+async function _dfsPost(endpoint, body) {
+  const login = (process.env.DATAFORSEO_LOGIN || '').trim();
+  const password = (process.env.DATAFORSEO_PASSWORD || '').trim();
+  if (!login || !password) throw new Error('DataForSEO credentials not configured');
+  const auth = Buffer.from(`${login}:${password}`).toString('base64');
+  const resp = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!resp.ok) throw new Error(`DataForSEO ${resp.status}: ${(await resp.text()).slice(0, 300)}`);
+  const data = await resp.json();
+  const task = data?.tasks?.[0];
+  if (task?.status_code !== 20000) throw new Error(`DataForSEO task error: ${task?.status_message}`);
+  return task?.result?.[0] || {};
+}
+
+export async function syncBacklinkIntelligence(clientId) {
+  const started = Date.now();
+
+  // 1) Load client + competitors
+  const [{ data: client }, { data: comps }] = await Promise.all([
+    supabase.from('clients').select('id, name, domain').eq('id', clientId).single(),
+    supabase.from('client_competitors').select('domain, name').eq('client_id', clientId),
+  ]);
+  if (!client) throw new Error(`Client not found: ${clientId}`);
+  const clientDomain = _cleanDomain(client.domain);
+  if (!clientDomain) throw new Error(`Client ${client.name} has no domain configured`);
+  const competitorDomains = (comps || [])
+    .map(c => _cleanDomain(c.domain))
+    .filter(d => d && !d.startsWith('competitor-')); // skip placeholder competitors
+
+  const summary = {
+    client: client.name, domain: clientDomain,
+    competitors_processed: [], tables_written: {},
+    errors: [], data_source: 'dataforseo',
+    started_at: new Date(started).toISOString(),
+  };
+
+  // 2) Client backlinks SUMMARY → backlink_snapshots
+  try {
+    const s = await _dfsPost('https://api.dataforseo.com/v3/backlinks/summary/live',
+      [{ target: clientDomain, internal_list_limit: 0, backlinks_filters: ['dofollow', '=', true] }]);
+    await supabase.from('backlink_snapshots').insert({
+      client_id: clientId,
+      total_backlinks: s.backlinks || 0,
+      total_referring_domains: s.referring_domains || 0,
+      dofollow_backlinks: s.referring_links_attributes?.dofollow || s.backlinks || 0,
+      domain_authority: Math.min(100, Math.round((s.rank || 0) / 6)),
+      snapshot_date: new Date().toISOString().slice(0, 10),
+      source: 'dataforseo',
+    });
+    summary.tables_written.backlink_snapshots = 1;
+    summary.client_rank = s.rank || 0;
+  } catch (e) { summary.errors.push(`summary: ${e.message}`); }
+
+  // 3) Client REFERRING DOMAINS → referring_domains (replace)
+  try {
+    const rd = await _dfsPost('https://api.dataforseo.com/v3/backlinks/referring_domains/live',
+      [{ target: clientDomain, limit: 500, order_by: ['rank,desc'], exclude_internal_backlinks: true }]);
+    const items = rd.items || [];
+    if (items.length > 0) {
+      await supabase.from('referring_domains').delete().eq('client_id', clientId);
+      const rows = items.map(d => ({
+        client_id: clientId,
+        domain: d.domain,
+        domain_authority: Math.min(100, Math.round((d.rank || 0) / 6)),
+        backlink_count: d.backlinks || 0,
+        dofollow_count: d.backlinks_spam_score != null ? (d.backlinks || 0) : (d.backlinks || 0),
+        is_competitor: false,
+        first_seen: d.first_seen || null,
+        last_updated: new Date().toISOString(),
+      }));
+      // chunked insert to avoid payload limits
+      for (let i = 0; i < rows.length; i += 200) {
+        await supabase.from('referring_domains').insert(rows.slice(i, i + 200));
+      }
+      summary.tables_written.referring_domains = rows.length;
+    }
+  } catch (e) { summary.errors.push(`referring_domains: ${e.message}`); }
+
+  // 4) Client BACKLINKS (per-link detail) → backlinks (replace, capped at 500)
+  try {
+    const bl = await _dfsPost('https://api.dataforseo.com/v3/backlinks/backlinks/live',
+      [{ target: clientDomain, limit: 500, order_by: ['rank,desc'], mode: 'as_is',
+         backlinks_filters: ['dofollow', '=', true] }]);
+    const items = bl.items || [];
+    if (items.length > 0) {
+      await supabase.from('backlinks').delete().eq('client_id', clientId);
+      const rows = items.slice(0, 500).map(b => ({
+        client_id: clientId,
+        source_domain: b.domain_from,
+        source_url: b.url_from,
+        target_url: b.url_to,
+        anchor_text: b.anchor || null,
+        domain_authority: Math.min(100, Math.round((b.rank || 0) / 6)),
+        page_authority: Math.min(100, Math.round((b.page_from_rank || 0) / 6)),
+        is_dofollow: !!b.dofollow,
+        is_sponsored: !!b.is_sponsored,
+        first_seen: b.first_seen || null,
+        last_seen: b.last_seen || null,
+      }));
+      for (let i = 0; i < rows.length; i += 200) {
+        await supabase.from('backlinks').insert(rows.slice(i, i + 200));
+      }
+      summary.tables_written.backlinks = rows.length;
+    }
+  } catch (e) { summary.errors.push(`backlinks: ${e.message}`); }
+
+  // 5) COMPETITOR LINK GAP — per competitor, fetch their referring_domains and
+  //    compute set-diff vs ours. Writes competitor_link_gap + missing_referring_domains.
+  const ourDomainsSet = new Set();
+  const { data: ourRD } = await supabase.from('referring_domains').select('domain').eq('client_id', clientId);
+  (ourRD || []).forEach(r => ourDomainsSet.add(r.domain));
+
+  const gapByDomain = new Map(); // domain -> {da, competitors: Set, backlinks}
+
+  for (const compDomain of competitorDomains) {
+    try {
+      const rd = await _dfsPost('https://api.dataforseo.com/v3/backlinks/referring_domains/live',
+        [{ target: compDomain, limit: 300, order_by: ['rank,desc'], exclude_internal_backlinks: true }]);
+      const items = rd.items || [];
+      summary.competitors_processed.push({ competitor: compDomain, domains_found: items.length });
+      for (const d of items) {
+        if (ourDomainsSet.has(d.domain)) continue; // we already have it
+        if (!d.domain || d.domain === compDomain) continue;
+        const key = d.domain;
+        if (!gapByDomain.has(key)) {
+          gapByDomain.set(key, { da: Math.min(100, Math.round((d.rank || 0) / 6)), competitors: new Set(), backlinks: d.backlinks || 0 });
+        }
+        gapByDomain.get(key).competitors.add(compDomain);
+      }
+      // small pause to respect rate limits
+      await new Promise(r => setTimeout(r, 400));
+    } catch (e) { summary.errors.push(`competitor ${compDomain}: ${e.message}`); }
+  }
+
+  if (gapByDomain.size > 0) {
+    // clear old gap + missing rows so the view always reflects the latest scrape
+    await Promise.all([
+      supabase.from('competitor_link_gap').delete().eq('client_id', clientId),
+      supabase.from('missing_referring_domains').delete().eq('client_id', clientId).eq('imported_from_sheet', false),
+    ]);
+
+    const gapRows = [];
+    const missingRows = [];
+    for (const [domain, info] of gapByDomain.entries()) {
+      const compList = Array.from(info.competitors);
+      const relevance = Math.min(100, info.da + compList.length * 5);
+      // one row per competitor (for competitor_link_gap)
+      for (const comp of compList) {
+        gapRows.push({
+          client_id: clientId,
+          domain,
+          competitor_domain: comp,
+          domain_authority: info.da,
+          relevance_score: relevance,
+          category: info.da >= 50 ? 'high_authority' : info.da >= 30 ? 'mid_authority' : 'niche',
+          outreach_difficulty: info.da >= 70 ? 'hard' : info.da >= 40 ? 'medium' : 'easy',
+          recommendation: `Pursue editorial / guest post / PR mention on ${domain} — referenced by ${compList.length} competitor(s)`,
+          ai_rationale: null,
+          status: 'discovered',
+        });
+      }
+      // one row per missing domain (deduped, for missing_referring_domains)
+      missingRows.push({
+        client_id: clientId,
+        domain,
+        competitors_that_have_it: compList,
+        competitor_count: compList.length,
+        domain_authority: info.da,
+        relevance_score: relevance,
+        priority_score: relevance + compList.length * 8,
+        category: info.da >= 50 ? 'high_authority' : info.da >= 30 ? 'mid_authority' : 'niche',
+        recommended_acquisition_type: info.da >= 60 ? 'pr_or_editorial' : info.da >= 40 ? 'guest_post' : 'directory_or_resource',
+        status: 'discovered',
+        imported_from_sheet: false,
+      });
+    }
+    // chunked inserts
+    for (let i = 0; i < gapRows.length; i += 200) {
+      await supabase.from('competitor_link_gap').insert(gapRows.slice(i, i + 200));
+    }
+    for (let i = 0; i < missingRows.length; i += 200) {
+      await supabase.from('missing_referring_domains').insert(missingRows.slice(i, i + 200));
+    }
+    summary.tables_written.competitor_link_gap = gapRows.length;
+    summary.tables_written.missing_referring_domains = missingRows.length;
+  }
+
+  summary.duration_ms = Date.now() - started;
+  summary.finished_at = new Date().toISOString();
+
+  // Audit trail
+  await supabase.from('audit_trail').insert({
+    client_id: clientId,
+    action_type: 'backlink_intelligence_synced',
+    triggered_by: 'admin',
+    after_value: JSON.stringify(summary),
+  });
+
+  return summary;
+}
+
 export async function generateFullLinkIntelligence(clientId) {
+  // Auto-sync first so the LLM synthesis actually has data to work with.
+  // If the sync fails (e.g. DataForSEO credentials missing), we still try
+  // to synthesize from whatever the tables currently hold.
+  try { await syncBacklinkIntelligence(clientId); }
+  catch (e) { console.error('[link-intelligence] sync failed, continuing with existing data:', e.message); }
+
   const [missingDomains, linkGap, existingLinks, competitors, baselines] = await Promise.all([
     supabase.from('missing_referring_domains').select('*').eq('client_id', clientId).order('priority_score', { ascending: false }).limit(50),
     supabase.from('competitor_link_gap').select('*').eq('client_id', clientId).order('domain_authority', { ascending: false }).limit(50),

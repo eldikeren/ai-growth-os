@@ -20,6 +20,38 @@ import { deployApprovedChange } from '../functions/deploy.js';
 const router = express.Router();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
+// ── AI HELPER — uses OpenAI (always available) or Anthropic ──
+async function aiChat(prompt, { maxTokens = 2000, json = false } = {}) {
+  // Prefer Anthropic, fall back to OpenAI
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!anthropicKey && !openaiKey) throw new Error('No AI key configured (need OPENAI_API_KEY or ANTHROPIC_API_KEY)');
+
+  if (anthropicKey) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': anthropicKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+    });
+    const data = await res.json();
+    return data?.content?.[0]?.text || '';
+  }
+
+  // OpenAI fallback
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      max_tokens: maxTokens,
+      messages: [{ role: 'user', content: prompt }],
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
+    }),
+  });
+  const data = await res.json();
+  return data?.choices?.[0]?.message?.content || '';
+}
+
 // ── ONBOARDING ────────────────────────────────────────────────
 router.post('/onboarding', async (req, res) => {
   try {
@@ -2954,24 +2986,7 @@ IMPORTANT: For interests, use REAL Meta interest IDs and names that exist in the
 
 Use the country (${client?.country || 'IL'}) and language context to pick appropriate targeting.`;
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'AI not configured (missing ANTHROPIC_API_KEY)' });
-
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    const aiData = await aiRes.json();
-    const text = aiData?.content?.[0]?.text || '';
+    const text = await aiChat(prompt, { maxTokens: 1024 });
 
     // Parse JSON from response
     try {
@@ -3078,24 +3093,7 @@ IMPORTANT RULES:
 - Suggest 2-3 creative variations if possible
 - Consider the daily budget when making targeting recommendations (narrow targeting for small budgets)`;
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'AI not configured (missing ANTHROPIC_API_KEY)' });
-
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    const aiData = await aiRes.json();
-    const text = aiData?.content?.[0]?.text || '';
+    const text = await aiChat(prompt, { maxTokens: 2048 });
 
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -3294,24 +3292,7 @@ Provide your analysis in ${lang === 'he' ? 'Hebrew' : 'English'}. Return ONLY a 
   "estimated_timeline": "How long this would take to implement (e.g. '2-3 days', '1 week')"
 }`;
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'AI not configured' });
-
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    const aiData = await aiRes.json();
-    const text = aiData?.content?.[0]?.text || '';
+    const text = await aiChat(prompt, { maxTokens: 1500 });
 
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -3582,54 +3563,206 @@ router.post('/clients/:clientId/social/:postId/publish', async (req, res) => {
 });
 
 // ── AI GENERATE SOCIAL POST CONTENT ─────────────────────────────
+// Helper: get full client context for social AI
+async function getSocialClientContext(clientId) {
+  const [clientRes, profileRes, rulesRes, memRes, seoRes] = await Promise.all([
+    supabase.from('clients').select('name, domain, business_type, target_audience, niche, language, country').eq('id', clientId).single(),
+    supabase.from('client_profiles').select('business_type, industry, language, brand_voice').eq('client_id', clientId).maybeSingle(),
+    supabase.from('client_rules').select('brand_voice, target_audiences, compliance_style, geographies').eq('client_id', clientId).maybeSingle(),
+    supabase.from('memory_items').select('key, value').eq('client_id', clientId).limit(15),
+    supabase.from('seo_data').select('page_url, seo_title, h1_text').eq('client_id', clientId).limit(10),
+  ]);
+  return {
+    client: clientRes.data,
+    profile: profileRes.data,
+    rules: rulesRes.data,
+    memories: memRes.data || [],
+    seoPages: seoRes.data || [],
+    lang: profileRes.data?.language || clientRes.data?.language || 'he',
+    brandVoice: rulesRes.data?.brand_voice || profileRes.data?.brand_voice || 'professional',
+  };
+}
+
+// Helper: generate image with DALL-E
+async function generatePostImage(imagePrompt) {
+  try {
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) return null;
+    const imgRes = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
+      body: JSON.stringify({
+        model: 'dall-e-3',
+        prompt: imagePrompt,
+        n: 1,
+        size: '1024x1024',
+        quality: 'standard',
+      }),
+    });
+    const imgData = await imgRes.json();
+    return imgData?.data?.[0]?.url || null;
+  } catch (e) {
+    console.error('DALL-E image generation failed:', e.message);
+    return null;
+  }
+}
+
+// ── AI GENERATE SINGLE SOCIAL POST (text + image) ───────────────
 router.post('/clients/:clientId/social/ai-generate', async (req, res) => {
   try {
     const { clientId } = req.params;
     const { prompt, platform } = req.body;
     if (!prompt?.trim()) return res.status(400).json({ error: 'Prompt is required' });
 
-    // Get client context
-    const { data: client } = await supabase.from('clients')
-      .select('name, domain, business_type, target_audience, niche, language, country')
-      .eq('id', clientId).single();
-    const { data: profile } = await supabase.from('client_profiles')
-      .select('business_type, industry, language, brand_voice').eq('client_id', clientId).maybeSingle();
-    const { data: rules } = await supabase.from('client_rules')
-      .select('brand_voice, target_audiences, compliance_style').eq('client_id', clientId).maybeSingle();
-
-    const lang = profile?.language || client?.language || 'he';
-    const brandVoice = rules?.brand_voice || profile?.brand_voice || 'professional';
+    const ctx = await getSocialClientContext(clientId);
+    const memCtx = ctx.memories.map(m => `${m.key}: ${m.value}`).join('\n');
 
     const aiPrompt = `You are a social media expert. Create a ${platform || 'Facebook'} post for this business.
 
 BUSINESS:
-- Name: ${client?.name || 'Unknown'}
-- Domain: ${client?.domain || 'Unknown'}
-- Industry: ${profile?.business_type || client?.business_type || 'Unknown'}
-- Target Audience: ${JSON.stringify(rules?.target_audiences || client?.target_audience || 'General')}
-- Brand Voice: ${brandVoice}
+- Name: ${ctx.client?.name || 'Unknown'}
+- Website: ${ctx.client?.domain || 'Unknown'}
+- Industry: ${ctx.profile?.business_type || ctx.client?.business_type || 'Unknown'}
+- Niche: ${ctx.client?.niche || 'Unknown'}
+- Target Audience: ${JSON.stringify(ctx.rules?.target_audiences || ctx.client?.target_audience || 'General')}
+- Brand Voice: ${ctx.brandVoice}
+- Country: ${ctx.client?.country || 'IL'}
+
+BUSINESS CONTEXT:
+${memCtx || 'No additional context'}
+
+WEBSITE PAGES:
+${ctx.seoPages.map(p => `${p.page_url}: "${p.seo_title || p.h1_text || ''}"` ).join('\n') || 'No pages'}
 
 USER REQUEST: ${prompt}
 
-Write the post in ${lang === 'he' ? 'Hebrew' : 'English'}.
-${platform === 'instagram' ? 'Include relevant hashtags.' : ''}
-Keep it engaging and natural. Return ONLY the post text, no explanations.`;
+Write the post in ${ctx.lang === 'he' ? 'Hebrew' : 'English'}.
+${platform === 'instagram' ? 'Include relevant hashtags (5-10).' : ''}
+Keep it engaging, authentic, and on-brand.
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'AI not configured' });
+Return ONLY a JSON object (no markdown, no backticks):
+{
+  "content": "The full post text/caption",
+  "image_prompt": "A detailed English prompt for generating a matching visual image via DALL-E. Describe the scene, style, mood, colors. Do NOT include text/words in the image. Make it professional and relevant to the business.",
+  "suggested_link": "A relevant page URL from the business website to link to, or null"
+}`;
 
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 800,
-        messages: [{ role: 'user', content: aiPrompt }],
-      }),
+    const text = await aiChat(aiPrompt, { maxTokens: 1200 });
+
+    let parsed;
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { content: text };
+    } catch { parsed = { content: text }; }
+
+    // Generate image with DALL-E
+    let imageUrl = null;
+    if (parsed.image_prompt) {
+      imageUrl = await generatePostImage(parsed.image_prompt);
+    }
+
+    res.json({
+      content: parsed.content || text,
+      image_url: imageUrl,
+      image_prompt: parsed.image_prompt,
+      suggested_link: parsed.suggested_link,
+      platform: platform || 'facebook',
     });
-    const aiData = await aiRes.json();
-    const content = aiData?.content?.[0]?.text || '';
-    res.json({ content, platform: platform || 'facebook' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── AI BATCH GENERATE — Create multiple ready-to-publish posts ──
+router.post('/clients/:clientId/social/ai-batch-generate', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { count = 4, platforms = ['facebook', 'instagram'] } = req.body;
+
+    const ctx = await getSocialClientContext(clientId);
+    const memCtx = ctx.memories.map(m => `${m.key}: ${m.value}`).join('\n');
+
+    // Get existing posts to avoid repetition
+    const { data: recentPosts } = await supabase.from('social_posts')
+      .select('content').eq('client_id', clientId).order('created_at', { ascending: false }).limit(10);
+    const recentCtx = (recentPosts || []).map(p => p.content.substring(0, 80)).join('\n');
+
+    const aiPrompt = `You are a social media strategist. Generate ${count} unique, ready-to-publish social media posts for this business.
+
+BUSINESS:
+- Name: ${ctx.client?.name || 'Unknown'}
+- Website: ${ctx.client?.domain || 'Unknown'}
+- Industry: ${ctx.profile?.business_type || ctx.client?.business_type || 'Unknown'}
+- Niche: ${ctx.client?.niche || 'Unknown'}
+- Target Audience: ${JSON.stringify(ctx.rules?.target_audiences || ctx.client?.target_audience || 'General')}
+- Brand Voice: ${ctx.brandVoice}
+- Country: ${ctx.client?.country || 'IL'}
+- Platforms: ${platforms.join(', ')}
+
+BUSINESS CONTEXT:
+${memCtx || 'No additional context'}
+
+WEBSITE PAGES (use these for relevant links):
+${ctx.seoPages.map(p => `${p.page_url}: "${p.seo_title || p.h1_text || ''}"`).join('\n') || 'No pages'}
+
+RECENTLY POSTED (avoid similar content):
+${recentCtx || 'No recent posts'}
+
+Create ${count} diverse posts covering different angles:
+- Educational/tips posts about the industry
+- Behind-the-scenes or team posts
+- Service/product highlights
+- Client success stories or testimonials
+- Seasonal/trending topic posts
+- Engagement posts (questions, polls)
+
+Write all content in ${ctx.lang === 'he' ? 'Hebrew' : 'English'}.
+For Instagram posts, include 5-10 relevant hashtags.
+
+Return ONLY a JSON array (no markdown, no backticks):
+[
+  {
+    "title": "Short internal title for this post",
+    "content": "Full post text/caption",
+    "platform": "facebook or instagram",
+    "post_type": "text or image or link",
+    "image_prompt": "Detailed English prompt for DALL-E image generation. Describe scene, style, mood, colors. NO text/words in the image. Professional and business-relevant.",
+    "suggested_link": "relevant page URL or null",
+    "category": "educational|behind_scenes|service_highlight|testimonial|trending|engagement"
+  }
+]`;
+
+    const text = await aiChat(aiPrompt, { maxTokens: 4000 });
+
+    let posts = [];
+    try {
+      const jsonMatch = text.match(/\[[\s\S]*\]/);
+      posts = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    } catch { return res.status(500).json({ error: 'Failed to parse AI response' }); }
+
+    // Generate images in parallel for all posts via DALL-E
+    const imagePromises = posts.map(p => p.image_prompt ? generatePostImage(p.image_prompt) : Promise.resolve(null));
+    const images = await Promise.all(imagePromises);
+
+    // Save each post as a draft
+    const created = [];
+    for (let i = 0; i < posts.length; i++) {
+      const p = posts[i];
+      const imageUrl = images[i];
+      const { data, error } = await supabase.from('social_posts').insert({
+        client_id: clientId,
+        title: p.title || `AI Post ${i + 1}`,
+        content: p.content,
+        platform: p.platform || 'facebook',
+        post_type: imageUrl ? 'image' : (p.post_type || 'text'),
+        media_urls: imageUrl ? [{ url: imageUrl, type: 'image' }] : [],
+        link_url: p.suggested_link || null,
+        status: 'draft',
+        ai_generated: true,
+        ai_prompt: p.image_prompt || null,
+      }).select().single();
+      if (data) created.push(data);
+    }
+
+    res.json({ success: true, generated: posts.length, created: created.length, posts: created });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -3713,20 +3846,7 @@ Return ONLY a JSON array (no markdown):
 Write titles and descriptions in ${lang === 'he' ? 'Hebrew' : 'English'}.
 Be specific — reference actual pages and data. Don't be generic.`;
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'AI not configured' });
-
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 3000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-    const aiData = await aiRes.json();
-    const text = aiData?.content?.[0]?.text || '';
+    const text = await aiChat(prompt, { maxTokens: 3000 });
 
     let tasks = [];
     try {

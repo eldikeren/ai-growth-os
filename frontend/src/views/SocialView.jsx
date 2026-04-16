@@ -72,7 +72,11 @@ function AiGenerateForm({ clientId, platform, onGenerated, onClose }) {
         method: 'POST',
         body: { prompt: prompt.trim(), platform: platform || 'facebook' },
       });
-      onGenerated(data.content || data.text || data.generated_content || '');
+      onGenerated({
+        content: data.content || data.text || '',
+        image_url: data.image_url || null,
+        suggested_link: data.suggested_link || null,
+      });
     } catch (e) {
       setError(e.message);
     }
@@ -184,8 +188,18 @@ function PostForm({ clientId, post, onSaved, onCancel }) {
     setSaving(false);
   };
 
-  const handleAiGenerated = (content) => {
-    updateField('content', content);
+  const handleAiGenerated = (result) => {
+    if (typeof result === 'string') {
+      updateField('content', result);
+    } else {
+      updateField('content', result.content || '');
+      if (result.image_url) {
+        updateField('media_urls', [...form.media_urls, result.image_url]);
+      }
+      if (result.suggested_link) {
+        updateField('link_url', result.suggested_link);
+      }
+    }
     setShowAi(false);
   };
 
@@ -564,17 +578,24 @@ function PostDetail({ post, clientId, onBack, onRefresh }) {
 
 // ── Post Card (in list) ─────────────────────────────────────────
 function PostCard({ post, onClick }) {
+  const imgUrl = post.media_urls?.[0]?.url || (typeof post.media_urls?.[0] === 'string' ? post.media_urls[0] : null);
   return (
     <Card onClick={onClick} style={{ cursor: 'pointer', marginBottom: spacing.sm }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div style={{ display: 'flex', gap: spacing.md, flex: 1, minWidth: 0 }}>
-          <div style={{
-            width: 40, height: 40, borderRadius: radius.lg,
-            background: `${PLATFORM_COLORS[post.platform] || PLATFORM_COLORS.both}12`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-          }}>
-            <PlatformIcon platform={post.platform} size={20} />
-          </div>
+          {imgUrl ? (
+            <img src={imgUrl} alt="" style={{
+              width: 64, height: 64, borderRadius: radius.lg, objectFit: 'cover', flexShrink: 0,
+            }} />
+          ) : (
+            <div style={{
+              width: 40, height: 40, borderRadius: radius.lg,
+              background: `${PLATFORM_COLORS[post.platform] || PLATFORM_COLORS.both}12`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+            }}>
+              <PlatformIcon platform={post.platform} size={20} />
+            </div>
+          )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginBottom: 2, flexWrap: 'wrap' }}>
               {post.title && (
@@ -655,6 +676,8 @@ export default function SocialView({ clientId }) {
   const [selectedPost, setSelectedPost] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [genStatus, setGenStatus] = useState('');
 
   const load = useCallback(async () => {
     if (!clientId) return;
@@ -686,6 +709,24 @@ export default function SocialView({ clientId }) {
   const handleBackFromDetail = () => {
     setSelectedPost(null);
     load();
+  };
+
+  const handleBatchGenerate = async () => {
+    setGenerating(true);
+    setGenStatus('AI is analyzing your business and creating posts with images...');
+    try {
+      const data = await api(`/clients/${clientId}/social/ai-batch-generate`, {
+        method: 'POST',
+        body: { count: 4, platforms: ['facebook', 'instagram'] },
+      });
+      setGenStatus(`Created ${data.created || 0} posts with AI-generated images!`);
+      load();
+      setTimeout(() => setGenStatus(''), 4000);
+    } catch (e) {
+      setGenStatus('');
+      alert('AI generation failed: ' + e.message);
+    }
+    setGenerating(false);
   };
 
   if (!clientId) {
@@ -726,12 +767,30 @@ export default function SocialView({ clientId }) {
             <Btn onClick={handleRefresh} disabled={refreshing} secondary>
               {refreshing ? <Spin /> : <RefreshCw size={14} />}
             </Btn>
-            <GradientBtn onClick={() => setShowCreate(true)}>
-              <Plus size={14} /> Create Post
+            <Btn onClick={() => setShowCreate(true)} secondary>
+              <Plus size={14} /> Manual Post
+            </Btn>
+            <GradientBtn onClick={handleBatchGenerate} disabled={generating}>
+              {generating ? <><Spin /> Generating...</> : <><Wand2 size={14} /> Generate AI Posts</>}
             </GradientBtn>
           </div>
         }
       />
+
+      {/* AI generation status */}
+      {(generating || genStatus) && (
+        <Card style={{
+          background: `linear-gradient(135deg, ${colors.primaryLightest}, #F5F3FF)`,
+          border: `1px solid ${colors.primaryLighter}`,
+          marginBottom: spacing.lg, display: 'flex', alignItems: 'center', gap: spacing.md,
+        }}>
+          {generating && <Spin />}
+          <Wand2 size={18} style={{ color: colors.primary }} />
+          <span style={{ color: colors.primary, fontWeight: fontWeight.bold }}>
+            {genStatus || 'Generating AI posts with images...'}
+          </span>
+        </Card>
+      )}
 
       {/* Stats strip */}
       {!loading && posts.length > 0 && (
@@ -772,14 +831,21 @@ export default function SocialView({ clientId }) {
         <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
       )}
 
-      {/* Empty state */}
+      {/* Empty state — AI-first */}
       {!loading && posts.length === 0 && !showCreate && (
-        <Empty
-          icon={Send}
-          msg="No social posts yet"
-          action={() => setShowCreate(true)}
-          actionLabel="Create Your First Post"
-        />
+        <Card style={{ textAlign: 'center', padding: spacing['2xl'] }}>
+          <Wand2 size={40} style={{ color: colors.primary, marginBottom: spacing.md }} />
+          <div style={{ fontSize: fontSize.xl, fontWeight: fontWeight.bold, color: colors.text, marginBottom: spacing.sm }}>
+            Let AI create your social posts
+          </div>
+          <div style={{ fontSize: fontSize.md, color: colors.textSecondary, marginBottom: spacing.xl, maxWidth: 400, margin: '0 auto 24px' }}>
+            AI will analyze your business, audience, and website to create engaging posts with custom-generated images — ready to publish on Facebook & Instagram.
+          </div>
+          <GradientBtn onClick={handleBatchGenerate} disabled={generating}
+            style={{ padding: '12px 32px', fontSize: fontSize.md }}>
+            {generating ? <><Spin /> Generating...</> : <><Wand2 size={16} /> Generate AI Posts</>}
+          </GradientBtn>
+        </Card>
       )}
 
       {/* Post list grouped by status */}

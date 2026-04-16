@@ -217,55 +217,323 @@ function LogPanel({ events }) {
   );
 }
 
-// ── Agent Tooltip (shown on click) ──────────────────────────
-function AgentTooltip({ info, onClose }) {
-  if (!info) return null;
+// ── Agent Inspector Modal ───────────────────────────────────
+// Shows FULL details when you click an agent character:
+// - current state, last run status, last error, tool envelopes
+// - blockers (missing credentials, expired tokens)
+// - action buttons: Run diagnostic, View full run, Open credentials
+function AgentInspector({ info, clientId, onClose, onNavigate }) {
+  const [details, setDetails] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
 
+  useEffect(() => {
+    if (!info || !clientId) return;
+    setLoading(true);
+    // Pull the latest run for this agent (includes error, tool envelopes, grounding, output)
+    api(`/clients/${clientId}/runs?agent_slug=${encodeURIComponent(info.slug)}&limit=1`)
+      .then(rows => {
+        const latest = Array.isArray(rows) ? rows[0] : rows?.runs?.[0];
+        setDetails(latest || null);
+      })
+      .catch(() => setDetails(null))
+      .finally(() => setLoading(false));
+  }, [info, clientId]);
+
+  if (!info) return null;
   const stateConfig = ANIM_STATE_CONFIG[info.animState] || ANIM_STATE_CONFIG.idle;
+  const isError = info.animState === 'error' || details?.status === 'failed';
+  const isBlocked = info.animState === 'blocked' || details?.status === 'blocked';
+
+  const error = details?.error || info.stateDetail?.error || null;
+  const blockers = details?.output?.blockers || details?.output?.preflight?.blockers || [];
+  const grounding = details?.output?._grounding;
+  const envelopeSummary = details?.output?._tool_envelopes_summary || [];
+  const truthWarning = details?.output?._truth_warning;
+
+  async function runDiagnostic() {
+    if (!clientId) return;
+    setRunning(true);
+    try {
+      // Pick the best diagnostic agent based on the problem
+      const diagnosticAgent = isBlocked ? 'credential-health-agent' : 'credential-health-agent';
+      await api(`/runs/execute`, {
+        method: 'POST',
+        body: {
+          clientId,
+          agentSlug: diagnosticAgent,
+          taskPayload: {
+            triggered_by: 'mission_control_inspector',
+            investigating: info.slug,
+            reason: error || blockers.map(b => b.reason).join(', ') || 'User requested investigation',
+          },
+        },
+      });
+      // Close after a moment so user sees the diagnostic queued
+      setTimeout(() => onClose?.(), 500);
+    } catch (e) {
+      alert(`Failed to start diagnostic: ${e.message}`);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function runFix() {
+    if (!clientId) return;
+    setRunning(true);
+    try {
+      // Route to code-fix-agent if available, otherwise app-qa-agent for UI issues, otherwise technical-seo-crawl-agent for site issues
+      await api(`/runs/execute`, {
+        method: 'POST',
+        body: {
+          clientId,
+          agentSlug: 'code-fix-agent',
+          taskPayload: {
+            triggered_by: 'mission_control_inspector',
+            failing_agent: info.slug,
+            error_to_fix: error || blockers.map(b => b.reason).join(', '),
+            last_run_id: details?.id,
+          },
+        },
+      });
+      setTimeout(() => onClose?.(), 500);
+    } catch (e) {
+      alert(`Fix agent unavailable or failed: ${e.message}`);
+    } finally {
+      setRunning(false);
+    }
+  }
 
   return (
-    <div style={{
-      position: 'absolute',
-      left: Math.min(info.screenX, window.innerWidth - 250),
-      top: Math.max(info.screenY - 120, 10),
-      width: 220,
-      background: dark.surfaceLight,
-      border: `1px solid ${stateConfig.color}44`,
-      borderRadius: 8,
-      padding: 12,
-      zIndex: 200,
-      fontFamily: "'Courier New', monospace",
-      boxShadow: `0 4px 20px ${dark.bg}`,
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: dark.text }}>{info.name}</span>
-        <span onClick={onClose} style={{ cursor: 'pointer', color: dark.textDim, fontSize: 12 }}>x</span>
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: '#000000cc',
+        zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 20, backdropFilter: 'blur(4px)',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: dark.surface,
+          border: `2px solid ${stateConfig.color}`,
+          borderRadius: 12, padding: 20,
+          width: '100%', maxWidth: 640, maxHeight: '85vh', overflowY: 'auto',
+          color: dark.text, fontFamily: "'Courier New', monospace",
+          boxShadow: `0 0 40px ${stateConfig.color}44`,
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: stateConfig.color, fontWeight: 700, marginBottom: 4 }}>
+              {stateConfig.icon} {stateConfig.label.toUpperCase()}
+            </div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#fff' }}>{info.name}</div>
+            <div style={{ fontSize: 10, color: dark.textMuted, marginTop: 2 }}>{info.lane} Lane</div>
+          </div>
+          <button onClick={onClose} style={{
+            background: 'transparent', border: '1px solid #ffffff22', color: dark.textMuted,
+            borderRadius: 6, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12,
+          }}>✕</button>
+        </div>
+
+        {/* Loading */}
+        {loading && (
+          <div style={{ textAlign: 'center', padding: 30, color: dark.textMuted, fontSize: 11 }}>
+            Loading run details...
+          </div>
+        )}
+
+        {/* BLOCKER section */}
+        {!loading && isBlocked && blockers.length > 0 && (
+          <div style={{
+            background: '#FFAB0015', border: '1px solid #FFAB0055',
+            borderRadius: 8, padding: 14, marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 10, letterSpacing: 2, color: '#FFAB00', fontWeight: 700, marginBottom: 8 }}>
+              🚫 PREFLIGHT BLOCKED — MISSING DATA SOURCES
+            </div>
+            <div style={{ fontSize: 12, color: '#FEF3C7', lineHeight: 1.6, marginBottom: 10 }}>
+              This agent cannot run because required data sources are not verified:
+            </div>
+            {blockers.map((b, i) => (
+              <div key={i} style={{
+                padding: 8, marginBottom: 6,
+                background: '#00000033', border: '1px solid #FFAB0033', borderRadius: 6,
+                fontSize: 11,
+              }}>
+                <div style={{ color: '#FFD54F', fontWeight: 700, marginBottom: 2 }}>
+                  {b.kind === 'connector' ? `⚡ ${b.provider?.toUpperCase()} connector` : `📝 Profile field: ${b.field}`}
+                </div>
+                <div style={{ color: dark.textMuted, fontSize: 10 }}>{b.reason}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ERROR section */}
+        {!loading && isError && error && (
+          <div style={{
+            background: '#FF174415', border: '1px solid #FF174455',
+            borderRadius: 8, padding: 14, marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 10, letterSpacing: 2, color: '#FF1744', fontWeight: 700, marginBottom: 8 }}>
+              ⚠ ERROR DETAIL
+            </div>
+            <pre style={{
+              margin: 0, fontSize: 11, lineHeight: 1.6, color: '#fecaca',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              maxHeight: 200, overflowY: 'auto',
+              fontFamily: 'inherit',
+            }}>{error}</pre>
+          </div>
+        )}
+
+        {/* TRUTH WARNING section */}
+        {!loading && truthWarning && (
+          <div style={{
+            background: '#F59E0B15', border: '1px solid #F59E0B55',
+            borderRadius: 8, padding: 14, marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 10, letterSpacing: 2, color: '#F59E0B', fontWeight: 700, marginBottom: 6 }}>
+              ⚠ UNGROUNDED OUTPUT
+            </div>
+            <div style={{ fontSize: 11, color: '#fde68a', lineHeight: 1.5 }}>{truthWarning}</div>
+          </div>
+        )}
+
+        {/* GROUNDING summary */}
+        {!loading && grounding && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: dark.textMuted, fontWeight: 700, marginBottom: 6 }}>
+              DATA GROUNDING
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', fontSize: 10 }}>
+              <span style={{
+                padding: '3px 8px', borderRadius: 4,
+                background: grounding.grounding === 'supported' ? '#10B98133' : grounding.grounding === 'weakly_supported' ? '#F59E0B33' : '#FF174433',
+                color: grounding.grounding === 'supported' ? '#10B981' : grounding.grounding === 'weakly_supported' ? '#F59E0B' : '#FF1744',
+                fontWeight: 700,
+              }}>
+                {grounding.grounding.replace('_', ' ').toUpperCase()}
+              </span>
+              <span style={{ padding: '3px 8px', borderRadius: 4, background: '#ffffff08', color: dark.textMuted }}>
+                Reality score: {grounding.reality_score}/100
+              </span>
+              <span style={{ padding: '3px 8px', borderRadius: 4, background: '#ffffff08', color: dark.textMuted }}>
+                {grounding.valid_sources} valid / {grounding.total_sources} total
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* TOOL ENVELOPES section */}
+        {!loading && envelopeSummary.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 9, letterSpacing: 2, color: dark.textMuted, fontWeight: 700, marginBottom: 6 }}>
+              TOOL CALLS — TRUTH ENVELOPES
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {envelopeSummary.map((e, i) => {
+                const qualityColor = {
+                  valid: '#10B981', empty: '#6B7280', stale: '#F59E0B',
+                  invalid: '#FF1744', misconfigured: '#FFAB00', unverified: '#9C27B0',
+                }[e.quality] || '#6B7280';
+                return (
+                  <div key={i} style={{
+                    padding: 8, background: '#ffffff05', borderRadius: 4,
+                    borderLeft: `3px solid ${qualityColor}`, fontSize: 10,
+                    display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 8, alignItems: 'center',
+                  }}>
+                    <div>
+                      <div style={{ color: '#fff', fontWeight: 600 }}>{e.source}</div>
+                      <div style={{ color: dark.textMuted, fontSize: 9 }}>{String(e.asset || '').slice(0, 50)}</div>
+                    </div>
+                    <span style={{ padding: '2px 6px', borderRadius: 3, background: `${qualityColor}22`, color: qualityColor, fontWeight: 700 }}>
+                      {e.quality}
+                    </span>
+                    <span style={{ color: dark.textMuted, fontSize: 9 }}>
+                      {e.rows} rows · {Math.round((e.confidence || 0) * 100)}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* RUN INFO */}
+        {!loading && details && (
+          <div style={{ fontSize: 10, color: dark.textMuted, marginBottom: 14, lineHeight: 1.6 }}>
+            {details.created_at && <div>Last run: {new Date(details.created_at).toLocaleString('en-GB')}</div>}
+            {details.duration_ms && <div>Duration: {(details.duration_ms / 1000).toFixed(1)}s</div>}
+            {info.runCount > 0 && <div>Total runs: {info.runCount}</div>}
+          </div>
+        )}
+
+        {/* ACTION BUTTONS */}
+        {!loading && (isError || isBlocked) && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {isBlocked && (
+              <button
+                onClick={() => onNavigate?.({ view: 'credentials' })}
+                style={{
+                  flex: 1, minWidth: 120,
+                  background: 'linear-gradient(135deg,#F59E0B,#EA580C)',
+                  border: 'none', borderRadius: 8, padding: '10px 14px',
+                  color: '#fff', fontFamily: 'inherit', fontSize: 11, fontWeight: 700, letterSpacing: 1,
+                  cursor: 'pointer',
+                }}
+              >
+                🔑 FIX CREDENTIALS
+              </button>
+            )}
+            <button
+              onClick={runDiagnostic}
+              disabled={running}
+              style={{
+                flex: 1, minWidth: 120,
+                background: running ? '#ffffff14' : 'linear-gradient(135deg,#4285F4,#1a73e8)',
+                border: 'none', borderRadius: 8, padding: '10px 14px',
+                color: '#fff', fontFamily: 'inherit', fontSize: 11, fontWeight: 700, letterSpacing: 1,
+                cursor: running ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {running ? 'Starting...' : '🔍 INVESTIGATE'}
+            </button>
+            <button
+              onClick={runFix}
+              disabled={running}
+              style={{
+                flex: 1, minWidth: 120,
+                background: running ? '#ffffff14' : 'linear-gradient(135deg,#10B981,#059669)',
+                border: 'none', borderRadius: 8, padding: '10px 14px',
+                color: '#fff', fontFamily: 'inherit', fontSize: 11, fontWeight: 700, letterSpacing: 1,
+                cursor: running ? 'not-allowed' : 'pointer',
+              }}
+              title="Trigger Code Fix Agent to propose an actual code change that fixes this"
+            >
+              {running ? 'Starting...' : '🔧 PROPOSE FIX'}
+            </button>
+          </div>
+        )}
+
+        {!loading && details?.id && (
+          <div style={{ marginTop: 14, textAlign: 'center' }}>
+            <button
+              onClick={() => onNavigate?.({ view: 'runs', runId: details.id })}
+              style={{
+                background: 'transparent', border: '1px solid #ffffff22', borderRadius: 6,
+                color: dark.textMuted, fontFamily: 'inherit', fontSize: 10, padding: '6px 14px', cursor: 'pointer',
+              }}
+            >
+              View full run details →
+            </button>
+          </div>
+        )}
       </div>
-      <div style={{ fontSize: 8, color: dark.textMuted, marginBottom: 6 }}>{info.lane}</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <div style={{ width: 8, height: 8, borderRadius: '50%', background: stateConfig.color }} />
-        <span style={{ fontSize: 9, color: stateConfig.color, fontWeight: 600 }}>{stateConfig.label}</span>
-      </div>
-      {info.lastRunAt && (
-        <div style={{ fontSize: 8, color: dark.textDim }}>
-          Last run: {new Date(info.lastRunAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
-        </div>
-      )}
-      {info.runCount > 0 && (
-        <div style={{ fontSize: 8, color: dark.textDim }}>
-          Total runs: {info.runCount}
-        </div>
-      )}
-      {info.stateDetail?.elapsedSeconds && (
-        <div style={{ fontSize: 8, color: '#9C27B0', marginTop: 4 }}>
-          Running for {info.stateDetail.elapsedSeconds}s
-        </div>
-      )}
-      {info.stateDetail?.error && (
-        <div style={{ fontSize: 8, color: '#FF1744', marginTop: 4 }}>
-          Error: {info.stateDetail.error.slice(0, 80)}
-        </div>
-      )}
     </div>
   );
 }
@@ -451,7 +719,15 @@ function SingleCustomerLive({ clientId }) {
         />
 
         {/* Agent tooltip overlay */}
-        <AgentTooltip info={tooltip} onClose={() => setTooltip(null)} />
+        <AgentInspector
+          info={tooltip}
+          clientId={clientId}
+          onClose={() => setTooltip(null)}
+          onNavigate={(detail) => {
+            setTooltip(null);
+            window.dispatchEvent(new CustomEvent('navigate', { detail }));
+          }}
+        />
 
         {/* Log panel */}
         <LogPanel events={state?.events || []} />

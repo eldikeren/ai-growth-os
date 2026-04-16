@@ -52,13 +52,16 @@ const GOOGLE_SCOPE_BUNDLES = {
 };
 
 // META SCOPES
+// Note: ads_management + ads_read require Meta App Review approval.
+// They are excluded from the default flow to avoid "Invalid Scopes" errors.
+// Once your app is approved for Ads Management, add them back here.
 const META_SCOPES = [
   'pages_show_list',
   'pages_read_engagement',
   'pages_manage_posts',
   'business_management',
-  'ads_management',
-  'ads_read'
+  // 'ads_management',  // Requires App Review — uncomment when approved
+  // 'ads_read',        // Requires App Review — uncomment when approved
 ];
 
 // ── GLOBAL SYSTEM SETTINGS LOOKUP ─────────────────────────────

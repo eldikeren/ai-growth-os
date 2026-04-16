@@ -2371,7 +2371,7 @@ router.post('/clients/:clientId/campaigns/:campaignId/creatives', async (req, re
   try {
     const { clientId, campaignId } = req.params;
     const { headline, primary_text, description, call_to_action, image_url,
-            video_url, destination_url, display_url } = req.body;
+            video_url, destination_url, display_url, format, images } = req.body;
 
     const { data, error } = await supabase.from('campaign_creatives').insert({
       campaign_id: campaignId,
@@ -2384,6 +2384,8 @@ router.post('/clients/:clientId/campaigns/:campaignId/creatives', async (req, re
       video_url: video_url || null,
       destination_url: destination_url || null,
       display_url: display_url || null,
+      format: format || 'single_image',
+      images: images || [],
       status: 'draft',
       is_primary: false,
     }).select().single();
@@ -2397,7 +2399,8 @@ router.patch('/clients/:clientId/campaigns/:campaignId/creatives/:creativeId', a
   try {
     const { clientId, creativeId } = req.params;
     const allowed = ['headline', 'primary_text', 'description', 'call_to_action',
-      'image_url', 'video_url', 'destination_url', 'display_url', 'status', 'is_primary', 'sort_order'];
+      'image_url', 'video_url', 'destination_url', 'display_url', 'status', 'is_primary', 'sort_order',
+      'format', 'images'];
     const updates = {};
     for (const k of allowed) { if (req.body[k] !== undefined) updates[k] = req.body[k]; }
     updates.updated_at = new Date().toISOString();
@@ -2528,39 +2531,99 @@ router.post('/clients/:clientId/campaigns/:campaignId/publish-meta', async (req,
       else { metaCampaignId = campData.id; }
     }
 
-    // 2. Create Ad Set
+    // 2. Create Ad Set with rich targeting
     if (metaCampaignId && !metaAdsetId) {
       const targeting = campaign.targeting || {};
-      const metaTargeting = {
-        geo_locations: { countries: targeting.geo || ['IL'] },
-        age_min: targeting.age_min || 18,
-        age_max: targeting.age_max || 65,
-      };
+
+      // Build Meta targeting spec from our rich targeting object
+      const metaTargeting = {};
+
+      // Geographic targeting
+      if (targeting.geo_locations) {
+        metaTargeting.geo_locations = {};
+        if (targeting.geo_locations.countries?.length) {
+          metaTargeting.geo_locations.countries = targeting.geo_locations.countries;
+        }
+        if (targeting.geo_locations.cities?.length) {
+          metaTargeting.geo_locations.cities = targeting.geo_locations.cities.map(c => ({
+            key: c.key, ...(c.radius ? { radius: c.radius, distance_unit: 'kilometer' } : {}),
+          }));
+        }
+        if (targeting.geo_locations.regions?.length) {
+          metaTargeting.geo_locations.regions = targeting.geo_locations.regions.map(r => ({ key: r.key }));
+        }
+      } else if (targeting.geo?.length) {
+        // Legacy format: targeting.geo = ["IL"]
+        metaTargeting.geo_locations = { countries: targeting.geo };
+      } else {
+        metaTargeting.geo_locations = { countries: ['IL'] };
+      }
+
+      // Excluded geo
+      if (targeting.excluded_geo_locations) {
+        metaTargeting.excluded_geo_locations = {};
+        if (targeting.excluded_geo_locations.countries?.length) {
+          metaTargeting.excluded_geo_locations.countries = targeting.excluded_geo_locations.countries;
+        }
+        if (targeting.excluded_geo_locations.cities?.length) {
+          metaTargeting.excluded_geo_locations.cities = targeting.excluded_geo_locations.cities.map(c => ({ key: c.key }));
+        }
+      }
+
+      // Age & gender
+      metaTargeting.age_min = targeting.age_min || 18;
+      metaTargeting.age_max = targeting.age_max || 65;
       if (targeting.gender && targeting.gender !== 'all') {
         metaTargeting.genders = [targeting.gender === 'male' ? 1 : 2];
       }
-      if (targeting.interests?.length) {
-        metaTargeting.flexible_spec = [{ interests: targeting.interests.map(i => ({ id: i.id, name: i.name })) }];
+
+      // Languages
+      if (targeting.languages?.length) {
+        metaTargeting.locales = targeting.languages.map(l => l.key);
       }
 
+      // Interests & behaviors (flexible_spec)
+      const flexSpec = [];
+      if (targeting.interests?.length) {
+        flexSpec.push({ interests: targeting.interests.map(i => ({ id: i.id, name: i.name })) });
+      }
+      if (targeting.behaviors?.length) {
+        flexSpec.push({ behaviors: targeting.behaviors.map(b => ({ id: b.id, name: b.name })) });
+      }
+      if (flexSpec.length) metaTargeting.flexible_spec = flexSpec;
+
+      // Custom audiences
+      if (targeting.custom_audiences?.length) {
+        metaTargeting.custom_audiences = targeting.custom_audiences.map(a => ({ id: a.id }));
+      }
+      if (targeting.excluded_custom_audiences?.length) {
+        metaTargeting.excluded_custom_audiences = targeting.excluded_custom_audiences.map(a => ({ id: a.id }));
+      }
+
+      // Placements
       const platforms = campaign.platforms || ['facebook', 'instagram'];
-      const publisherPlatforms = [];
-      if (platforms.includes('facebook')) publisherPlatforms.push('facebook');
-      if (platforms.includes('instagram')) publisherPlatforms.push('instagram');
+      const placements = targeting.placements || {};
+      if (!placements.automatic) {
+        const publisherPlatforms = placements.publisher_platforms || [];
+        if (!publisherPlatforms.length) {
+          if (platforms.includes('facebook')) publisherPlatforms.push('facebook');
+          if (platforms.includes('instagram')) publisherPlatforms.push('instagram');
+        }
+        if (publisherPlatforms.length) metaTargeting.publisher_platforms = publisherPlatforms;
+        if (placements.facebook_positions?.length) metaTargeting.facebook_positions = placements.facebook_positions;
+        if (placements.instagram_positions?.length) metaTargeting.instagram_positions = placements.instagram_positions;
+      }
 
       const adsetBody = {
         name: `${campaign.name} - Ad Set`,
         campaign_id: metaCampaignId,
-        daily_budget: campaign.daily_budget_cents || 4000, // default 40 ILS = 4000 agorot
+        daily_budget: campaign.daily_budget_cents || 4000,
         billing_event: 'IMPRESSIONS',
         optimization_goal: campaign.objective === 'TRAFFIC' ? 'LINK_CLICKS' : campaign.objective === 'AWARENESS' ? 'REACH' : 'IMPRESSIONS',
         targeting: metaTargeting,
         status: 'PAUSED',
         access_token: accessToken,
       };
-      if (publisherPlatforms.length) {
-        adsetBody.targeting.publisher_platforms = publisherPlatforms;
-      }
       if (campaign.start_date) adsetBody.start_time = new Date(campaign.start_date).toISOString();
       if (campaign.end_date) adsetBody.end_time = new Date(campaign.end_date).toISOString();
 
@@ -2574,50 +2637,90 @@ router.post('/clients/:clientId/campaigns/:campaignId/publish-meta', async (req,
       else { metaAdsetId = adsetData.id; }
     }
 
-    // 3. Create Ad (using first creative)
+    // 3. Create Ad (using first creative — single image or carousel)
     if (metaAdsetId && !metaAdId) {
       const creative = creatives[0];
       const pageId = page?.external_id;
-      const pageAccessToken = page?.metadata_json?.page_access_token || accessToken;
+      const isCarousel = creative.format === 'carousel' && creative.images?.length > 1;
 
-      // Upload image if needed
-      let imageHash = null;
-      if (creative.image_url) {
+      // Helper: upload a single image URL to Meta and get its hash
+      const uploadImageToMeta = async (imageUrl) => {
         const imgRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/adimages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: creative.image_url,
-            access_token: accessToken,
-          }),
+          body: JSON.stringify({ url: imageUrl, access_token: accessToken }),
         });
         const imgData = await imgRes.json();
         if (imgData.images) {
           const firstKey = Object.keys(imgData.images)[0];
-          imageHash = imgData.images[firstKey]?.hash;
+          return imgData.images[firstKey]?.hash || null;
         }
-      }
-
-      // Create ad creative on Meta
-      const creativeBody = {
-        name: `${campaign.name} - Creative`,
-        object_story_spec: {
-          page_id: pageId,
-          link_data: {
-            message: creative.primary_text || '',
-            link: creative.destination_url || `https://${(await supabase.from('clients').select('domain').eq('id', clientId).single()).data?.domain || 'example.com'}`,
-            name: creative.headline || campaign.name,
-            description: creative.description || '',
-            call_to_action: { type: creative.call_to_action || 'LEARN_MORE' },
-          },
-        },
-        access_token: accessToken,
+        return null;
       };
 
-      if (imageHash) {
-        creativeBody.object_story_spec.link_data.image_hash = imageHash;
-      } else if (creative.image_url) {
-        creativeBody.object_story_spec.link_data.picture = creative.image_url;
+      const clientDomain = (await supabase.from('clients').select('domain').eq('id', clientId).single()).data?.domain || 'example.com';
+      const defaultLink = creative.destination_url || `https://${clientDomain}`;
+
+      let creativeBody;
+
+      if (isCarousel) {
+        // ── CAROUSEL AD ──
+        // Upload all images and build child_attachments
+        const childAttachments = [];
+        for (const img of creative.images) {
+          const hash = img.url ? await uploadImageToMeta(img.url) : null;
+          const card = {
+            link: img.destination_url || defaultLink,
+            name: img.headline || creative.headline || campaign.name,
+            description: img.description || creative.description || '',
+            call_to_action: { type: creative.call_to_action || 'LEARN_MORE' },
+          };
+          if (hash) card.image_hash = hash;
+          else if (img.url) card.picture = img.url;
+          childAttachments.push(card);
+        }
+
+        creativeBody = {
+          name: `${campaign.name} - Carousel Creative`,
+          object_story_spec: {
+            page_id: pageId,
+            link_data: {
+              message: creative.primary_text || '',
+              link: defaultLink,
+              child_attachments: childAttachments,
+              multi_share_optimized: true,
+            },
+          },
+          access_token: accessToken,
+        };
+      } else {
+        // ── SINGLE IMAGE AD ──
+        let imageHash = null;
+        const imgUrl = creative.image_url || creative.images?.[0]?.url;
+        if (imgUrl) {
+          imageHash = await uploadImageToMeta(imgUrl);
+        }
+
+        creativeBody = {
+          name: `${campaign.name} - Creative`,
+          object_story_spec: {
+            page_id: pageId,
+            link_data: {
+              message: creative.primary_text || '',
+              link: defaultLink,
+              name: creative.headline || campaign.name,
+              description: creative.description || '',
+              call_to_action: { type: creative.call_to_action || 'LEARN_MORE' },
+            },
+          },
+          access_token: accessToken,
+        };
+
+        if (imageHash) {
+          creativeBody.object_story_spec.link_data.image_hash = imageHash;
+        } else if (imgUrl) {
+          creativeBody.object_story_spec.link_data.picture = imgUrl;
+        }
       }
 
       const crRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/adcreatives`, {
@@ -2716,6 +2819,291 @@ router.post('/clients/:clientId/campaigns/:campaignId/meta-status', async (req, 
     }).eq('id', campaignId);
 
     res.json({ success: true, status: newStatus });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── SEARCH META INTERESTS (for audience targeting UI) ─────────
+router.get('/clients/:clientId/meta/interests', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { q } = req.query;
+    if (!q || q.length < 2) return res.json([]);
+
+    const { data: cred } = await supabase.from('oauth_credentials')
+      .select('*').eq('client_id', clientId).eq('provider', 'meta').single();
+    if (!cred?.access_token_encrypted) return res.json([]);
+
+    const { decryptToken } = await import('../functions/onboarding.js');
+    const iv = cred.encryption_iv.includes(':') ? cred.encryption_iv.split(':')[0] : cred.encryption_iv;
+    const accessToken = decryptToken(cred.access_token_encrypted, iv);
+
+    const searchRes = await fetch(
+      `https://graph.facebook.com/v21.0/search?type=adinterest&q=${encodeURIComponent(q)}&limit=25&access_token=${accessToken}`
+    );
+    const data = await searchRes.json();
+    res.json((data.data || []).map(i => ({
+      id: i.id, name: i.name, topic: i.topic,
+      audience_size_lower_bound: i.audience_size_lower_bound,
+      audience_size_upper_bound: i.audience_size_upper_bound,
+      path: i.path,
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── SEARCH META GEO LOCATIONS (for targeting UI) ─────────────
+router.get('/clients/:clientId/meta/geo', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { q, type } = req.query; // type: country, city, region, zip
+    if (!q || q.length < 2) return res.json([]);
+
+    const { data: cred } = await supabase.from('oauth_credentials')
+      .select('*').eq('client_id', clientId).eq('provider', 'meta').single();
+    if (!cred?.access_token_encrypted) return res.json([]);
+
+    const { decryptToken } = await import('../functions/onboarding.js');
+    const iv = cred.encryption_iv.includes(':') ? cred.encryption_iv.split(':')[0] : cred.encryption_iv;
+    const accessToken = decryptToken(cred.access_token_encrypted, iv);
+
+    const locType = type || 'adgeolocation';
+    const searchRes = await fetch(
+      `https://graph.facebook.com/v21.0/search?type=${locType}&q=${encodeURIComponent(q)}&limit=25&access_token=${accessToken}`
+    );
+    const data = await searchRes.json();
+    res.json((data.data || []).map(l => ({
+      key: l.key, name: l.name, type: l.type,
+      country_code: l.country_code, country_name: l.country_name,
+      region: l.region, region_id: l.region_id,
+      supports_city: l.supports_city, supports_region: l.supports_region,
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── AI AUDIENCE SUGGESTION ───────────────────────────────────
+// Uses Claude to suggest targeting based on client's business, domain, and campaign objective
+router.post('/clients/:clientId/campaigns/:campaignId/suggest-audience', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+
+    // Get client info
+    const { data: client } = await supabase.from('clients')
+      .select('name, domain, business_type, target_audience, niche, language, country')
+      .eq('id', clientId).single();
+
+    // Get campaign info
+    const { data: campaign } = await supabase.from('campaigns')
+      .select('name, objective, platforms, daily_budget_cents, currency')
+      .eq('id', campaignId).single();
+
+    // Get client memory for richer context
+    const { data: memories } = await supabase.from('memory_items')
+      .select('key, value').eq('client_id', clientId).limit(10);
+    const memoryContext = (memories || []).map(m => `${m.key}: ${m.value}`).join('\n');
+
+    const prompt = `You are an expert Meta Ads audience targeting consultant. Based on the client and campaign details below, suggest the best targeting configuration for maximum ROI.
+
+CLIENT:
+- Business: ${client?.name || 'Unknown'}
+- Domain: ${client?.domain || 'Unknown'}
+- Business Type: ${client?.business_type || 'Unknown'}
+- Target Audience: ${client?.target_audience || 'Unknown'}
+- Niche: ${client?.niche || 'Unknown'}
+- Language: ${client?.language || 'he'}
+- Country: ${client?.country || 'IL'}
+
+CAMPAIGN:
+- Name: ${campaign?.name || 'Unknown'}
+- Objective: ${campaign?.objective || 'TRAFFIC'}
+- Platforms: ${JSON.stringify(campaign?.platforms || ['facebook', 'instagram'])}
+- Daily Budget: ${campaign?.daily_budget_cents ? campaign.daily_budget_cents / 100 : 40} ${campaign?.currency || 'ILS'}
+
+MEMORY/CONTEXT:
+${memoryContext || 'No additional context'}
+
+Return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
+{
+  "geo_locations": {
+    "countries": ["IL"],
+    "cities": []
+  },
+  "age_min": 25,
+  "age_max": 55,
+  "gender": "all",
+  "interests": [
+    { "id": "ACTUAL_META_INTEREST_ID", "name": "Interest Name" }
+  ],
+  "placements": {
+    "automatic": true
+  },
+  "languages": [
+    { "key": 13, "name": "Hebrew" }
+  ],
+  "reasoning": "Brief explanation of why these targeting choices were made"
+}
+
+IMPORTANT: For interests, use REAL Meta interest IDs and names that exist in the Meta targeting API. Common ones:
+- Finance/Banking: 6003629266453 (Banking), 6003107902433 (Finance), 6003384294633 (Mortgage loans)
+- Real Estate: 6003012621036 (Real estate), 6003349442613 (Property)
+- Law: 6003397425735 (Law), 6003476182657 (Lawyer)
+- Health: 6003139266461 (Health), 6003384763233 (Fitness)
+- Technology: 6003171940613 (Technology), 6003476233638 (Software)
+- Business: 6003629266453 (Business), 6003384294633 (Entrepreneurship)
+- Food: 6003629266453 (Restaurants), 6003139266461 (Cooking)
+- Fashion: 6003107902433 (Fashion), 6003012621036 (Shopping)
+- Education: 6003397425735 (Education), 6003107902433 (Online courses)
+
+Use the country (${client?.country || 'IL'}) and language context to pick appropriate targeting.`;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'AI not configured (missing ANTHROPIC_API_KEY)' });
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const aiData = await aiRes.json();
+    const text = aiData?.content?.[0]?.text || '';
+
+    // Parse JSON from response
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const suggestion = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+      res.json({ success: true, suggestion });
+    } catch (parseErr) {
+      res.json({ success: false, error: 'Failed to parse AI suggestion', raw: text });
+    }
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── AI FULL CAMPAIGN SUGGESTION ─────────────────────────────
+// Suggests objective, targeting, creative copy, and format based on client context
+router.post('/clients/:clientId/campaigns/suggest-full', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { goal } = req.body; // optional user-provided goal like "get website visits" or "generate leads"
+
+    // Get client info
+    const { data: client } = await supabase.from('clients')
+      .select('name, domain, business_type, target_audience, niche, language, country')
+      .eq('id', clientId).single();
+
+    // Get client memory for richer context
+    const { data: memories } = await supabase.from('memory_items')
+      .select('key, value').eq('client_id', clientId).limit(20);
+    const memoryContext = (memories || []).map(m => `${m.key}: ${m.value}`).join('\n');
+
+    // Get existing campaigns for context
+    const { data: existingCampaigns } = await supabase.from('campaigns')
+      .select('name, objective, status, daily_budget_cents, performance')
+      .eq('client_id', clientId).limit(5);
+    const campaignContext = (existingCampaigns || []).map(c =>
+      `${c.name} (${c.objective}, ${c.status}, budget: ${c.daily_budget_cents || 0} agorot)`
+    ).join('\n');
+
+    // Get SEO data for additional context
+    const { data: seoData } = await supabase.from('seo_data')
+      .select('page_url, seo_title, meta_description')
+      .eq('client_id', clientId).limit(5);
+    const seoContext = (seoData || []).map(s => `${s.page_url}: ${s.seo_title}`).join('\n');
+
+    const prompt = `You are an expert digital marketing strategist specializing in Meta Ads (Facebook + Instagram) and Google Ads. Based on everything you know about this client, suggest a COMPLETE campaign setup.
+
+CLIENT:
+- Business: ${client?.name || 'Unknown'}
+- Domain: ${client?.domain || 'Unknown'}
+- Business Type: ${client?.business_type || 'Unknown'}
+- Target Audience: ${client?.target_audience || 'Unknown'}
+- Niche: ${client?.niche || 'Unknown'}
+- Language: ${client?.language || 'he'}
+- Country: ${client?.country || 'IL'}
+
+MEMORY/CONTEXT:
+${memoryContext || 'No additional context'}
+
+EXISTING CAMPAIGNS:
+${campaignContext || 'None'}
+
+SEO/WEBSITE CONTEXT:
+${seoContext || 'No SEO data'}
+
+USER'S GOAL: ${goal || 'Not specified - suggest the best campaign type based on the business'}
+
+Return ONLY a valid JSON object with this exact structure (no markdown, no explanation, no backticks):
+{
+  "campaign_name": "Suggested campaign name",
+  "objective": "TRAFFIC or AWARENESS or ENGAGEMENT or LEADS or SALES",
+  "objective_reasoning": "Why this objective is best for this business",
+  "platforms": ["facebook", "instagram"],
+  "daily_budget_cents": 4000,
+  "currency": "ILS",
+  "targeting": {
+    "geo_locations": { "countries": ["IL"] },
+    "age_min": 25,
+    "age_max": 55,
+    "gender": "all",
+    "interests": [{ "id": "REAL_META_ID", "name": "Interest Name" }],
+    "placements": { "automatic": true },
+    "languages": [{ "key": 13, "name": "Hebrew" }]
+  },
+  "targeting_reasoning": "Why these targeting choices were made",
+  "creatives": [
+    {
+      "headline": "Compelling headline in the business language",
+      "primary_text": "Main ad copy - 2-3 sentences that hook and convert",
+      "description": "Short link description",
+      "call_to_action": "LEARN_MORE",
+      "format": "single_image",
+      "image_suggestions": "Description of ideal images to use"
+    }
+  ],
+  "creative_reasoning": "Why this creative approach works for the business",
+  "additional_tips": "Any extra recommendations for the campaign"
+}
+
+IMPORTANT RULES:
+- Write ALL ad copy in ${client?.language === 'he' ? 'Hebrew' : client?.language === 'ar' ? 'Arabic' : 'English'} since that's the business language
+- Use REAL Meta interest IDs where possible
+- Match the objective to the user's goal and business type
+- If the business is service-based (law, finance, consulting), favor LEADS or TRAFFIC
+- If e-commerce, favor SALES or TRAFFIC
+- Suggest 2-3 creative variations if possible
+- Consider the daily budget when making targeting recommendations (narrow targeting for small budgets)`;
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'AI not configured (missing ANTHROPIC_API_KEY)' });
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    const aiData = await aiRes.json();
+    const text = aiData?.content?.[0]?.text || '';
+
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      const suggestion = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+      res.json({ success: true, suggestion });
+    } catch (parseErr) {
+      res.json({ success: false, error: 'Failed to parse AI suggestion', raw: text });
+    }
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

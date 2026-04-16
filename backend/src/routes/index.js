@@ -336,9 +336,11 @@ router.get('/runs/:id', async (req, res) => {
 // ── PROPOSED CHANGES ──────────────────────────────────────────
 router.get('/clients/:clientId/proposed-changes', async (req, res) => {
   try {
+    const limit = parseInt(req.query.limit) || 500; // configurable, default 500 (was 100)
+    const offset = parseInt(req.query.offset) || 0;
     const { data, error } = await supabase.from('proposed_changes')
       .select('*').eq('client_id', req.params.clientId)
-      .order('created_at', { ascending: false }).limit(100);
+      .order('created_at', { ascending: false }).range(offset, offset + limit - 1);
     if (error) throw error;
     res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }

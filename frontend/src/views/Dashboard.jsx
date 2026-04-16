@@ -920,10 +920,25 @@ export default function Dashboard({ clientId, setClientId, clients }) {
     [allRuns, todayStart]
   );
 
+  // Helper: a credential is "broken" if it's not connected, or its health score is low,
+  // or its last_checked is very old. Uses the actual backend field names.
+  const isCredentialBroken = useCallback((c) => {
+    if (!c) return true;
+    // If the backend says it's not connected, it's broken.
+    if (c.is_connected === false) return true;
+    // If health score is explicitly set and below 50, it's broken.
+    if (typeof c.health_score === 'number' && c.health_score < 50) return true;
+    // If it has a last_error, it's broken.
+    if (c.last_error) return true;
+    // Legacy field fallbacks — if either exists and says broken, trust it.
+    if (c.status && c.status !== 'active' && c.status !== 'valid' && c.status !== 'connected') return true;
+    return false;
+  }, []);
+
   const healthScore = useMemo(() => {
     if (!allRuns.length && !allCredentials.length) return 0;
-    // Credential health (0-100)
-    const validCreds = allCredentials.filter(c => c.status === 'active' || c.status === 'valid' || c.is_valid);
+    // Credential health (0-100) — now using correct field names
+    const validCreds = allCredentials.filter(c => !isCredentialBroken(c));
     const credScore = allCredentials.length > 0 ? (validCreds.length / allCredentials.length) * 100 : 50;
     // Agent success rate from recent runs (0-100)
     const recent = allRuns.slice(0, 100);
@@ -938,15 +953,15 @@ export default function Dashboard({ clientId, setClientId, clients }) {
     const freshnessScore = allAgents.length > 0 ? (recentAgents.length / allAgents.length) * 100 : 50;
 
     return Math.round(credScore * 0.3 + successRate * 0.5 + freshnessScore * 0.2);
-  }, [allRuns, allAgents, allCredentials]);
+  }, [allRuns, allAgents, allCredentials, isCredentialBroken]);
 
   const failedToday = useMemo(() => todayRuns.filter(r => r.status === 'failed').length, [todayRuns]);
   const runningNow = useMemo(() => allRuns.filter(r => r.status === 'running').length, [allRuns]);
   const pendingApprovals = useMemo(() => allRuns.filter(r => r.status === 'pending_approval').length, [allRuns]);
 
   const brokenCredentials = useMemo(() =>
-    allCredentials.filter(c => c.status !== 'active' && c.status !== 'valid' && !c.is_valid),
-    [allCredentials]
+    allCredentials.filter(isCredentialBroken),
+    [allCredentials, isCredentialBroken]
   );
 
   // Filtered runs
@@ -1172,16 +1187,30 @@ export default function Dashboard({ clientId, setClientId, clients }) {
             display: 'flex', gap: 10, padding: '0 20px 14px', overflowX: 'auto',
             flexWrap: 'wrap',
           }}>
-            {clients.length > 1 && (
-              <ClientCard
-                client={{ name: 'All Clients', domain: 'show everything' }}
-                runCount={todayRuns.length}
-                failCount={failedToday}
-                agentCount={allAgents.length}
-                isActive={clientFilter === 'all'}
-                onClick={() => { setClientFilter('all'); if (setClientId) setClientId(''); }}
-              />
-            )}
+            {clients.length > 1 && (() => {
+              // Compute real aggregates across all clients — average each metric, skip nulls
+              const vals = (key) => clients.map(c => clientKpis[c.id]?.[key]).filter(v => v != null && !isNaN(Number(v))).map(Number);
+              const avg = (arr) => arr.length ? Math.round(arr.reduce((s, v) => s + v, 0) / arr.length) : null;
+              const sum = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) : null;
+              const aggKpis = {
+                ai_visibility_score: avg(vals('ai_visibility_score')),
+                domain_authority: avg(vals('domain_authority')),
+                google_reviews_count: sum(vals('google_reviews_count')),
+                page1_keyword_count: sum(vals('page1_keyword_count')),
+                mobile_pagespeed: avg(vals('mobile_pagespeed')),
+              };
+              return (
+                <ClientCard
+                  client={{ name: 'All Clients', domain: 'aggregated' }}
+                  runCount={todayRuns.length}
+                  failCount={failedToday}
+                  agentCount={allAgents.length}
+                  kpis={aggKpis}
+                  isActive={clientFilter === 'all'}
+                  onClick={() => { setClientFilter('all'); if (setClientId) setClientId(''); }}
+                />
+              );
+            })()}
             {clients.map(c => (
               <ClientCard
                 key={c.id}

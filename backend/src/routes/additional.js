@@ -943,6 +943,39 @@ router.get('/cron/queue-seo-sweep', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── DAILY BACKLINK SYNC — discovers backlinks for ALL active clients ──
+// Runs DataForSEO backlink sync + Google-based discovery for every client.
+// Should be scheduled as a daily cron (e.g. 4am).
+router.get('/cron/sync-all-backlinks', async (req, res) => {
+  try {
+    const { data: clients } = await supabase
+      .from('clients').select('id, name')
+      .in('status', ['active', null]);
+    if (!clients?.length) return res.json({ synced: 0, reason: 'No active clients' });
+
+    const results = [];
+    for (const client of clients) {
+      try {
+        const result = await syncBacklinkIntelligence(client.id);
+        results.push({
+          client: client.name,
+          success: true,
+          backlinks: result.tables_written?.backlinks || 0,
+          google_discovered: result.tables_written?.google_discovered_backlinks || 0,
+          discovered_domains: result.google_discovery?.domains || [],
+        });
+      } catch (e) {
+        results.push({ client: client.name, success: false, error: e.message });
+      }
+      // Pause between clients to avoid rate limits
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    const synced = results.filter(r => r.success).length;
+    res.json({ synced, total: clients.length, results });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── DATAFORSEO ONPAGE POLLER — runs every 5 min ──────────────
 // Picks up pending onpage crawl tasks and retrieves results out of band
 router.get('/cron/process-onpage-tasks', async (req, res) => {

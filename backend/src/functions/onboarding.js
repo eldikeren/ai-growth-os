@@ -56,7 +56,9 @@ const META_SCOPES = [
   'pages_show_list',
   'pages_read_engagement',
   'pages_manage_posts',
-  'business_management'
+  'business_management',
+  'ads_management',
+  'ads_read'
 ];
 
 // ── GLOBAL SYSTEM SETTINGS LOOKUP ─────────────────────────────
@@ -731,10 +733,30 @@ async function discoverMetaAssets(accessToken, clientId) {
     } catch (e) { console.error('Meta business fallback error:', e.message); }
   }
 
+  // Discover Ad Accounts (for Meta Ads management)
+  let adAccountsFound = 0;
+  try {
+    const adAccRes = await fetch(`https://graph.facebook.com/v21.0/me/adaccounts?fields=id,name,account_status,currency,timezone_name,business{id,name}&access_token=${accessToken}`);
+    if (adAccRes.ok) {
+      const adAccData = await adAccRes.json();
+      for (const acc of (adAccData.data || [])) {
+        adAccountsFound++;
+        await supabase.from('integration_assets').upsert({
+          client_id: clientId, provider: 'meta', sub_provider: 'ads',
+          asset_type: 'ad_account', external_id: acc.id,
+          label: acc.name || acc.id,
+          metadata_json: { account_status: acc.account_status, currency: acc.currency, timezone: acc.timezone_name, business: acc.business },
+          is_selected: adAccountsFound === 1
+        }, { onConflict: 'client_id,provider,external_id' });
+      }
+    }
+  } catch (e) { console.error('Meta ad accounts discovery error:', e.message); }
+
   return {
     pages_found: pagesFound,
     instagram_found: instagramFound,
-    label: `${pagesFound} page${pagesFound !== 1 ? 's' : ''}, ${instagramFound} Instagram account${instagramFound !== 1 ? 's' : ''}`
+    ad_accounts_found: adAccountsFound,
+    label: `${pagesFound} page${pagesFound !== 1 ? 's' : ''}, ${instagramFound} Instagram account${instagramFound !== 1 ? 's' : ''}, ${adAccountsFound} ad account${adAccountsFound !== 1 ? 's' : ''}`
   };
 }
 

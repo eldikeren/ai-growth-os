@@ -12,9 +12,8 @@ const SERVICE_CONFIG = {
   google_ads: { label: 'Google Ads', icon: '💰', category: 'oauth', oauth: 'google', subProvider: 'ads', fields: [] },
   google_analytics: { label: 'Google Analytics 4', icon: '📊', category: 'oauth', oauth: 'google', subProvider: 'analytics', fields: [] },
   google_business_profile: { label: 'Google Business Profile', icon: '📍', category: 'oauth', oauth: 'google', subProvider: 'business_profile', fields: [] },
-  facebook: { label: 'Facebook Business Page', icon: '📘', category: 'oauth', oauth: 'meta', subProvider: 'facebook', fields: [] },
-  instagram: { label: 'Instagram Business Profile', icon: '📸', category: 'oauth', oauth: 'meta', subProvider: 'instagram', fields: [] },
-  meta_business: { label: 'Meta Business Suite', icon: '📱', category: 'oauth', oauth: 'meta', subProvider: 'meta', fields: [] },
+  meta_business: { label: 'Meta Business Suite', icon: '📱', category: 'oauth', oauth: 'meta', subProvider: 'facebook', fields: [],
+    description: 'Facebook Pages, Instagram & Meta Ads — single OAuth connection' },
   dataforseo: { label: 'DataForSEO API', icon: '📈', category: 'api', fields: [{ key: 'login', label: 'Login Email' }, { key: 'password', label: 'Password', secret: true }] },
   moz: { label: 'Moz API', icon: '🔗', category: 'api', fields: [{ key: 'access_id', label: 'Access ID' }, { key: 'secret_key', label: 'Secret Key', secret: true }] },
   perplexity: { label: 'Perplexity AI', icon: '🧠', category: 'api', fields: [{ key: 'api_key', label: 'API Key', secret: true, placeholder: 'pplx-...' }] },
@@ -91,6 +90,14 @@ function OAuthConnectionCard({ service, config, oauthStatus, clientId, onRefresh
       alert(`OAuth error: ${e.message}`);
     }
     setConnecting(false);
+  };
+
+  const handleDisconnect = async () => {
+    if (!confirm(`Disconnect ${config.label}? This will remove the OAuth credentials for this service.`)) return;
+    try {
+      await api(`/clients/${clientId}/oauth/${config.oauth}/disconnect`, { method: 'POST', body: { subProvider: config.subProvider } });
+      if (onRefresh) await onRefresh();
+    } catch (e) { alert(`Disconnect failed: ${e.message}`); }
   };
 
   const handleSelectAsset = async (assetId) => {
@@ -275,6 +282,21 @@ function OAuthConnectionCard({ service, config, oauthStatus, clientId, onRefresh
         >
           <ExternalLink size={11} /> Send Setup Link
         </button>
+        {isConnected && (
+          <button
+            onClick={handleDisconnect}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '8px 12px', borderRadius: radius.md,
+              background: 'transparent', border: `1px solid ${colors.errorLight}`,
+              color: colors.error, cursor: 'pointer',
+              fontSize: fontSize.xs, fontWeight: fontWeight.medium,
+              transition: transitions.fast,
+            }}
+          >
+            <X size={11} /> Disconnect
+          </button>
+        )}
       </div>
     </Card>
   );

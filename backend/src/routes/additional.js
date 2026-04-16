@@ -153,6 +153,27 @@ router.post('/clients/:clientId/oauth/meta/start', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── DISCONNECT OAUTH ─────────────────────────────────────────
+router.post('/clients/:clientId/oauth/:provider/disconnect', async (req, res) => {
+  try {
+    const { clientId, provider } = req.params;
+
+    // Delete OAuth credentials
+    await supabase.from('oauth_credentials')
+      .delete().eq('client_id', clientId).eq('provider', provider);
+
+    // Delete integrations
+    await supabase.from('client_integrations')
+      .delete().eq('client_id', clientId).eq('provider', provider);
+
+    // Delete integration assets
+    await supabase.from('integration_assets')
+      .delete().eq('client_id', clientId).eq('provider', provider);
+
+    res.json({ success: true, message: `${provider} disconnected` });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // Get OAuth connection status for a client (all providers)
 router.get('/clients/:clientId/oauth-status', async (req, res) => {
   try {
@@ -191,29 +212,30 @@ router.get('/clients/:clientId/oauth-status', async (req, res) => {
       };
     }
 
-    // Meta services
+    // Meta services — single combined entry under 'facebook' key (one OAuth token covers Pages, Instagram, and Ads)
     const metaMaster = (oauthCreds.data || []).find(c => c.provider === 'meta');
-    for (const sp of ['facebook', 'instagram']) {
-      const serviceAssets = (assets.data || []).filter(a => a.provider === 'meta' && a.sub_provider === sp);
-      const selected = serviceAssets.find(a => a.is_selected);
-      const integration = (integrations.data || []).find(i => i.provider === 'meta');
+    const allMetaAssets = (assets.data || []).filter(a => a.provider === 'meta');
+    const metaIntegration = (integrations.data || []).find(i => i.provider === 'meta');
+    const metaSelected = allMetaAssets.find(a => a.is_selected);
 
-      connections[sp] = {
-        provider: 'meta',
-        sub_provider: sp,
-        connected: !!(metaMaster),
-        status: metaMaster ? (new Date(metaMaster.expires_at) > new Date() ? 'active' : 'expired') : 'disconnected',
-        account_email: metaMaster?.external_account_email || null,
-        account_name: metaMaster?.external_account_name || null,
-        scopes_granted: metaMaster?.scopes_granted || [],
-        token_expires_at: metaMaster?.expires_at || null,
-        token_status: metaMaster ? (new Date(metaMaster.expires_at) > new Date() ? 'valid' : 'expired') : 'missing',
-        last_error: metaMaster?.last_error || null,
-        connected_at: metaMaster?.connected_at || integration?.connected_at || null,
-        assets: serviceAssets.map(a => ({ id: a.id, label: a.label, external_id: a.external_id, is_selected: a.is_selected, metadata: a.metadata_json })),
-        selected_asset: selected ? { id: selected.id, label: selected.label, external_id: selected.external_id } : null,
-      };
-    }
+    connections['facebook'] = {
+      provider: 'meta',
+      sub_provider: 'facebook',
+      connected: !!(metaMaster),
+      status: metaMaster ? (new Date(metaMaster.expires_at) > new Date() ? 'active' : 'expired') : 'disconnected',
+      account_email: metaMaster?.external_account_email || null,
+      account_name: metaMaster?.external_account_name || null,
+      scopes_granted: metaMaster?.scopes_granted || [],
+      token_expires_at: metaMaster?.expires_at || null,
+      token_status: metaMaster ? (new Date(metaMaster.expires_at) > new Date() ? 'valid' : 'expired') : 'missing',
+      last_error: metaMaster?.last_error || null,
+      connected_at: metaMaster?.connected_at || metaIntegration?.connected_at || null,
+      assets: allMetaAssets.map(a => ({ id: a.id, label: a.label, external_id: a.external_id, is_selected: a.is_selected, sub_provider: a.sub_provider, asset_type: a.asset_type, metadata: a.metadata_json })),
+      selected_asset: metaSelected ? { id: metaSelected.id, label: metaSelected.label, external_id: metaSelected.external_id } : null,
+      discovery_summary: metaIntegration?.discovery_summary || null,
+    };
+    // Also expose under 'instagram' key for backward compat
+    connections['instagram'] = connections['facebook'];
 
     res.json({ connections });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -2209,6 +2231,459 @@ Output JSON:
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============================================================
+// CAMPAIGN MANAGEMENT
+// ============================================================
+
+// ── LIST CAMPAIGNS ───────────────────────────────────────────
+router.get('/clients/:clientId/campaigns', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { status } = req.query;
+    let q = supabase.from('campaigns').select('*').eq('client_id', clientId);
+    if (status) q = q.eq('status', status);
+    const { data, error } = await q.order('created_at', { ascending: false });
+    if (error) throw error;
+
+    // Attach creatives count for each campaign
+    const ids = (data || []).map(c => c.id);
+    const { data: creativeCounts } = ids.length
+      ? await supabase.from('campaign_creatives').select('campaign_id').in('campaign_id', ids)
+      : { data: [] };
+    const countMap = {};
+    (creativeCounts || []).forEach(c => { countMap[c.campaign_id] = (countMap[c.campaign_id] || 0) + 1; });
+    const enriched = (data || []).map(c => ({ ...c, creatives_count: countMap[c.id] || 0 }));
+
+    res.json(enriched);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET SINGLE CAMPAIGN ──────────────────────────────────────
+router.get('/clients/:clientId/campaigns/:campaignId', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+    const [campRes, creativesRes, snapshotsRes] = await Promise.all([
+      supabase.from('campaigns').select('*').eq('id', campaignId).eq('client_id', clientId).single(),
+      supabase.from('campaign_creatives').select('*').eq('campaign_id', campaignId).order('sort_order'),
+      supabase.from('campaign_snapshots').select('*').eq('campaign_id', campaignId).order('snapshot_date', { ascending: false }).limit(30),
+    ]);
+    if (campRes.error) throw campRes.error;
+    res.json({ ...campRes.data, creatives: creativesRes.data || [], snapshots: snapshotsRes.data || [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── CREATE CAMPAIGN ──────────────────────────────────────────
+router.post('/clients/:clientId/campaigns', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { name, objective, platforms, daily_budget_cents, total_budget_cents, currency,
+            start_date, end_date, targeting, notes } = req.body;
+
+    const { data, error } = await supabase.from('campaigns').insert({
+      client_id: clientId,
+      name: name || 'Untitled Campaign',
+      objective: objective || 'TRAFFIC',
+      platforms: platforms || ['facebook', 'instagram'],
+      daily_budget_cents: daily_budget_cents || null,
+      total_budget_cents: total_budget_cents || null,
+      currency: currency || 'ILS',
+      start_date: start_date || null,
+      end_date: end_date || null,
+      targeting: targeting || {},
+      notes: notes || null,
+      status: 'draft',
+    }).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── UPDATE CAMPAIGN ──────────────────────────────────────────
+router.patch('/clients/:clientId/campaigns/:campaignId', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+    const allowed = ['name', 'objective', 'platforms', 'daily_budget_cents', 'total_budget_cents',
+      'currency', 'start_date', 'end_date', 'targeting', 'notes', 'status'];
+    const updates = {};
+    for (const k of allowed) { if (req.body[k] !== undefined) updates[k] = req.body[k]; }
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase.from('campaigns')
+      .update(updates).eq('id', campaignId).eq('client_id', clientId).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── DELETE CAMPAIGN ──────────────────────────────────────────
+router.delete('/clients/:clientId/campaigns/:campaignId', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+    // Only allow deleting drafts
+    const { data: camp } = await supabase.from('campaigns')
+      .select('status').eq('id', campaignId).eq('client_id', clientId).single();
+    if (!camp) return res.status(404).json({ error: 'Campaign not found' });
+    if (camp.status !== 'draft' && camp.status !== 'archived') {
+      return res.status(400).json({ error: 'Only draft or archived campaigns can be deleted' });
+    }
+    await supabase.from('campaigns').delete().eq('id', campaignId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── ADD CREATIVE TO CAMPAIGN ─────────────────────────────────
+router.post('/clients/:clientId/campaigns/:campaignId/creatives', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+    const { headline, primary_text, description, call_to_action, image_url,
+            video_url, destination_url, display_url } = req.body;
+
+    const { data, error } = await supabase.from('campaign_creatives').insert({
+      campaign_id: campaignId,
+      client_id: clientId,
+      headline: headline || null,
+      primary_text: primary_text || null,
+      description: description || null,
+      call_to_action: call_to_action || 'LEARN_MORE',
+      image_url: image_url || null,
+      video_url: video_url || null,
+      destination_url: destination_url || null,
+      display_url: display_url || null,
+      status: 'draft',
+      is_primary: false,
+    }).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── UPDATE CREATIVE ──────────────────────────────────────────
+router.patch('/clients/:clientId/campaigns/:campaignId/creatives/:creativeId', async (req, res) => {
+  try {
+    const { clientId, creativeId } = req.params;
+    const allowed = ['headline', 'primary_text', 'description', 'call_to_action',
+      'image_url', 'video_url', 'destination_url', 'display_url', 'status', 'is_primary', 'sort_order'];
+    const updates = {};
+    for (const k of allowed) { if (req.body[k] !== undefined) updates[k] = req.body[k]; }
+    updates.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase.from('campaign_creatives')
+      .update(updates).eq('id', creativeId).eq('client_id', clientId).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── DELETE CREATIVE ──────────────────────────────────────────
+router.delete('/clients/:clientId/campaigns/:campaignId/creatives/:creativeId', async (req, res) => {
+  try {
+    const { creativeId } = req.params;
+    await supabase.from('campaign_creatives').delete().eq('id', creativeId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── UPLOAD CAMPAIGN IMAGE ────────────────────────────────────
+router.post('/clients/:clientId/campaigns/:campaignId/upload-image', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+    const { image_base64, filename, content_type } = req.body;
+    if (!image_base64) return res.status(400).json({ error: 'image_base64 is required' });
+
+    const ext = (filename || 'image.jpg').split('.').pop();
+    const storagePath = `campaigns/${clientId}/${campaignId}/${Date.now()}.${ext}`;
+    const buffer = Buffer.from(image_base64, 'base64');
+
+    const { error: uploadError } = await supabase.storage
+      .from('campaign-assets')
+      .upload(storagePath, buffer, { contentType: content_type || 'image/jpeg', upsert: true });
+
+    if (uploadError) {
+      // Create bucket if it doesn't exist
+      if (uploadError.message?.includes('not found') || uploadError.statusCode === '404') {
+        await supabase.storage.createBucket('campaign-assets', { public: true });
+        const { error: retryErr } = await supabase.storage
+          .from('campaign-assets')
+          .upload(storagePath, buffer, { contentType: content_type || 'image/jpeg', upsert: true });
+        if (retryErr) throw retryErr;
+      } else {
+        throw uploadError;
+      }
+    }
+
+    const { data: urlData } = supabase.storage.from('campaign-assets').getPublicUrl(storagePath);
+    res.json({ image_url: urlData.publicUrl, storage_path: storagePath });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── PUBLISH CAMPAIGN TO META ADS ─────────────────────────────
+router.post('/clients/:clientId/campaigns/:campaignId/publish-meta', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+
+    // Get campaign + creatives
+    const { data: campaign } = await supabase.from('campaigns')
+      .select('*').eq('id', campaignId).eq('client_id', clientId).single();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (campaign.status !== 'draft' && campaign.status !== 'failed') {
+      return res.status(400).json({ error: 'Only draft or failed campaigns can be published' });
+    }
+
+    const { data: creatives } = await supabase.from('campaign_creatives')
+      .select('*').eq('campaign_id', campaignId).order('sort_order');
+    if (!creatives?.length) return res.status(400).json({ error: 'Campaign needs at least one creative' });
+
+    // Get Meta token
+    const { data: cred } = await supabase.from('oauth_credentials')
+      .select('*').eq('client_id', clientId).eq('provider', 'meta').single();
+    if (!cred?.access_token_encrypted) return res.status(400).json({ error: 'No Meta credentials. Connect Meta first.' });
+
+    const { decryptToken } = await import('../functions/onboarding.js');
+    const iv = cred.encryption_iv.includes(':') ? cred.encryption_iv.split(':')[0] : cred.encryption_iv;
+    const accessToken = decryptToken(cred.access_token_encrypted, iv);
+
+    // Get ad account
+    const { data: adAccount } = await supabase.from('integration_assets')
+      .select('external_id, metadata_json').eq('client_id', clientId)
+      .eq('provider', 'meta').eq('sub_provider', 'ads').eq('is_selected', true).maybeSingle();
+    if (!adAccount?.external_id) {
+      // fallback to first ad account
+      const { data: fallback } = await supabase.from('integration_assets')
+        .select('external_id, metadata_json').eq('client_id', clientId)
+        .eq('provider', 'meta').eq('sub_provider', 'ads').limit(1).maybeSingle();
+      if (!fallback?.external_id) return res.status(400).json({ error: 'No Meta Ad Account found. Reconnect Meta with ads permissions.' });
+      adAccount = fallback;
+    }
+    const adAccountId = adAccount.external_id; // format: act_XXXXX
+
+    // Get page for ad identity
+    const { data: page } = await supabase.from('integration_assets')
+      .select('external_id, label, metadata_json').eq('client_id', clientId)
+      .eq('provider', 'meta').eq('sub_provider', 'facebook').eq('is_selected', true).maybeSingle();
+
+    // Map objective to Meta API objective
+    const objectiveMap = {
+      'AWARENESS': 'OUTCOME_AWARENESS',
+      'TRAFFIC': 'OUTCOME_TRAFFIC',
+      'ENGAGEMENT': 'OUTCOME_ENGAGEMENT',
+      'LEADS': 'OUTCOME_LEADS',
+      'SALES': 'OUTCOME_SALES',
+    };
+
+    const errors = [];
+    let metaCampaignId = campaign.meta_campaign_id;
+    let metaAdsetId = campaign.meta_adset_id;
+    let metaAdId = campaign.meta_ad_id;
+
+    // 1. Create Campaign on Meta
+    if (!metaCampaignId) {
+      const campRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/campaigns`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: campaign.name,
+          objective: objectiveMap[campaign.objective] || 'OUTCOME_TRAFFIC',
+          status: 'PAUSED',
+          special_ad_categories: [],
+          access_token: accessToken,
+        }),
+      });
+      const campData = await campRes.json();
+      if (campData.error) { errors.push(`Campaign: ${campData.error.message}`); }
+      else { metaCampaignId = campData.id; }
+    }
+
+    // 2. Create Ad Set
+    if (metaCampaignId && !metaAdsetId) {
+      const targeting = campaign.targeting || {};
+      const metaTargeting = {
+        geo_locations: { countries: targeting.geo || ['IL'] },
+        age_min: targeting.age_min || 18,
+        age_max: targeting.age_max || 65,
+      };
+      if (targeting.gender && targeting.gender !== 'all') {
+        metaTargeting.genders = [targeting.gender === 'male' ? 1 : 2];
+      }
+      if (targeting.interests?.length) {
+        metaTargeting.flexible_spec = [{ interests: targeting.interests.map(i => ({ id: i.id, name: i.name })) }];
+      }
+
+      const platforms = campaign.platforms || ['facebook', 'instagram'];
+      const publisherPlatforms = [];
+      if (platforms.includes('facebook')) publisherPlatforms.push('facebook');
+      if (platforms.includes('instagram')) publisherPlatforms.push('instagram');
+
+      const adsetBody = {
+        name: `${campaign.name} - Ad Set`,
+        campaign_id: metaCampaignId,
+        daily_budget: campaign.daily_budget_cents || 4000, // default 40 ILS = 4000 agorot
+        billing_event: 'IMPRESSIONS',
+        optimization_goal: campaign.objective === 'TRAFFIC' ? 'LINK_CLICKS' : campaign.objective === 'AWARENESS' ? 'REACH' : 'IMPRESSIONS',
+        targeting: metaTargeting,
+        status: 'PAUSED',
+        access_token: accessToken,
+      };
+      if (publisherPlatforms.length) {
+        adsetBody.targeting.publisher_platforms = publisherPlatforms;
+      }
+      if (campaign.start_date) adsetBody.start_time = new Date(campaign.start_date).toISOString();
+      if (campaign.end_date) adsetBody.end_time = new Date(campaign.end_date).toISOString();
+
+      const adsetRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/adsets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(adsetBody),
+      });
+      const adsetData = await adsetRes.json();
+      if (adsetData.error) { errors.push(`Ad Set: ${adsetData.error.message}`); }
+      else { metaAdsetId = adsetData.id; }
+    }
+
+    // 3. Create Ad (using first creative)
+    if (metaAdsetId && !metaAdId) {
+      const creative = creatives[0];
+      const pageId = page?.external_id;
+      const pageAccessToken = page?.metadata_json?.page_access_token || accessToken;
+
+      // Upload image if needed
+      let imageHash = null;
+      if (creative.image_url) {
+        const imgRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/adimages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: creative.image_url,
+            access_token: accessToken,
+          }),
+        });
+        const imgData = await imgRes.json();
+        if (imgData.images) {
+          const firstKey = Object.keys(imgData.images)[0];
+          imageHash = imgData.images[firstKey]?.hash;
+        }
+      }
+
+      // Create ad creative on Meta
+      const creativeBody = {
+        name: `${campaign.name} - Creative`,
+        object_story_spec: {
+          page_id: pageId,
+          link_data: {
+            message: creative.primary_text || '',
+            link: creative.destination_url || `https://${(await supabase.from('clients').select('domain').eq('id', clientId).single()).data?.domain || 'example.com'}`,
+            name: creative.headline || campaign.name,
+            description: creative.description || '',
+            call_to_action: { type: creative.call_to_action || 'LEARN_MORE' },
+          },
+        },
+        access_token: accessToken,
+      };
+
+      if (imageHash) {
+        creativeBody.object_story_spec.link_data.image_hash = imageHash;
+      } else if (creative.image_url) {
+        creativeBody.object_story_spec.link_data.picture = creative.image_url;
+      }
+
+      const crRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/adcreatives`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(creativeBody),
+      });
+      const crData = await crRes.json();
+
+      if (crData.error) {
+        errors.push(`Creative: ${crData.error.message}`);
+      } else {
+        // Create the ad
+        const adRes = await fetch(`https://graph.facebook.com/v21.0/${adAccountId}/ads`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: `${campaign.name} - Ad`,
+            adset_id: metaAdsetId,
+            creative: { creative_id: crData.id },
+            status: 'PAUSED',
+            access_token: accessToken,
+          }),
+        });
+        const adData = await adRes.json();
+        if (adData.error) { errors.push(`Ad: ${adData.error.message}`); }
+        else { metaAdId = adData.id; }
+      }
+    }
+
+    // Update campaign with external IDs
+    const updateData = {
+      meta_campaign_id: metaCampaignId,
+      meta_adset_id: metaAdsetId,
+      meta_ad_id: metaAdId,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (errors.length === 0 && metaCampaignId && metaAdsetId && metaAdId) {
+      updateData.status = 'active';
+      updateData.published_at = new Date().toISOString();
+      updateData.external_status = { meta: 'PAUSED' };
+    } else if (errors.length > 0) {
+      updateData.status = 'failed';
+    }
+
+    await supabase.from('campaigns').update(updateData).eq('id', campaignId);
+
+    if (errors.length > 0) {
+      return res.status(400).json({ success: false, errors, meta_campaign_id: metaCampaignId, meta_adset_id: metaAdsetId });
+    }
+
+    res.json({
+      success: true,
+      meta_campaign_id: metaCampaignId,
+      meta_adset_id: metaAdsetId,
+      meta_ad_id: metaAdId,
+      message: 'Campaign published to Meta (PAUSED). Use the activate endpoint to start running.',
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── ACTIVATE / PAUSE META CAMPAIGN ───────────────────────────
+router.post('/clients/:clientId/campaigns/:campaignId/meta-status', async (req, res) => {
+  try {
+    const { clientId, campaignId } = req.params;
+    const { action } = req.body; // 'activate' or 'pause'
+
+    const { data: campaign } = await supabase.from('campaigns')
+      .select('*').eq('id', campaignId).eq('client_id', clientId).single();
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    if (!campaign.meta_campaign_id) return res.status(400).json({ error: 'Campaign not published to Meta yet' });
+
+    const { data: cred } = await supabase.from('oauth_credentials')
+      .select('*').eq('client_id', clientId).eq('provider', 'meta').single();
+    const { decryptToken } = await import('../functions/onboarding.js');
+    const iv = cred.encryption_iv.includes(':') ? cred.encryption_iv.split(':')[0] : cred.encryption_iv;
+    const accessToken = decryptToken(cred.access_token_encrypted, iv);
+
+    const newStatus = action === 'activate' ? 'ACTIVE' : 'PAUSED';
+
+    // Update campaign, adset, and ad status
+    const updates = [campaign.meta_campaign_id, campaign.meta_adset_id, campaign.meta_ad_id].filter(Boolean);
+    for (const id of updates) {
+      await fetch(`https://graph.facebook.com/v21.0/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus, access_token: accessToken }),
+      });
+    }
+
+    await supabase.from('campaigns').update({
+      status: action === 'activate' ? 'active' : 'paused',
+      external_status: { meta: newStatus },
+      updated_at: new Date().toISOString(),
+    }).eq('id', campaignId);
+
+    res.json({ success: true, status: newStatus });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 export default router;

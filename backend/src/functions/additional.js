@@ -519,21 +519,29 @@ export async function syncBacklinkIntelligence(clientId) {
     const items = bl.items || [];
     if (items.length > 0) {
       await supabase.from('backlinks').delete().eq('client_id', clientId);
-      const rows = items.slice(0, 500).map(b => ({
-        client_id: clientId,
-        source_domain: b.domain_from,
-        source_url: b.url_from,
-        target_url: b.url_to,
-        anchor_text: b.anchor || null,
-        domain_authority: Math.min(100, Math.round((b.rank || 0) / 6)),
-        page_authority: Math.min(100, Math.round((b.page_from_rank || 0) / 6)),
-        is_dofollow: !!b.dofollow,
-        is_sponsored: !!b.is_sponsored,
-        first_seen: b.first_seen || null,
-        last_seen: b.last_seen || null,
-      }));
+      // Deduplicate by (source_domain, target_url) to avoid unique constraint violations
+      const seenKeys = new Set();
+      const rows = [];
+      for (const b of items.slice(0, 500)) {
+        const key = `${b.domain_from}::${b.url_to}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        rows.push({
+          client_id: clientId,
+          source_domain: b.domain_from,
+          source_url: b.url_from,
+          target_url: b.url_to,
+          anchor_text: b.anchor || null,
+          domain_authority: Math.min(100, Math.round((b.rank || 0) / 6)),
+          page_authority: Math.min(100, Math.round((b.page_from_rank || 0) / 6)),
+          is_dofollow: !!b.dofollow,
+          is_sponsored: !!b.is_sponsored,
+          first_seen: b.first_seen || null,
+          last_seen: b.last_seen || null,
+        });
+      }
       for (let i = 0; i < rows.length; i += 200) {
-        await supabase.from('backlinks').insert(rows.slice(i, i + 200));
+        await supabase.from('backlinks').upsert(rows.slice(i, i + 200), { onConflict: 'client_id,source_domain,target_url' });
       }
       summary.tables_written.backlinks = rows.length;
     }

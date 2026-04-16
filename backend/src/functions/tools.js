@@ -188,6 +188,26 @@ export function getToolDefinitions(agentSlug, clientId) {
     {
       type: 'function',
       function: {
+        name: 'fetch_llm_mentions',
+        description: 'Check if a domain or brand is mentioned in LLM/AI search responses (Google AI Overview, ChatGPT). Uses DataForSEO LLM Mentions API. Returns keywords where the target appears in AI-generated answers.',
+        parameters: {
+          type: 'object',
+          properties: {
+            domain: { type: 'string', description: 'Target domain to check mentions for (e.g. yanivgil.co.il)' },
+            brand_keyword: { type: 'string', description: 'Optional brand name to search for in AI responses (e.g. "יניב גיל")' },
+            platform: { type: 'string', enum: ['google', 'chat_gpt'], description: 'AI platform to check. Default: google' },
+            location_code: { type: 'number', description: 'DataForSEO location code. Default: 2376 (Israel)' },
+            language_code: { type: 'string', description: 'Language code. Default: he' },
+            limit: { type: 'number', description: 'Max results. Default: 20' }
+          },
+          required: ['domain']
+        }
+      },
+      allowed_agents: ['seo-core-agent', 'geo-ai-visibility-agent', 'competitor-intelligence-agent', 'report-composer-agent', 'master-orchestrator']
+    },
+    {
+      type: 'function',
+      function: {
         name: 'search_perplexity',
         description: 'Search using Perplexity AI for real-time web research. Returns AI-synthesized answer with source citations. Use for competitor research, industry trends, citation discovery, and GEO analysis.',
         parameters: {
@@ -930,6 +950,74 @@ export async function executeTool(toolName, args, clientId, runId) {
         }
 
         return { domain, items: result?.items?.slice(0, 30) || [] };
+      }
+
+      // ========================================
+      // fetch_llm_mentions
+      // ========================================
+      case 'fetch_llm_mentions': {
+        const login = (process.env.DATAFORSEO_LOGIN || '').trim();
+        const password = (process.env.DATAFORSEO_PASSWORD || '').trim();
+        if (!login || !password) return { error: 'DataForSEO credentials not configured' };
+
+        const domain = args.domain;
+        const platform = args.platform || 'google';
+        const locationCode = args.location_code || 2376;
+        const languageCode = args.language_code || 'he';
+        const limit = Math.min(args.limit || 20, 100);
+
+        // Build target array — domain + optional brand keyword
+        const target = [
+          { domain, search_filter: 'include', search_scope: ['any'], include_subdomains: true }
+        ];
+        if (args.brand_keyword) {
+          target.push({
+            keyword: args.brand_keyword,
+            search_filter: 'include',
+            search_scope: ['any'],
+            match_type: 'partial_match'
+          });
+        }
+
+        const resp = await fetchWithTimeout(
+          'https://api.dataforseo.com/v3/ai_optimization/llm_mentions/search/live',
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': 'Basic ' + Buffer.from(`${login}:${password}`).toString('base64'),
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify([{ target, platform, location_code: locationCode, language_code: languageCode, limit }])
+          },
+          30000
+        );
+
+        if (!resp.ok) return { error: `DataForSEO LLM Mentions error: ${resp.status}` };
+
+        const data = await resp.json();
+        const task = data?.tasks?.[0];
+        if (task?.status_code !== 20000) {
+          return { error: `DataForSEO LLM Mentions error: ${task?.status_message}`, code: task?.status_code };
+        }
+
+        const r = task.result?.[0];
+        const items = (r?.items || []).map(item => ({
+          keyword: item.keyword,
+          ai_search_volume: item.ai_search_volume,
+          impressions: item.impressions,
+          mentions_count: item.mentions_count,
+          position: item.position,
+          cited_sources: item.cited_sources?.slice(0, 5),
+          platform: item.platform
+        }));
+
+        return {
+          domain,
+          platform,
+          total_mentions: r?.total_count || 0,
+          items,
+          fetched_at: new Date().toISOString()
+        };
       }
 
       // ========================================

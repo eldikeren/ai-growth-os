@@ -78,6 +78,15 @@ export async function getGoogleAdsDeveloperToken() {
   return (await getSystemSetting('google_ads_developer_token')) || '';
 }
 
+// Manager (MCC) customer ID — required as login-customer-id header when
+// querying client accounts managed through a manager account.
+export async function getGoogleAdsManagerId() {
+  const envId = (process.env.GOOGLE_ADS_MANAGER_CUSTOMER_ID || '').trim();
+  if (envId) return envId.replace(/-/g, '');
+  const val = (await getSystemSetting('google_ads_manager_customer_id')) || '';
+  return val.replace(/-/g, '');
+}
+
 // ============================================================
 // SESSION MANAGEMENT
 // ============================================================
@@ -443,13 +452,15 @@ async function discoverGoogleAdsAccounts(accessToken, clientId) {
   if (!devToken) {
     return { count: 0, error: 'Google Ads developer token missing — set system_settings.google_ads_developer_token or GOOGLE_ADS_DEVELOPER_TOKEN env var' };
   }
+  const managerId = await getGoogleAdsManagerId();
   const headers = {
     Authorization: `Bearer ${accessToken}`,
     'developer-token': devToken,
     'Content-Type': 'application/json',
+    ...(managerId ? { 'login-customer-id': managerId } : {}),
   };
   try {
-    const res = await fetch('https://googleads.googleapis.com/v17/customers:listAccessibleCustomers', { headers });
+    const res = await fetch('https://googleads.googleapis.com/v19/customers:listAccessibleCustomers', { headers });
     if (!res.ok) {
       const errText = await res.text();
       return { count: 0, error: `Google Ads listAccessibleCustomers failed: HTTP ${res.status} — ${errText.slice(0, 400)}` };

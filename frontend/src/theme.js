@@ -166,6 +166,12 @@ export const NAV_GROUPS = [
     ],
   },
   {
+    label: 'Campaigns',
+    items: [
+      { id: 'campaigns', label: 'Campaigns', emoji: '📣' },
+    ],
+  },
+  {
     label: 'Content',
     items: [
       { id: 'reports', label: 'Reports', emoji: '📈' },

@@ -29,6 +29,7 @@ const LinkIntelligenceView = lazy(() => import('./views/LinkIntelligenceView.jsx
 const SeoActionPlansView = lazy(() => import('./views/SeoActionPlansView.jsx'));
 const SystemAuditView = lazy(() => import('./views/SystemAuditView.jsx'));
 const ProposedChangesView = lazy(() => import('./views/ProposedChangesView.jsx'));
+const CampaignsView = lazy(() => import('./views/CampaignsView.jsx'));
 
 function ViewLoader() {
   return (
@@ -230,6 +231,7 @@ export default function App() {
               {view === 'link-intelligence' && <LinkIntelligenceView clientId={clientId} />}
               {view === 'seo-actions' && <SeoActionPlansView clientId={clientId} />}
               {view === 'proposed-changes' && <ProposedChangesView clientId={clientId} />}
+              {view === 'campaigns' && <CampaignsView clientId={clientId} />}
             </div>
           </Suspense>
         )}

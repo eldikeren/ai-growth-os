@@ -1156,86 +1156,32 @@ function RunListItem({ run, isSelected, onClick }) {
 }
 
 // ─── Mission Banner ───────────────────────────────────────────
-// Helper: detect if a keyword is probably the client's own brand term
-function isBrandKeyword(keyword, clientName, domain) {
-  if (!keyword) return false;
-  const kw = keyword.toLowerCase().trim();
-  // Extract brand tokens from client name and domain
-  const brandTokens = new Set();
-  if (clientName) {
-    clientName.toLowerCase()
-      .replace(/\b(law firm|law office|finance|consulting|agency|group|ltd|inc|llc|corp)\b/g, '')
-      .split(/\s+/).filter(t => t.length > 2).forEach(t => brandTokens.add(t));
-  }
-  if (domain) {
-    // e.g. yanivgil.co.il → yanivgil
-    const stem = domain.replace(/^https?:\/\//, '').replace(/^www\./, '').split('.')[0];
-    if (stem && stem.length > 2) brandTokens.add(stem.toLowerCase());
-  }
-  // If the keyword is essentially just the brand tokens (short kw and contains any brand token), flag as brand
-  if (kw.length < 40) {
-    for (const tok of brandTokens) {
-      if (kw.includes(tok)) return true;
-    }
-    // Also match Hebrew brand name if clientName has Hebrew — split on spaces and check each token
-    const heParts = (clientName || '').split(/\s+/).filter(p => /[\u0590-\u05FF]/.test(p));
-    for (const p of heParts) {
-      if (kw.includes(p.toLowerCase())) return true;
-    }
-  }
-  return false;
-}
-
-function matchesLanguage(keyword, language) {
-  if (!keyword || !language || language === 'en') return true;
-  if (language === 'he') {
-    // Must contain at least one Hebrew character to be a valid Hebrew keyword
-    return /[\u0590-\u05FF]/.test(keyword);
-  }
-  return true;
-}
+// Brand + language filtering now happens SERVER-SIDE in /clients/:clientId/keywords.
+// When showJunk is on we pass ?include_brand=true&any_language=true to see what was hidden.
 
 function MissionBanner({ clientId }) {
   const [keywords, setKeywords] = useState([]);
-  const [clientInfo, setClientInfo] = useState({ name: '', domain: '', language: 'he' });
+  const [junkKeywords, setJunkKeywords] = useState([]);
   const [drillDown, setDrillDown] = useState(null); // 'top3' | 'top10' | 'outside' | 'notRanking' | null
   const [showJunk, setShowJunk] = useState(false);
 
   useEffect(() => {
     if (!clientId) return;
-    // Fix: fetch ALL keywords (not limit=5) so the counts are accurate
+    // Real keywords: backend filters out is_brand=true and language mismatches
     api(`/clients/${clientId}/keywords?limit=1000`).then(d => setKeywords(d || [])).catch(() => {});
-    // Load client info for brand/language filter
-    api(`/clients/${clientId}`).then(c => {
-      const profile = c?.client_profiles?.[0] || {};
-      setClientInfo({
-        name: c?.name || '',
-        domain: c?.domain || '',
-        language: profile.language || 'he',
-      });
-    }).catch(() => {});
+    // Junk count: fetch the unfiltered set just to show "+ N brand/junk hidden" badge
+    api(`/clients/${clientId}/keywords?limit=1000&include_brand=true&any_language=true`).then(d => setJunkKeywords(d || [])).catch(() => {});
   }, [clientId]);
 
-  const clientName = clientInfo.name;
-  const clientDomain = clientInfo.domain;
-  const clientLanguage = clientInfo.language;
-
-  // Classify each keyword: is it a brand term? does it match the client's language?
-  const enriched = keywords.map(k => ({
-    ...k,
-    _isBrand: isBrandKeyword(k.keyword, clientName, clientDomain),
-    _langOk: matchesLanguage(k.keyword, clientLanguage),
-  }));
-
-  // "Real" = non-brand AND matches client language (these are the ones that matter)
-  const realKeywords = showJunk ? enriched : enriched.filter(k => !k._isBrand && k._langOk);
+  // Backend already filtered; realKeywords IS the trustworthy set.
+  const realKeywords = showJunk ? junkKeywords : keywords;
 
   const top3List = realKeywords.filter(k => k.current_position && k.current_position <= 3);
   const top10List = realKeywords.filter(k => k.current_position && k.current_position <= 10 && k.current_position > 3);
   const outsideList = realKeywords.filter(k => k.current_position && k.current_position > 10);
   const notRankingList = realKeywords.filter(k => !k.current_position);
 
-  const junkCount = enriched.filter(k => k._isBrand || !k._langOk).length;
+  const junkCount = Math.max(0, junkKeywords.length - keywords.length);
 
   const buckets = [
     { key: 'top3', label: 'Top 3', list: top3List, color: '#10B981', icon: '🥇' },
@@ -1262,7 +1208,7 @@ function MissionBanner({ clientId }) {
             🎯 Get Clients to Top 3
           </div>
           <div style={{ fontSize: fontSize.sm, color: '#c7d2fe', marginTop: 4 }}>
-            {realKeywords.length} real target keywords • {keywords.length - realKeywords.length > 0 && !showJunk && (
+            {realKeywords.length} real target keywords • {junkCount > 0 && !showJunk && (
               <button
                 onClick={(e) => { e.stopPropagation(); setShowJunk(true); }}
                 style={{

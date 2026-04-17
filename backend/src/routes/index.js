@@ -722,7 +722,27 @@ router.get('/clients/:clientId/link-gap', async (req, res) => {
 
 router.get('/clients/:clientId/keywords', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('client_keywords').select('*').eq('client_id', req.params.clientId).order('volume', { ascending: false });
+    const clientId = req.params.clientId;
+    const includeBrand = req.query.include_brand === 'true';
+    const includeOtherLang = req.query.any_language === 'true';
+
+    // Look up client's primary language (from client_profiles, falls back to client_rules, then 'he')
+    let clientLang = null;
+    if (!includeOtherLang) {
+      const { data: prof } = await supabase.from('client_profiles').select('language').eq('client_id', clientId).maybeSingle();
+      if (prof?.language) {
+        clientLang = prof.language;
+      } else {
+        const { data: rules } = await supabase.from('client_rules').select('language').eq('client_id', clientId).maybeSingle();
+        clientLang = rules?.language || null;
+      }
+    }
+
+    let q = supabase.from('client_keywords').select('*').eq('client_id', clientId).order('volume', { ascending: false });
+    if (!includeBrand) q = q.eq('is_brand', false);
+    if (clientLang) q = q.eq('keyword_language', clientLang);
+
+    const { data, error } = await q;
     if (error) throw error;
     res.json(data);
   } catch (err) { res.status(500).json({ error: err.message }); }

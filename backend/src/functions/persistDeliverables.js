@@ -95,6 +95,48 @@ export async function persistAgentDeliverables({ supabase, agent, clientId, runI
   const allAdItems = [...creatives, ...variants, ...adCopies];
 
   if (allAdItems.length > 0 && /google.ads|ad.campaign/i.test(agentSlug)) {
+    // Find or create today's draft campaign for this client. campaign_creatives
+    // requires campaign_id NOT NULL, so we bucket all AI-proposed creatives into
+    // a single per-client-per-day draft campaign. This keeps the UI coherent
+    // (one "AI Proposals — 2026-04-17" row with N creatives inside).
+    const today = new Date().toISOString().slice(0, 10);
+    const draftCampaignName = `AI Google Ads Proposals — ${today}`;
+    let campaignId = null;
+    try {
+      const { data: existingCampaign } = await supabase
+        .from('campaigns')
+        .select('id')
+        .eq('client_id', clientId)
+        .eq('name', draftCampaignName)
+        .maybeSingle();
+      if (existingCampaign) {
+        campaignId = existingCampaign.id;
+      } else {
+        const { data: newCampaign, error: campErr } = await supabase
+          .from('campaigns')
+          .insert({
+            client_id: clientId,
+            name: draftCampaignName,
+            objective: 'TRAFFIC',
+            status: 'draft',
+            platforms: ['google'],
+            currency: 'ILS',
+            created_by: `agent:${agentSlug}`,
+            notes: `Auto-created by persistAgentDeliverables from run ${runId}`,
+          })
+          .select('id')
+          .single();
+        if (campErr) {
+          result.errors.push({ kind: 'campaign_creatives', message: `create campaign: ${campErr.message}` });
+        } else {
+          campaignId = newCampaign?.id;
+        }
+      }
+    } catch (e) {
+      result.errors.push({ kind: 'campaign_creatives', message: `campaign bucket: ${e.message}` });
+    }
+    if (!campaignId) return result;
+
     for (const c of allAdItems) {
       try {
         if (!c || typeof c !== 'object') continue;
@@ -131,7 +173,13 @@ export async function persistAgentDeliverables({ supabase, agent, clientId, runI
           _engagement_style: c.engagement_style || null,
         };
 
+        // DB constraint: format must be one of single_image|carousel|video
+        const ALLOWED_FORMATS = ['single_image', 'carousel', 'video'];
+        const rawFormat = String(c.format || '').toLowerCase();
+        const format = ALLOWED_FORMATS.includes(rawFormat) ? rawFormat : 'single_image';
+
         const { error } = await supabase.from('campaign_creatives').insert({
+          campaign_id: campaignId,
           client_id: clientId,
           headline,
           primary_text: primary,
@@ -141,7 +189,7 @@ export async function persistAgentDeliverables({ supabase, agent, clientId, runI
           destination_url: c.destination_url || c.landing_url || null,
           google_creative: googleCreative,
           status: 'draft',
-          format: c.format || (realImageUrl ? 'image' : 'text'),
+          format,
         });
         if (error) {
           result.errors.push({ kind: 'campaign_creatives', message: error.message });

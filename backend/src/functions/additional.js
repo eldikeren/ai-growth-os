@@ -856,7 +856,7 @@ export async function syncBacklinkIntelligence(clientId) {
           outreach_difficulty: info.da >= 70 ? 'hard' : info.da >= 40 ? 'medium' : 'easy',
           recommendation: `Pursue editorial / guest post / PR mention on ${domain} — referenced by ${compList.length} competitor(s)`,
           ai_rationale: null,
-          status: 'discovered',
+          status: 'uncontacted',
         });
       }
       // one row per missing domain (deduped, for missing_referring_domains)
@@ -870,19 +870,26 @@ export async function syncBacklinkIntelligence(clientId) {
         priority_score: relevance + compList.length * 8,
         category: info.da >= 50 ? 'high_authority' : info.da >= 30 ? 'mid_authority' : 'niche',
         recommended_acquisition_type: info.da >= 60 ? 'pr_or_editorial' : info.da >= 40 ? 'guest_post' : 'directory_or_resource',
-        status: 'discovered',
+        status: 'uncontacted',
         imported_from_sheet: false,
       });
     }
-    // chunked inserts
+    // chunked inserts — capture errors so silent CHECK-constraint failures surface
+    let gapWritten = 0, missingWritten = 0;
     for (let i = 0; i < gapRows.length; i += 200) {
-      await supabase.from('competitor_link_gap').insert(gapRows.slice(i, i + 200));
+      const chunk = gapRows.slice(i, i + 200);
+      const { error } = await supabase.from('competitor_link_gap').insert(chunk);
+      if (error) summary.errors.push(`competitor_link_gap insert chunk ${i}: ${error.message}`);
+      else gapWritten += chunk.length;
     }
     for (let i = 0; i < missingRows.length; i += 200) {
-      await supabase.from('missing_referring_domains').insert(missingRows.slice(i, i + 200));
+      const chunk = missingRows.slice(i, i + 200);
+      const { error } = await supabase.from('missing_referring_domains').insert(chunk);
+      if (error) summary.errors.push(`missing_referring_domains insert chunk ${i}: ${error.message}`);
+      else missingWritten += chunk.length;
     }
-    summary.tables_written.competitor_link_gap = gapRows.length;
-    summary.tables_written.missing_referring_domains = missingRows.length;
+    summary.tables_written.competitor_link_gap = gapWritten;
+    summary.tables_written.missing_referring_domains = missingWritten;
   }
 
   summary.duration_ms = Date.now() - started;

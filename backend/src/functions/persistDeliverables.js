@@ -50,12 +50,17 @@ export async function persistAgentDeliverables({ supabase, agent, clientId, runI
 
         const visualUrl = p.visual_url && !/integration_asset/i.test(p.visual_url) ? p.visual_url : null;
 
+        // DB constraint: post_type must be one of text|image|video|link|carousel|story|reel
+        const rawPostType = String(p.post_type || '').toLowerCase();
+        const ALLOWED_POST_TYPES = ['text', 'image', 'video', 'link', 'carousel', 'story', 'reel'];
+        let postType = ALLOWED_POST_TYPES.includes(rawPostType) ? rawPostType : (visualUrl ? 'image' : 'text');
+
         const { error } = await supabase.from('social_posts').insert({
           client_id: clientId,
           title,
           content: fullContent,
           platform,
-          post_type: p.post_type || 'feed',
+          post_type: postType,
           status: 'draft',
           media_urls: visualUrl ? [visualUrl] : [],
           ai_generated: true,

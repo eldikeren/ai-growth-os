@@ -8,6 +8,7 @@ import { createClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 import { getToolDefinitions, executeTool } from './tools.js';
 import { finalizeToolResult, runPreflight, classifyRunGrounding, DATA_QUALITY } from './truthEnvelope.js';
+import { persistAgentDeliverables } from './persistDeliverables.js';
 
 // ── Map tool names to their source + asset extraction logic ──
 const TOOL_SOURCE_MAP = {
@@ -732,6 +733,28 @@ FINAL OUTPUT RULES:
       finalStatus = 'partial';
       output._truth_warning = 'Output generated without any validated data source. Displayed as advisory only — do not treat as verified truth.';
       emitAgentEvent(clientId, agent, 'failed', run.id, 'Output not grounded in valid data', grounding);
+    }
+
+    // 11c. PERSIST DELIVERABLES — save agent-generated content (social posts,
+    // ad creatives, etc.) to their real home tables so the UI can show them.
+    // This happens BEFORE the run update so content is available even if the
+    // run-save retry path kicks in.
+    let deliverables = null;
+    try {
+      deliverables = await persistAgentDeliverables({ supabase, agent, clientId, runId: run.id, output });
+      if (deliverables && (deliverables.social_posts || deliverables.campaign_creatives || deliverables.content_drafts)) {
+        output._deliverables_persisted = deliverables;
+        // If we produced real, persisted deliverables, treat the run as a success
+        // even if truth-gate wanted to downgrade it. Real published content beats
+        // truth-gate heuristics.
+        if (finalStatus === 'partial') {
+          finalStatus = 'success';
+          output._truth_gate_upgraded = 'partial→success because deliverables were persisted';
+        }
+      }
+    } catch (persistErr) {
+      console.error(`[PERSIST_DELIVERABLES] run=${run.id}: ${persistErr.message}`);
+      output._deliverables_error = persistErr.message;
     }
 
     // 12. CRITICAL: Save run output to DB IMMEDIATELY

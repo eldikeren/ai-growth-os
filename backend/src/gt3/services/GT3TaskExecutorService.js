@@ -298,30 +298,32 @@ export async function recordTaskOutcome(taskId, kind, { status, output, error_me
 // ═══════════════════════════════════════════════════════════
 //
 // Given a GT3 task, route it to the assigned agent via the
-// existing /runs/execute machinery. Returns the run_id so the UI
+// existing executeAgent function. Returns the run_id so the UI
 // can poll for the result.
+//
+// GT3 tasks bypass truth-envelope preflight because the context
+// is ALREADY grounded — the task ships with customer + services +
+// keyword + scoring + match state baked in by Phase 3. No need
+// to re-fetch Google OAuth just to draft a page in Hebrew.
 export async function executeGT3Task(taskId, kind) {
   const sb = getGT3Supabase();
   const table = kind === 'channel' ? 'gt3_channel_tasks' : 'gt3_action_tasks';
 
-  // Fetch task
-  const { data: task, error: tErr } = await sb.from(table)
-    .select('*')
-    .eq('id', taskId)
-    .single();
+  const { data: task, error: tErr } = await sb.from(table).select('*').eq('id', taskId).single();
   if (tErr || !task) return svcResult({ ok: false, source: 'execute', errors: [tErr?.message || 'task not found'] });
   if (task.status === 'done') return svcResult({ ok: true, source: 'execute', data: { already_done: true, task_id: taskId } });
 
-  // Get the agent_template_id for the assigned agent_slug
   const { data: agent } = await sb.from('agent_templates')
     .select('id, name, slug').eq('slug', task.assigned_agent).maybeSingle();
   if (!agent) {
-    return svcResult({ ok: false, source: 'execute',
-      errors: [`No agent template found for slug="${task.assigned_agent}"`]
-    });
+    await sb.from(table).update({
+      status: 'failed',
+      description_he: `Agent "${task.assigned_agent}" not found`,
+      updated_at: new Date().toISOString(),
+    }).eq('id', taskId);
+    return svcResult({ ok: false, source: 'execute', errors: [`No agent template found for slug="${task.assigned_agent}"`] });
   }
 
-  // Resolve legacy client_id for the runs table
   const { data: customer } = await sb.from('gt3_customers')
     .select('legacy_client_id, name').eq('id', task.customer_id).single();
   const legacyClientId = customer?.legacy_client_id;
@@ -329,46 +331,109 @@ export async function executeGT3Task(taskId, kind) {
     return svcResult({ ok: false, source: 'execute', errors: ['No legacy_client_id — cannot bridge to runs'] });
   }
 
-  // Build grounded context for the LLM
+  // Build grounded context
   const context = await buildTaskContext(task, kind);
 
-  // Mark task in_progress immediately
+  // Mark task in_progress
   await sb.from(table).update({ status: 'in_progress', updated_at: new Date().toISOString() }).eq('id', taskId);
 
-  // Insert a runs row that references the GT3 task
-  const { data: run, error: rErr } = await sb.from('runs').insert({
-    client_id: legacyClientId,
-    agent_template_id: agent.id,
-    status: 'running',
-    input: {
-      source: 'gt3_task',
-      task_id: taskId,
-      task_kind: kind,
-      task_type: task.task_type,
+  // CRITICAL: actually invoke the agent runtime. Previously we just inserted
+  // a 'runs' row and walked away — the row sat at 'running' forever.
+  // We kick off executeAgent asynchronously (don't block the HTTP request)
+  // and poll the run to update the task status.
+  try {
+    const { executeAgent } = await import('../../functions/core.js');
+
+    // Fire-and-forget — the agent runtime writes its own run row.
+    // We pass the GT3 context in taskPayload so the agent has grounded data
+    // and skip_preflight=true to bypass Google OAuth check (not needed for
+    // tasks that work with already-grounded GT3 context).
+    const taskPayload = {
+      triggered_by: 'gt3_task',
+      gt3_task_id: taskId,
+      gt3_task_kind: kind,
+      gt3_task_type: task.task_type,
+      gt3_skip_preflight: true,
       priority_label: task.priority_label,
       title_he: task.title_he,
       description_he: task.description_he,
       gt3_context: context,
-    },
-    created_at: new Date().toISOString(),
-  }).select().single();
-  if (rErr) {
-    // Revert the in_progress status so the task can be re-attempted
-    await sb.from(table).update({ status: 'open', updated_at: new Date().toISOString() }).eq('id', taskId);
-    return svcResult({ ok: false, source: 'execute', errors: [`runs insert: ${rErr.message}`] });
-  }
+    };
 
-  return svcResult({
-    ok: true, source: 'execute',
-    data: {
-      task_id: taskId,
-      run_id: run.id,
-      agent_slug: task.assigned_agent,
-      agent_name: agent.name,
-      status: 'dispatched',
-      message: 'Task dispatched to agent runtime. Monitor the run to see the agent\'s output.',
-    },
-  });
+    // Kick off asynchronously — don't await (would exceed HTTP timeout for complex tasks)
+    const runPromise = executeAgent(legacyClientId, agent.id, taskPayload, {
+      triggeredBy: 'gt3_task_executor',
+    });
+
+    // Wait briefly so we can grab the run_id
+    const result = await Promise.race([
+      runPromise,
+      new Promise(resolve => setTimeout(() => resolve({ __timeout: true }), 3000)),
+    ]);
+
+    if (result?.__timeout) {
+      // Agent is still running — that's fine, task will complete async.
+      // The gt3-auto-execute cron or a separate poller will update task status
+      // when the run finishes. For now, record a provisional run_id if we can.
+      runPromise.then(async (r) => {
+        try {
+          await finalizeTaskFromRun(sb, table, taskId, r);
+        } catch {}
+      }).catch(async (err) => {
+        await sb.from(table).update({
+          status: 'failed',
+          description_he: `Agent run error: ${err.message}`,
+          updated_at: new Date().toISOString(),
+        }).eq('id', taskId);
+      });
+      return svcResult({
+        ok: true, source: 'execute',
+        data: {
+          task_id: taskId,
+          run_id: null,
+          agent_slug: task.assigned_agent,
+          agent_name: agent.name,
+          status: 'running_async',
+          message: 'Agent is running. Task will update when complete (usually 30-90s).',
+        },
+      });
+    }
+
+    // Agent completed inside the timeout
+    await finalizeTaskFromRun(sb, table, taskId, result);
+    return svcResult({
+      ok: true, source: 'execute',
+      data: {
+        task_id: taskId,
+        run_id: result?.runId,
+        agent_slug: task.assigned_agent,
+        agent_name: agent.name,
+        status: result?.blocked ? 'blocked' : result?.success === false ? 'failed' : 'done',
+        message: result?.output?.message || 'Task completed.',
+      },
+    });
+  } catch (err) {
+    // Agent invocation exploded — record the real error on the task
+    await sb.from(table).update({
+      status: 'failed',
+      description_he: `Execute error: ${err.message}`,
+      updated_at: new Date().toISOString(),
+    }).eq('id', taskId);
+    return svcResult({ ok: false, source: 'execute', errors: [err.message] });
+  }
+}
+
+async function finalizeTaskFromRun(sb, table, taskId, runResult) {
+  const status = runResult?.blocked ? 'blocked'
+    : runResult?.success === false ? 'failed'
+    : 'done';
+  const output = runResult?.output || null;
+  const update = { status, updated_at: new Date().toISOString() };
+  if (output) {
+    // Store the agent's output in description_he (JSON) for UI render
+    try { update.description_he = JSON.stringify(output).slice(0, 8000); } catch {}
+  }
+  await sb.from(table).update(update).eq('id', taskId);
 }
 
 // Auto-execute the top N open tasks across all customers.

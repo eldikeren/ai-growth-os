@@ -354,28 +354,38 @@ ${scopeGuardrails.map((g, i) => `--- GUARDRAIL ${i + 1} ---\n${g.content}`).join
   // If the agent cannot produce verified output (missing
   // connectors, missing selected assets, etc.), block the run
   // BEFORE calling OpenAI. No more hallucinated authority.
+  //
+  // EXCEPTION: GT3 tasks bypass preflight because the context is
+  // already grounded (customer, services, keyword, scoring, match
+  // state are all baked into the task payload). A Hebrew page
+  // draft doesn't need Google OAuth to be valid.
   // ──────────────────────────────────────────────────────────
+  const skipPreflight = taskPayload?.gt3_skip_preflight === true;
   try {
-    const preflight = await runPreflight(supabase, clientId, agent.slug);
-    if (!preflight.passed) {
-      const blockedOutput = {
-        status: 'execution_blocked',
-        reason: 'preflight_failed',
-        preflight,
-        blockers: preflight.blockers,
-        required_actions: preflight.blockers.map(b =>
-          b.kind === 'connector' ? `Connect or reselect ${b.provider} account` : `Complete client profile field: ${b.field}`
-        ),
-        message: `Agent ${agent.name} cannot run because required data sources are not verified. ${preflight.blockers.length} blocker(s).`,
-      };
-      await supabase.from('runs').update({
-        status: 'blocked',
-        output: blockedOutput,
-        completed_at: new Date().toISOString(),
-        duration_ms: Date.now() - startTime,
-      }).eq('id', run.id);
-      emitAgentEvent(clientId, agent, 'blocked', run.id, `Preflight failed: ${preflight.blockers.map(b => b.reason).join(', ')}`, { blockers: preflight.blockers });
-      return { success: false, runId: run.id, output: blockedOutput, blocked: true };
+    if (skipPreflight) {
+      console.log(`[PREFLIGHT] ${agent.slug} skipped (GT3 task with grounded context)`);
+    } else {
+      const preflight = await runPreflight(supabase, clientId, agent.slug);
+      if (!preflight.passed) {
+        const blockedOutput = {
+          status: 'execution_blocked',
+          reason: 'preflight_failed',
+          preflight,
+          blockers: preflight.blockers,
+          required_actions: preflight.blockers.map(b =>
+            b.kind === 'connector' ? `Connect or reselect ${b.provider} account` : `Complete client profile field: ${b.field}`
+          ),
+          message: `Agent ${agent.name} cannot run because required data sources are not verified. ${preflight.blockers.length} blocker(s).`,
+        };
+        await supabase.from('runs').update({
+          status: 'blocked',
+          output: blockedOutput,
+          completed_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime,
+        }).eq('id', run.id);
+        emitAgentEvent(clientId, agent, 'blocked', run.id, `Preflight failed: ${preflight.blockers.map(b => b.reason).join(', ')}`, { blockers: preflight.blockers });
+        return { success: false, runId: run.id, output: blockedOutput, blocked: true };
+      }
     }
   } catch (pfErr) {
     console.warn(`[PREFLIGHT] ${agent.slug} preflight errored, continuing anyway:`, pfErr.message);

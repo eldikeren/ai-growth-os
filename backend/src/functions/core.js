@@ -78,9 +78,14 @@ const openai = new OpenAI({
   maxRetries: 0,     // No retries — each retry adds another 35s, burns the execution budget
 });
 
-// 3 iterations × (35s LLM + 28s tool) = 189s, + final LLM (35s) + DB writes = ~230s total
-// Safely under 300s Vercel hard limit even when an agent has no data and runs full iteration count
-const MAX_TOOL_ITERATIONS = 3;
+// 5 iterations gives slow agents (technical-seo Phase 6, content-distribution multi-channel,
+// website-content with DALL-E image gen) enough room to complete their workflows. In practice
+// most LLM calls finish in 5-15s and most tool calls in 1-5s, so 5 iterations fits under the
+// 180s EXECUTION_TIMEOUT_MS safety net. If it exceeds, the graceful timeout produces partial
+// results rather than a crash. Bumped from 3 on 2026-04-17 after observing that content-
+// distribution and technical-seo-crawl agents were stopping at 1-2 tool calls without reaching
+// their Phase 6 / distribution steps.
+const MAX_TOOL_ITERATIONS = 5;
 
 // ============================================================
 // VALIDATION GOVERNANCE — action_type → required validators

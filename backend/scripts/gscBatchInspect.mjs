@@ -30,6 +30,53 @@ const LIMIT = parseInt(process.env.LIMIT || '0', 10); // 0 = no limit
 // ──────────────────────────────────────────────────────────────────
 // 1. Get + refresh Google OAuth token for Yaniv
 // ──────────────────────────────────────────────────────────────────
+// Force a fresh token via refresh_token (even if DB thinks current is valid).
+// Used when the API returns 401 mid-run — DB might say valid but Google
+// revoked it (e.g. rate limit, concurrent session).
+async function getFreshToken() {
+  const { data: cred } = await supabase.from('oauth_credentials')
+    .select('id, refresh_token_encrypted, encryption_iv')
+    .eq('client_id', YANIV).eq('provider', 'google')
+    .order('connected_at', { ascending: false }).limit(1).maybeSingle();
+  if (!cred?.refresh_token_encrypted) throw new Error('No refresh token available');
+
+  const ivParts = (cred.encryption_iv || '').split(':');
+  if (ivParts.length < 2) throw new Error('Invalid IV format — need refresh IV');
+  const refreshDecipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), Buffer.from(ivParts[1], 'hex'));
+  let refreshToken = refreshDecipher.update(cred.refresh_token_encrypted, 'hex', 'utf8');
+  refreshToken += refreshDecipher.final('utf8');
+
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID.trim(),
+      client_secret: process.env.GOOGLE_CLIENT_SECRET.trim(),
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  });
+  const tokens = await tokenRes.json();
+  if (!tokens.access_token) throw new Error('Refresh failed: ' + JSON.stringify(tokens));
+
+  // Persist new token so the backend can reuse it later
+  const newIv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENC_KEY, 'hex'), newIv);
+  let encAccess = cipher.update(tokens.access_token, 'utf8', 'hex');
+  encAccess += cipher.final('hex');
+  const newExpiry = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
+  await supabase.from('oauth_credentials').update({
+    access_token_encrypted: encAccess,
+    encryption_iv: newIv.toString('hex') + ':' + ivParts[1],
+    expires_at: newExpiry,
+    status: 'active',
+    last_refresh_at: new Date().toISOString(),
+    last_error: null,
+  }).eq('id', cred.id);
+  console.log(`[token] fresh, expires in ${tokens.expires_in}s`);
+  return tokens.access_token;
+}
+
 async function getToken() {
   const { data: cred } = await supabase.from('oauth_credentials')
     .select('id, access_token_encrypted, refresh_token_encrypted, encryption_iv, expires_at, status')
@@ -124,14 +171,21 @@ async function fetchRobots() {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 4. URL Inspection API
+// 4. URL Inspection API (with retry on 401 by refreshing token)
 // ──────────────────────────────────────────────────────────────────
-async function inspectUrl(token, url) {
+let currentToken = null;
+
+async function inspectUrl(url, allowRefresh = true) {
   const res = await fetch('https://searchconsole.googleapis.com/v1/urlInspection/index:inspect', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${currentToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ inspectionUrl: url, siteUrl: PROPERTY }),
   });
+  if (res.status === 401 && allowRefresh) {
+    console.log('  [token] 401 — refreshing and retrying');
+    currentToken = await getFreshToken();
+    return inspectUrl(url, false);
+  }
   if (!res.ok) {
     const err = await res.text().catch(() => '');
     return { url, error: `HTTP ${res.status}: ${err.slice(0, 300)}` };
@@ -181,17 +235,31 @@ async function main() {
     process.exit(1);
   }
 
-  const toInspect = LIMIT > 0 ? urls.slice(0, LIMIT) : urls;
+  currentToken = token;
+  // If SKIP_ALREADY_INSPECTED, drop URLs already in gsc_diagnostics
+  let toInspect = LIMIT > 0 ? urls.slice(0, LIMIT) : urls;
+  if (process.env.SKIP_ALREADY_INSPECTED === '1') {
+    const { data: existing } = await supabase.from('gsc_diagnostics')
+      .select('url').eq('client_id', YANIV);
+    const seen = new Set((existing || []).map(r => r.url));
+    const before = toInspect.length;
+    toInspect = toInspect.filter(u => !seen.has(u));
+    console.log(`[skip] ${before - toInspect.length} URLs already inspected, ${toInspect.length} remaining`);
+  }
   console.log(`[inspect] Running URL Inspection on ${toInspect.length} URLs (LIMIT=${LIMIT || 'none'})`);
 
   const results = [];
   let i = 0;
   for (const url of toInspect) {
     i++;
+    // Proactive refresh every 40 URLs to avoid mid-run 401s.
+    if (i > 1 && i % 40 === 0) {
+      try { currentToken = await getFreshToken(); } catch (e) { console.warn(`[token] refresh failed: ${e.message}`); }
+    }
     try {
-      const r = await inspectUrl(token, url);
+      const r = await inspectUrl(url);
       results.push(r);
-      if (i % 10 === 0) console.log(`  [${i}/${toInspect.length}] ${r.coverage_state || r.error || '?'}  ${url.slice(0, 80)}`);
+      if (i % 10 === 0 || r.error) console.log(`  [${i}/${toInspect.length}] ${r.coverage_state || r.error || '?'}  ${url.slice(0, 80)}`);
       // Rate limit: GSC allows ~600 queries/min per property. Sleep 150ms = ~400/min.
       await new Promise(r => setTimeout(r, 150));
     } catch (e) {

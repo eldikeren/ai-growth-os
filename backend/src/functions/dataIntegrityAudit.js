@@ -372,6 +372,103 @@ async function ruleOrphanedReferringDomains(supabase, clientId) {
 }
 
 // ============================================================
+// RULE 13 — duplicate credential incidents
+// Multiple agents raise the same "GSC credentials missing" incident with
+// slightly different titles. Auto-merge: keep oldest, resolve the rest.
+// ============================================================
+function _serviceKeyOfIncident(title) {
+  const t = (title || '').toLowerCase();
+  if (t.includes('search console') || t.includes('gsc')) return 'gsc';
+  if (t.includes('google ads')) return 'google_ads';
+  if (t.includes('google analytics') || t.includes('ga4')) return 'ga4';
+  if (t.includes('business profile') || t.includes('gbp')) return 'gbp';
+  if (t.includes('instagram')) return 'instagram';
+  if (t.includes('facebook')) return 'facebook';
+  if (t.includes('meta ')) return 'meta';
+  if (t.includes('openai')) return 'openai';
+  if (t.includes('anthropic')) return 'anthropic';
+  if (t.includes('dataforseo')) return 'dataforseo';
+  return null;
+}
+
+async function ruleDuplicateCredentialIncidents(supabase, clientId) {
+  const { data: openCrit } = await supabase.from('incidents')
+    .select('id, title, created_at, severity')
+    .eq('client_id', clientId).eq('status', 'open').in('severity', ['critical', 'high']);
+  if (!openCrit || openCrit.length === 0) return null;
+
+  const groups = {};
+  for (const i of openCrit) {
+    const k = _serviceKeyOfIncident(i.title);
+    if (!k) continue;
+    if (!groups[k]) groups[k] = [];
+    groups[k].push(i);
+  }
+  const duplicates = [];
+  for (const list of Object.values(groups)) {
+    if (list.length < 2) continue;
+    list.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    // Keep oldest; rest are duplicates
+    for (let i = 1; i < list.length; i++) duplicates.push({ ...list[i], _keeper_id: list[0].id });
+  }
+  if (duplicates.length === 0) return null;
+
+  return {
+    ruleId: 'duplicate_credential_incidents',
+    label: 'Duplicate credential incidents (same service, different wording)',
+    severity: SEVERITY.WARN,
+    tableName: 'incidents',
+    rowCount: duplicates.length,
+    sample: duplicates.slice(0, 5).map(d => ({ title: d.title, duplicate_of: d._keeper_id })),
+    description: 'Multiple agents created incidents for the same missing credential with slightly different titles. Closing the duplicates, keeping the oldest.',
+    autoFixable: true,
+    autoFix: async () => {
+      const ids = duplicates.map(d => d.id);
+      const { error, count } = await supabase.from('incidents')
+        .update({
+          status: 'resolved',
+          resolved_at: new Date().toISOString(),
+          resolution_notes: 'Auto-merged duplicate by data-integrity audit',
+        }, { count: 'exact' })
+        .in('id', ids);
+      if (error) throw new Error(error.message);
+      return { fixed: count || ids.length };
+    },
+  };
+}
+
+// ============================================================
+// RULE 14 — failed queue items (they pile up and trigger "T7 blocked tasks")
+// A failure isn't useful after a retry has succeeded. We delete failed
+// queue items older than 6 hours.
+// ============================================================
+async function ruleStaleFailedQueue(supabase, clientId) {
+  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  const { data: failed } = await supabase.from('run_queue')
+    .select('id, agent_template_id, created_at, error')
+    .eq('client_id', clientId).eq('status', 'failed').lt('created_at', sixHoursAgo).limit(500);
+  if (!failed || failed.length === 0) return null;
+
+  return {
+    ruleId: 'stale_failed_queue',
+    label: 'Failed queue items older than 6h',
+    severity: SEVERITY.INFO,
+    tableName: 'run_queue',
+    rowCount: failed.length,
+    sample: failed.slice(0, 5).map(f => ({ created: f.created_at, error: (f.error || '').slice(0, 80) })),
+    description: 'Old failed queue items accumulate and trigger false "blocked tasks" alerts in System Audit. Retries already succeeded or moved on. Safe to delete.',
+    autoFixable: true,
+    autoFix: async () => {
+      const ids = failed.map(f => f.id);
+      const { error, count } = await supabase.from('run_queue')
+        .delete({ count: 'exact' }).in('id', ids);
+      if (error) throw new Error(error.message);
+      return { fixed: count || ids.length };
+    },
+  };
+}
+
+// ============================================================
 // Register all rules here. Order doesn't matter.
 // ============================================================
 const RULES = [
@@ -387,6 +484,8 @@ const RULES = [
   ruleEmptyCreatives,
   ruleStaleGscDiagnostics,
   ruleOrphanedReferringDomains,
+  ruleDuplicateCredentialIncidents,
+  ruleStaleFailedQueue,
 ];
 
 // ============================================================

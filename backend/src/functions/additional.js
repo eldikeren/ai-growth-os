@@ -839,6 +839,20 @@ export async function syncBacklinkIntelligence(clientId) {
       supabase.from('missing_referring_domains').delete().eq('client_id', clientId).eq('imported_from_sheet', false),
     ]);
 
+    // RECONCILIATION: delete any sheet-imported "missing" rows where we actually
+    // have the link now (e.g. DataForSEO or Google discovery surfaced it).
+    // Without this, stale sheet imports keep showing up as "missing" forever.
+    if (ourDomainsSet.size > 0) {
+      const ownedDomainsArray = Array.from(ourDomainsSet);
+      const { error: reconErr, count: reconCount } = await supabase
+        .from('missing_referring_domains')
+        .delete({ count: 'exact' })
+        .eq('client_id', clientId)
+        .in('domain', ownedDomainsArray);
+      if (reconErr) summary.errors.push(`reconcile_missing: ${reconErr.message}`);
+      else if (reconCount) summary.reconciled_stale_missing = reconCount;
+    }
+
     const gapRows = [];
     const missingRows = [];
     for (const [domain, info] of gapByDomain.entries()) {

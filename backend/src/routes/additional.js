@@ -16,6 +16,7 @@ import {
   runFullVerification, snapshotKeywordPositions, recordKpiSnapshot
 } from '../functions/additional.js';
 import { deployApprovedChange } from '../functions/deploy.js';
+import { runDataIntegrityAudit } from '../functions/dataIntegrityAudit.js';
 
 const router = express.Router();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -1342,6 +1343,61 @@ router.get('/cron/audit-snapshot', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── DATA INTEGRITY ROUTES ─────────────────────────────────────
+// List findings for a client
+router.get('/clients/:clientId/data-integrity', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('data_integrity_findings')
+      .select('*').eq('client_id', req.params.clientId)
+      .order('severity', { ascending: false })
+      .order('last_seen_at', { ascending: false });
+    if (error) throw error;
+    // Severity ordering: critical > error > warn > info
+    const order = { critical: 0, error: 1, warn: 2, info: 3 };
+    const sorted = (data || []).sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+    res.json({ findings: sorted });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Trigger audit on-demand (for a single client or all)
+router.post('/data-integrity/audit', async (req, res) => {
+  try {
+    const clientId = req.body?.clientId || null;
+    const autoFix = req.body?.autoFix !== false; // default true
+    const report = await runDataIntegrityAudit(supabase, { clientId, autoFix });
+    res.json(report);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Manual "Fix" button — re-runs the single rule's autoFix logic for a finding.
+// (The audit runs every 5 min so most findings auto-resolve; this is for when
+// the user explicitly wants to retry NOW without waiting.)
+router.post('/data-integrity/findings/:id/fix', async (req, res) => {
+  try {
+    const { data: finding } = await supabase.from('data_integrity_findings')
+      .select('*').eq('id', req.params.id).single();
+    if (!finding) return res.status(404).json({ error: 'Finding not found' });
+    if (!finding.auto_fixable) return res.status(400).json({ error: 'This finding is not auto-fixable — resolve it manually in the relevant view.' });
+
+    // Re-run the full audit for THIS client; rule's autoFix will run again
+    const report = await runDataIntegrityAudit(supabase, { clientId: finding.client_id, autoFix: true });
+    res.json({ fixed: true, audit: report });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Dismiss a finding (user acknowledges it and doesn't want to see it again).
+// Audit will re-create if the condition returns — the dismiss is per-occurrence.
+router.post('/data-integrity/findings/:id/dismiss', async (req, res) => {
+  try {
+    const reason = req.body?.reason || null;
+    const { error } = await supabase.from('data_integrity_findings')
+      .update({ status: 'dismissed', dismissed_reason: reason })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ dismissed: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── SELF-HEALING CRON — runs every 5 min ─────────────────────
 // Continuously monitors and auto-fixes system health issues
 router.get('/cron/self-heal', async (req, res) => {
@@ -1616,10 +1672,26 @@ router.get('/cron/self-heal', async (req, res) => {
       errors.push({ action: 'auto_deploy_stuck_approvals', error: e.message });
     }
 
-    // ── 8. Log self-heal snapshot ──────────────────────────────
+    // ── 8. Data Integrity Audit — cross-table contradictions ──
+    let integrityReport = null;
+    try {
+      integrityReport = await runDataIntegrityAudit(supabase, { autoFix: true });
+      if (integrityReport.total_findings > 0) {
+        fixes.push({
+          action: 'data_integrity_audit',
+          total_findings: integrityReport.total_findings,
+          auto_fixed: integrityReport.total_auto_fixed,
+        });
+      }
+    } catch (e) {
+      errors.push({ action: 'data_integrity_audit', error: e.message });
+    }
+
+    // ── 9. Log self-heal snapshot ──────────────────────────────
     const { count: openCount } = await supabase.from('incidents').select('id', { count: 'exact', head: true }).eq('status', 'open');
     const { count: runningCount } = await supabase.from('runs').select('id', { count: 'exact', head: true }).eq('status', 'running');
     const { count: queuedCount } = await supabase.from('run_queue').select('id', { count: 'exact', head: true }).eq('status', 'queued');
+    const { count: openFindingsCount } = await supabase.from('data_integrity_findings').select('id', { count: 'exact', head: true }).eq('status', 'open');
 
     res.json({
       healed_at: new Date().toISOString(),
@@ -1629,7 +1701,9 @@ router.get('/cron/self-heal', async (req, res) => {
         open_incidents: openCount || 0,
         running_agents: runningCount || 0,
         queued_items: queuedCount || 0,
-      }
+        open_data_integrity_findings: openFindingsCount || 0,
+      },
+      data_integrity: integrityReport,
     });
   } catch (err) {
     res.status(500).json({ error: err.message, fixes });

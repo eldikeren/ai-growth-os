@@ -34,6 +34,7 @@ const TasksView = lazy(() => import('./views/TasksView.jsx'));
 const SocialView = lazy(() => import('./views/SocialView.jsx'));
 const MissionControlView = lazy(() => import('./views/MissionControlView.jsx'));
 const GT3CommandCenterView = lazy(() => import('./views/GT3CommandCenterView.jsx'));
+const DataHealthView = lazy(() => import('./views/DataHealthView.jsx'));
 
 function ViewLoader() {
   return (
@@ -215,6 +216,7 @@ export default function App() {
           <Suspense fallback={<ViewLoader />}>
             <div className="view-content">
               {view === 'dashboard' && <Dashboard {...viewProps} />}
+              {view === 'data-health' && <DataHealthView clientId={clientId} />}
               {view === 'system-audit' && <SystemAuditView clientId={clientId} />}
               {view === 'agents' && <AgentsView clientId={clientId} />}
               {view === 'runs' && <RunsView clientId={clientId} focusRunId={focusRunId} onFocusConsumed={() => setFocusRunId(null)} />}

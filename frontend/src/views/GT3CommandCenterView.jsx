@@ -279,12 +279,17 @@ function TaskRow({ task, kind, onExecute }) {
         method: 'POST',
         body: { kind },
       });
-      if (r?.ok && r?.data?.run_id) {
-        setRunId(r.data.run_id);
+      // Success means the backend accepted the dispatch. run_id may be null if
+      // the agent is still starting up — that's fine, the task is running on the
+      // server. Only treat as failed when ok:false OR the backend explicitly
+      // returned status:'failed'.
+      const backendStatus = r?.data?.status;
+      if (r?.ok && backendStatus !== 'failed') {
+        if (r?.data?.run_id) setRunId(r.data.run_id);
         setState('dispatched');
         if (onExecute) onExecute(task.id);
       } else {
-        setErrorMsg(r?.errors?.[0] || 'Execute failed');
+        setErrorMsg(r?.errors?.[0] || r?.data?.message || 'Execute failed');
         setState('failed');
       }
     } catch (e) {

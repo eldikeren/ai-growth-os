@@ -469,6 +469,89 @@ async function ruleStaleFailedQueue(supabase, clientId) {
 }
 
 // ============================================================
+// RULE 15 — stuck GT3 tasks in "in_progress" state
+// When Vercel serverless kills the background promise before the task
+// is finalized, the task stays in_progress forever. This rule looks for
+// in_progress tasks older than 10 minutes and either finalizes them
+// from the matching run row (if complete) or marks them failed (if no
+// run exists). Prevents the UI from showing stale "in progress" for
+// tasks that are actually done / were abandoned.
+// ============================================================
+async function ruleStuckGt3InProgressTasks(supabase, clientId) {
+  // Resolve gt3 customer id from legacy client id
+  const { data: cust } = await supabase.from('gt3_customers')
+    .select('id').eq('legacy_client_id', clientId).maybeSingle();
+  if (!cust) return null;
+
+  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+  // Check both action + channel tables
+  const stuckRows = [];
+  for (const table of ['gt3_action_tasks', 'gt3_channel_tasks']) {
+    const { data: rows } = await supabase.from(table)
+      .select('id, assigned_agent, task_type, title_he, updated_at')
+      .eq('customer_id', cust.id).eq('status', 'in_progress')
+      .lt('updated_at', tenMinAgo).limit(100);
+    for (const r of rows || []) stuckRows.push({ ...r, _table: table });
+  }
+  if (stuckRows.length === 0) return null;
+
+  return {
+    ruleId: 'stuck_gt3_in_progress',
+    label: 'GT3 tasks stuck in "in_progress" > 10 min',
+    severity: SEVERITY.ERROR,
+    tableName: 'gt3_action_tasks / gt3_channel_tasks',
+    rowCount: stuckRows.length,
+    sample: stuckRows.slice(0, 5).map(s => ({
+      table: s._table,
+      agent: s.assigned_agent,
+      type: s.task_type,
+      title: (s.title_he || '').slice(0, 80),
+      last_update: s.updated_at,
+    })),
+    description: 'Vercel serverless kills the background agent promise once the HTTP response is sent, leaving GT3 tasks frozen at "in_progress". This rule finalizes them from the matching run row, or fails them if no run was ever created.',
+    autoFixable: true,
+    autoFix: async () => {
+      let fixed = 0;
+      for (const s of stuckRows) {
+        // Look for a run created near the time of task start (within 15 min window)
+        const taskStart = new Date(s.updated_at).getTime();
+        const { data: matchingRuns } = await supabase.from('runs')
+          .select('id, status, output, error, updated_at, agent_templates(slug)')
+          .eq('client_id', clientId)
+          .eq('triggered_by', 'gt3_task_executor')
+          .gte('created_at', new Date(taskStart - 60 * 1000).toISOString())
+          .lte('created_at', new Date(taskStart + 15 * 60 * 1000).toISOString())
+          .order('created_at', { ascending: false })
+          .limit(5);
+
+        const match = (matchingRuns || []).find(r => r.agent_templates?.slug === s.assigned_agent);
+
+        let newStatus, notes;
+        if (match && ['success', 'partial', 'executed', 'executed_pending_validation', 'pending_approval'].includes(match.status)) {
+          newStatus = 'done';
+          notes = `Finalized from run ${match.id.slice(0, 8)} (status=${match.status})`;
+        } else if (match && ['failed', 'blocked'].includes(match.status)) {
+          newStatus = 'failed';
+          notes = `Agent run ${match.status}: ${(match.error || '').slice(0, 200)}`;
+        } else {
+          newStatus = 'failed';
+          notes = 'Stuck in_progress with no matching run — Vercel killed dispatch before run was created. Retry from the UI.';
+        }
+
+        const { error } = await supabase.from(s._table).update({
+          status: newStatus,
+          description_he: notes,
+          updated_at: new Date().toISOString(),
+        }).eq('id', s.id);
+        if (!error) fixed++;
+      }
+      return { fixed };
+    },
+  };
+}
+
+// ============================================================
 // Register all rules here. Order doesn't matter.
 // ============================================================
 const RULES = [
@@ -486,6 +569,7 @@ const RULES = [
   ruleOrphanedReferringDomains,
   ruleDuplicateCredentialIncidents,
   ruleStaleFailedQueue,
+  ruleStuckGt3InProgressTasks,
 ];
 
 // ============================================================

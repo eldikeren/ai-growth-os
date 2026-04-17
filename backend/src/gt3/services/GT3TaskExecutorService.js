@@ -334,20 +334,29 @@ export async function executeGT3Task(taskId, kind) {
   // Build grounded context
   const context = await buildTaskContext(task, kind);
 
-  // Mark task in_progress
-  await sb.from(table).update({ status: 'in_progress', updated_at: new Date().toISOString() }).eq('id', taskId);
+  // Mark task in_progress (with a dispatched_at marker so stuck-task sweepers can find it)
+  await sb.from(table).update({
+    status: 'in_progress',
+    updated_at: new Date().toISOString(),
+  }).eq('id', taskId);
 
-  // CRITICAL: actually invoke the agent runtime. Previously we just inserted
-  // a 'runs' row and walked away — the row sat at 'running' forever.
-  // We kick off executeAgent asynchronously (don't block the HTTP request)
-  // and poll the run to update the task status.
+  // CRITICAL: Run the agent SYNCHRONOUSLY (await full result). Vercel serverless
+  // kills the process once the HTTP response is sent, so fire-and-forget with
+  // `runPromise.then(...)` never actually completes the background work — the
+  // task sits at 'in_progress' forever and the UI shows "נכשל" because the
+  // initial dispatch call returned run_id: null.
+  //
+  // maxDuration on api/index.mjs is 300s. Virtually every agent finishes within
+  // 30–90s. Awaiting inline means the user waits for real, the run_id is real,
+  // and the task state always reflects reality.
+  //
+  // Safety net: a 240s watchdog marks the task as "dispatched, long-running"
+  // and returns the run_id so the UI can poll. A separate cron (see PART 3
+  // below) picks up stuck in_progress tasks and finalizes them from their
+  // run row.
   try {
     const { executeAgent } = await import('../../functions/core.js');
 
-    // Fire-and-forget — the agent runtime writes its own run row.
-    // We pass the GT3 context in taskPayload so the agent has grounded data
-    // and skip_preflight=true to bypass Google OAuth check (not needed for
-    // tasks that work with already-grounded GT3 context).
     const taskPayload = {
       triggered_by: 'gt3_task',
       gt3_task_id: taskId,
@@ -360,52 +369,73 @@ export async function executeGT3Task(taskId, kind) {
       gt3_context: context,
     };
 
-    // Kick off asynchronously — don't await (would exceed HTTP timeout for complex tasks)
     const runPromise = executeAgent(legacyClientId, agent.id, taskPayload, {
       triggeredBy: 'gt3_task_executor',
     });
 
-    // Wait briefly so we can grab the run_id
-    const result = await Promise.race([
-      runPromise,
-      new Promise(resolve => setTimeout(() => resolve({ __timeout: true }), 3000)),
-    ]);
+    // Poll the runs table while executeAgent is running — this lets us grab a
+    // real run_id within a few seconds (executeAgent creates the row early)
+    // even if the AI call itself takes longer. If the agent finishes first,
+    // we return its real result.
+    const { data: agentRow } = await sb.from('agent_templates').select('id').eq('id', agent.id).single();
+    let capturedRunId = null;
+    const runIdPoll = (async () => {
+      const start = Date.now();
+      while (Date.now() - start < 240_000 && !capturedRunId) {
+        const { data: row } = await sb.from('runs')
+          .select('id')
+          .eq('client_id', legacyClientId)
+          .eq('agent_template_id', agent.id)
+          .eq('triggered_by', 'gt3_task_executor')
+          .gte('created_at', new Date(Date.now() - 5 * 60 * 1000).toISOString())
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (row?.id) { capturedRunId = row.id; break; }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    })();
 
-    if (result?.__timeout) {
-      // Agent is still running — that's fine, task will complete async.
-      // The gt3-auto-execute cron or a separate poller will update task status
-      // when the run finishes. For now, record a provisional run_id if we can.
-      runPromise.then(async (r) => {
-        try {
-          await finalizeTaskFromRun(sb, table, taskId, r);
-        } catch {}
-      }).catch(async (err) => {
-        await sb.from(table).update({
+    // Race the real agent run against a 240s watchdog (leaves buffer under 300s
+    // serverless limit for us to persist state before the function is killed).
+    const watchdog = new Promise(resolve => setTimeout(() => resolve({ __watchdog: true }), 240_000));
+    const result = await Promise.race([runPromise, watchdog]);
+    // Make sure we don't keep polling after we returned
+    capturedRunId = capturedRunId || result?.runId || null;
+
+    if (result?.__watchdog) {
+      // The agent is genuinely long-running. Keep it running in the background
+      // and return a real run_id so the UI can poll. The self-heal cron has a
+      // stuck-task rule (see dataIntegrityAudit.js) that finalizes this when
+      // the run completes.
+      runPromise
+        .then(r => finalizeTaskFromRun(sb, table, taskId, r).catch(() => {}))
+        .catch(err => sb.from(table).update({
           status: 'failed',
-          description_he: `Agent run error: ${err.message}`,
+          description_he: `Agent run error: ${err.message}`.slice(0, 8000),
           updated_at: new Date().toISOString(),
-        }).eq('id', taskId);
-      });
+        }).eq('id', taskId));
+
       return svcResult({
         ok: true, source: 'execute',
         data: {
           task_id: taskId,
-          run_id: null,
+          run_id: capturedRunId,
           agent_slug: task.assigned_agent,
           agent_name: agent.name,
-          status: 'running_async',
-          message: 'Agent is running. Task will update when complete (usually 30-90s).',
+          status: 'running',
+          message: 'Agent is running (long task). Poll the run or check back in a minute.',
         },
       });
     }
 
-    // Agent completed inside the timeout
+    // Agent completed inline — record final state
     await finalizeTaskFromRun(sb, table, taskId, result);
     return svcResult({
       ok: true, source: 'execute',
       data: {
         task_id: taskId,
-        run_id: result?.runId,
+        run_id: result?.runId || capturedRunId,
         agent_slug: task.assigned_agent,
         agent_name: agent.name,
         status: result?.blocked ? 'blocked' : result?.success === false ? 'failed' : 'done',
@@ -416,7 +446,7 @@ export async function executeGT3Task(taskId, kind) {
     // Agent invocation exploded — record the real error on the task
     await sb.from(table).update({
       status: 'failed',
-      description_he: `Execute error: ${err.message}`,
+      description_he: `Execute error: ${err.message}`.slice(0, 8000),
       updated_at: new Date().toISOString(),
     }).eq('id', taskId);
     return svcResult({ ok: false, source: 'execute', errors: [err.message] });

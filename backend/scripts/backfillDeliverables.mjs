@@ -42,10 +42,11 @@ async function main() {
 
     const hasProposals = Array.isArray(output.proposals) && output.proposals.length > 0;
     const hasCreatives = Array.isArray(output.ad_creatives) || Array.isArray(output.creatives) || Array.isArray(output.ads);
-    if (!hasProposals && !hasCreatives) continue;
+    const hasVariants = Array.isArray(output.proposed_ad_variants) && output.proposed_ad_variants.length > 0;
+    if (!hasProposals && !hasCreatives && !hasVariants) continue;
 
     if (dryRun) {
-      console.log(`  DRY: run=${run.id} slug=${slug} proposals=${output.proposals?.length || 0} creatives=${(output.ad_creatives || output.creatives || output.ads || []).length}`);
+      console.log(`  DRY: run=${run.id} slug=${slug} proposals=${output.proposals?.length || 0} creatives=${(output.ad_creatives || output.creatives || output.ads || []).length} variants=${output.proposed_ad_variants?.length || 0}`);
       continue;
     }
 

@@ -79,24 +79,39 @@ export async function persistAgentDeliverables({ supabase, agent, clientId, runI
   }
 
   // ── 2. Ad creatives (Google Ads) ──
+  // The google-ads-campaign-agent produces `proposed_ad_variants`, but other
+  // agents might use the more common ad_creatives / creatives / ads keys.
+  // Accept all of them.
   const creatives = Array.isArray(output.ad_creatives) ? output.ad_creatives
     : Array.isArray(output.creatives) ? output.creatives
     : Array.isArray(output.ads) ? output.ads
     : [];
+  const variants = Array.isArray(output.proposed_ad_variants) ? output.proposed_ad_variants
+    : Array.isArray(output.ad_variants) ? output.ad_variants
+    : [];
   const adCopies = Array.isArray(output.ad_copy) ? output.ad_copy
     : Array.isArray(output.ad_copies) ? output.ad_copies
     : [];
-  const allAdItems = [...creatives, ...adCopies];
+  const allAdItems = [...creatives, ...variants, ...adCopies];
 
   if (allAdItems.length > 0 && /google.ads|ad.campaign/i.test(agentSlug)) {
     for (const c of allAdItems) {
       try {
         if (!c || typeof c !== 'object') continue;
-        const headline = c.headline || c.title || (Array.isArray(c.headlines) ? c.headlines[0] : null);
-        const primary = c.primary_text || c.body || c.description || c.caption;
+
+        // The agent variants have headlines[] + descriptions[] — take the first
+        // of each as the display value, but keep the whole array in google_creative
+        // so the UI can render all of them.
+        const headlinesArr = Array.isArray(c.headlines) ? c.headlines.filter(Boolean) : [];
+        const descriptionsArr = Array.isArray(c.descriptions) ? c.descriptions.filter(Boolean) : [];
+        const headline = c.headline || c.title || headlinesArr[0] || null;
+        const primary = c.primary_text || c.body || descriptionsArr[0] || c.description || c.caption || null;
+        const description = descriptionsArr[1] || descriptionsArr[0] || c.description || null;
         if (!headline && !primary) continue;
 
         const imageUrl = c.image_url || c.visual_url || (Array.isArray(c.images) ? c.images[0] : null);
+        // Skip pseudo-URLs from integration_asset placeholders
+        const realImageUrl = imageUrl && !/integration_asset/i.test(imageUrl) ? imageUrl : null;
 
         const { data: existing } = await supabase.from('campaign_creatives')
           .select('id')
@@ -106,17 +121,27 @@ export async function persistAgentDeliverables({ supabase, agent, clientId, runI
           .maybeSingle();
         if (existing) continue;
 
+        // Build a richer google_creative payload that the UI can unpack
+        const googleCreative = {
+          ...c,
+          _all_headlines: headlinesArr,
+          _all_descriptions: descriptionsArr,
+          _ad_group: c.ad_group || null,
+          _target_audience: c.target_audience || null,
+          _engagement_style: c.engagement_style || null,
+        };
+
         const { error } = await supabase.from('campaign_creatives').insert({
           client_id: clientId,
-          headline: headline || null,
-          primary_text: primary || null,
-          description: c.description || null,
+          headline,
+          primary_text: primary,
+          description,
           call_to_action: c.cta || c.call_to_action || null,
-          image_url: imageUrl || null,
+          image_url: realImageUrl,
           destination_url: c.destination_url || c.landing_url || null,
-          google_creative: c,
+          google_creative: googleCreative,
           status: 'draft',
-          format: c.format || 'image',
+          format: c.format || (realImageUrl ? 'image' : 'text'),
         });
         if (error) {
           result.errors.push({ kind: 'campaign_creatives', message: error.message });

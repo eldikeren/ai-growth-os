@@ -2376,7 +2376,76 @@ export async function executeTool(toolName, args, clientId, runId) {
       }
 
       case 'propose_website_change': {
-        // ─── 0. APPROVAL GATE ───
+        // ─── 0. CHANGE_TYPE COERCION (must run before dedup + insert) ───
+        // The proposed_changes table has a CHECK constraint on change_type
+        // (see migration 043). Agents occasionally propose values outside the
+        // allow-list — previously that caused a silent INSERT failure and the
+        // user saw "agent succeeded but produced 0 proposals." We normalize
+        // unknown types here via substring heuristics, falling back to
+        // body_content so the proposal is always persisted.
+        const _ALLOWED_CHANGE_TYPES = new Set([
+          'seo_title', 'meta_description', 'h1', 'h2', 'body_content',
+          'schema_markup', 'image_alt', 'canonical_url', 'redirect',
+          'internal_link', 'nav_label', 'cta_text', 'page_slug', 'robots_txt',
+          'social_post', 'google_ads_change', 'code_fix',
+          'trust_signal', 'layout_change', 'ui_copy', 'hero_content',
+          'faq_section', 'cta_button', 'product_section', 'meta_tag',
+          'resource_fix', 'image_replacement', 'video_embed',
+          'testimonial_section', 'pricing_section', 'contact_info',
+          'footer_content', 'header_content', 'sidebar_content',
+          'form_field', 'link_target', 'font_change', 'color_scheme',
+          'spacing_fix', 'accessibility_fix', 'performance_fix'
+        ]);
+        const _rawCT = String(args.change_type || '').toLowerCase().trim();
+        if (!_ALLOWED_CHANGE_TYPES.has(_rawCT)) {
+          let _coerced = 'body_content'; // safe default
+          if (_rawCT.includes('title')) _coerced = 'seo_title';
+          else if (_rawCT.includes('meta') && _rawCT.includes('desc')) _coerced = 'meta_description';
+          else if (_rawCT.includes('meta')) _coerced = 'meta_tag';
+          else if (_rawCT === 'heading_h1' || _rawCT.startsWith('h1')) _coerced = 'h1';
+          else if (_rawCT.startsWith('h2') || _rawCT.includes('subheading')) _coerced = 'h2';
+          else if (_rawCT.includes('schema') || _rawCT.includes('jsonld') || _rawCT.includes('json_ld') || _rawCT.includes('structured')) _coerced = 'schema_markup';
+          else if (_rawCT.includes('alt') && (_rawCT.includes('image') || _rawCT.includes('img'))) _coerced = 'image_alt';
+          else if (_rawCT.includes('canonical')) _coerced = 'canonical_url';
+          else if (_rawCT.includes('redirect')) _coerced = 'redirect';
+          else if (_rawCT.includes('cta') && _rawCT.includes('button')) _coerced = 'cta_button';
+          else if (_rawCT.includes('cta')) _coerced = 'cta_text';
+          else if (_rawCT.includes('nav')) _coerced = 'nav_label';
+          else if (_rawCT.includes('slug') || _rawCT.includes('url_path')) _coerced = 'page_slug';
+          else if (_rawCT.includes('robots')) _coerced = 'robots_txt';
+          else if (_rawCT.includes('social') || _rawCT.endsWith('_post') || _rawCT === 'post') _coerced = 'social_post';
+          else if (_rawCT.includes('google_ads') || _rawCT.includes('adwords') || _rawCT.endsWith('_ad') || _rawCT === 'ad') _coerced = 'google_ads_change';
+          else if (_rawCT.includes('trust') || _rawCT.includes('badge') || _rawCT.includes('award') || _rawCT.includes('certification')) _coerced = 'trust_signal';
+          else if (_rawCT.includes('layout')) _coerced = 'layout_change';
+          else if (_rawCT.includes('hero')) _coerced = 'hero_content';
+          else if (_rawCT.includes('faq')) _coerced = 'faq_section';
+          else if (_rawCT.includes('testimonial')) _coerced = 'testimonial_section';
+          else if (_rawCT.includes('pricing') || _rawCT.includes('price')) _coerced = 'pricing_section';
+          else if (_rawCT.includes('contact')) _coerced = 'contact_info';
+          else if (_rawCT.includes('footer')) _coerced = 'footer_content';
+          else if (_rawCT.includes('header') && !_rawCT.includes('h1') && !_rawCT.includes('h2')) _coerced = 'header_content';
+          else if (_rawCT.includes('sidebar')) _coerced = 'sidebar_content';
+          else if (_rawCT.includes('form')) _coerced = 'form_field';
+          else if (_rawCT.includes('font') || _rawCT.includes('typography') || _rawCT.includes('typeface')) _coerced = 'font_change';
+          else if (_rawCT.includes('color') || _rawCT.includes('colour')) _coerced = 'color_scheme';
+          else if (_rawCT.includes('padding') || _rawCT.includes('margin') || _rawCT.includes('spacing')) _coerced = 'spacing_fix';
+          else if (_rawCT.includes('a11y') || _rawCT.includes('aria') || _rawCT.includes('accessibility')) _coerced = 'accessibility_fix';
+          else if (_rawCT.includes('speed') || _rawCT.includes('perf') || _rawCT.includes('lazy') || _rawCT.includes('cls') || _rawCT.includes('lcp')) _coerced = 'performance_fix';
+          else if (_rawCT.includes('image') || _rawCT.includes('img') || _rawCT.includes('picture') || _rawCT.includes('photo')) _coerced = 'image_replacement';
+          else if (_rawCT.includes('video')) _coerced = 'video_embed';
+          else if (_rawCT.includes('product') || _rawCT.includes('service')) _coerced = 'product_section';
+          else if (_rawCT.includes('link') || _rawCT.includes('anchor')) _coerced = 'internal_link';
+          else if (_rawCT.includes('resource') || _rawCT.includes('broken')) _coerced = 'resource_fix';
+          else if (_rawCT.includes('copy') || _rawCT.includes('text') || _rawCT.includes('wording')) _coerced = 'ui_copy';
+          console.warn(`[PROPOSE_CHANGE] Coerced unknown change_type "${_rawCT}" → "${_coerced}" (url=${args.page_url})`);
+          args.change_type = _coerced;
+          args._original_change_type = _rawCT;
+        } else if (_rawCT !== args.change_type) {
+          // Case/whitespace normalization for known types
+          args.change_type = _rawCT;
+        }
+
+        // ─── 0a. APPROVAL GATE ───
         // Determine the action mode for this agent/client combination.
         // Order: client_rules.action_mode_overrides[slug] > agent_templates.action_mode_default > 'approve_then_act' default
         let actionMode = 'approve_then_act'; // safety default

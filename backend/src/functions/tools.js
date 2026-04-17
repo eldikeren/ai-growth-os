@@ -1979,14 +1979,25 @@ export async function executeTool(toolName, args, clientId, runId) {
             change: existing.current_position ? existing.current_position - args.position : null
           };
         } else {
+          // Language guard: reject keywords that don't match the client's primary language.
+          // Hebrew clients must have Hebrew keywords, English clients must have English keywords.
+          const { data: profileRow } = await supabase.from('client_profiles').select('language').eq('client_id', clientId).maybeSingle();
+          const { data: ruleRow } = profileRow?.language ? { data: null } : await supabase.from('client_rules').select('language').eq('client_id', clientId).maybeSingle();
+          const clientLang = profileRow?.language || ruleRow?.language || null;
+          const hasHebrew = /[\u0590-\u05FF]/.test(args.keyword);
+          const detectedLang = hasHebrew ? 'he' : 'en';
+          if (clientLang && clientLang !== detectedLang) {
+            return { skipped: true, keyword: args.keyword, reason: `wrong_language: keyword is ${detectedLang}, client is ${clientLang}` };
+          }
           await supabase.from('client_keywords').insert({
             client_id: clientId,
             keyword: args.keyword,
             current_position: args.position,
             url: args.url,
-            last_checked: new Date().toISOString()
+            last_checked: new Date().toISOString(),
+            keyword_language: detectedLang,
           });
-          return { created: true, keyword: args.keyword, position: args.position };
+          return { created: true, keyword: args.keyword, position: args.position, keyword_language: detectedLang };
         }
       }
 

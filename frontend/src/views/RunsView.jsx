@@ -1161,27 +1161,21 @@ function RunListItem({ run, isSelected, onClick }) {
 
 function MissionBanner({ clientId }) {
   const [keywords, setKeywords] = useState([]);
-  const [junkKeywords, setJunkKeywords] = useState([]);
   const [drillDown, setDrillDown] = useState(null); // 'top3' | 'top10' | 'outside' | 'notRanking' | null
-  const [showJunk, setShowJunk] = useState(false);
 
   useEffect(() => {
     if (!clientId) return;
-    // Real keywords: backend filters out is_brand=true and language mismatches
+    // Backend /clients/:clientId/keywords excludes is_brand=true rows and filters to the
+    // client's primary language by default — no opt-in junk view. Dashboard is truth only.
     api(`/clients/${clientId}/keywords?limit=1000`).then(d => setKeywords(d || [])).catch(() => {});
-    // Junk count: fetch the unfiltered set just to show "+ N brand/junk hidden" badge
-    api(`/clients/${clientId}/keywords?limit=1000&include_brand=true&any_language=true`).then(d => setJunkKeywords(d || [])).catch(() => {});
   }, [clientId]);
 
-  // Backend already filtered; realKeywords IS the trustworthy set.
-  const realKeywords = showJunk ? junkKeywords : keywords;
+  const realKeywords = keywords;
 
   const top3List = realKeywords.filter(k => k.current_position && k.current_position <= 3);
   const top10List = realKeywords.filter(k => k.current_position && k.current_position <= 10 && k.current_position > 3);
   const outsideList = realKeywords.filter(k => k.current_position && k.current_position > 10);
   const notRankingList = realKeywords.filter(k => !k.current_position);
-
-  const junkCount = Math.max(0, junkKeywords.length - keywords.length);
 
   const buckets = [
     { key: 'top3', label: 'Top 3', list: top3List, color: '#10B981', icon: '🥇' },
@@ -1208,29 +1202,7 @@ function MissionBanner({ clientId }) {
             🎯 Get Clients to Top 3
           </div>
           <div style={{ fontSize: fontSize.sm, color: '#c7d2fe', marginTop: 4 }}>
-            {realKeywords.length} real target keywords • {junkCount > 0 && !showJunk && (
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowJunk(true); }}
-                style={{
-                  background: 'transparent', border: '1px solid #a5b4fc55', borderRadius: 4,
-                  color: '#a5b4fc', fontSize: 10, padding: '2px 8px', marginLeft: 6, cursor: 'pointer',
-                }}
-                title="Show brand terms & non-Hebrew keywords that were excluded"
-              >
-                + {junkCount} brand/junk hidden
-              </button>
-            )}
-            {showJunk && (
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowJunk(false); }}
-                style={{
-                  background: '#f8717133', border: '1px solid #f87171', borderRadius: 4,
-                  color: '#fecaca', fontSize: 10, padding: '2px 8px', marginLeft: 6, cursor: 'pointer',
-                }}
-              >
-                ✕ Hide junk
-              </button>
-            )}
+            {realKeywords.length} real target keywords
           </div>
         </div>
         {keywords.length > 0 && (
@@ -1316,14 +1288,6 @@ function MissionBanner({ clientId }) {
                     </td>
                     <td style={{ padding: '8px', color: colors.text, direction: /[\u0590-\u05FF]/.test(k.keyword || '') ? 'rtl' : 'ltr' }}>
                       {k.keyword}
-                      {k._isBrand && (
-                        <span style={{ marginLeft: 6, fontSize: 9, padding: '1px 6px', borderRadius: 3,
-                          background: '#FEF3C7', color: '#92400E', border: '1px solid #F59E0B44', fontWeight: 700 }}>BRAND</span>
-                      )}
-                      {!k._langOk && (
-                        <span style={{ marginLeft: 6, fontSize: 9, padding: '1px 6px', borderRadius: 3,
-                          background: '#FEE2E2', color: '#991B1B', border: '1px solid #EF444444', fontWeight: 700 }}>WRONG LANG</span>
-                      )}
                     </td>
                     <td style={{ padding: '8px', textAlign: 'right', color: colors.textSecondary }}>
                       {k.volume ? k.volume.toLocaleString() : '—'}

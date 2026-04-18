@@ -845,7 +845,13 @@ export default function Dashboard({ clientId, setClientId, clients }) {
         if (r.status !== 'fulfilled') continue;
         const data = r.value;
         const clientRuns = Array.isArray(data.runs) ? data.runs : [];
-        const clientAgents = Array.isArray(data.agents) ? data.agents : [];
+        // /clients/:id/agents returns an object keyed by lane: { 'SEO Ops': [...] }.
+        // Flatten it for the dashboard counters (otherwise agentCount comes back 0).
+        const clientAgents = Array.isArray(data.agents)
+          ? data.agents
+          : (data.agents && typeof data.agents === 'object'
+              ? Object.values(data.agents).flat()
+              : []);
         const clientCreds = Array.isArray(data.credentials) ? data.credentials : [];
         const clientBaselines = Array.isArray(data.baselines) ? data.baselines : [];
 
@@ -995,8 +1001,9 @@ export default function Dashboard({ clientId, setClientId, clients }) {
     const succeeded = completed.filter(r => r.status === 'success' || r.status === 'executed');
     const successRate = completed.length > 0 ? (succeeded.length / completed.length) * 100 : 50;
     // Freshness -- what % of agents ran in the last 48h
+    // last_run_at lives on the assignment, not the template (see /clients/:id/agents response shape)
     const recentAgents = allAgents.filter(a => {
-      const lastRun = a.last_run_at || a.updated_at;
+      const lastRun = a.assignment?.last_run_at || a.last_run_at || a.updated_at;
       return lastRun && (Date.now() - new Date(lastRun).getTime()) < 48 * 60 * 60 * 1000;
     });
     const freshnessScore = allAgents.length > 0 ? (recentAgents.length / allAgents.length) * 100 : 50;

@@ -819,11 +819,17 @@ FINAL OUTPUT RULES:
       }).eq('id', run.id).catch(e => console.error(`[RUN_SAVE_EMERGENCY] ${e.message}`));
     }
 
-    // 13. Update assignment stats
-    await supabase.from('client_agent_assignments')
-      .update({ last_run_at: new Date().toISOString(), run_count: supabase.rpc('increment', { x: 1 }) })
-      .eq('client_id', clientId)
-      .eq('agent_template_id', agentTemplateId);
+    // 13. Update assignment stats — uses RPC for atomic increment.
+    // Prior code called `supabase.rpc('increment', {x:1})` inline inside .update();
+    // the PostgrestBuilder object got serialized to something Postgres rejected,
+    // which silently failed the WHOLE update — last_run_at and run_count stayed
+    // null/0 forever even though agents ran hundreds of times.
+    await supabase.rpc('bump_assignment_run_count', {
+      p_client_id: clientId,
+      p_agent_template_id: agentTemplateId,
+    }).then(({ error }) => {
+      if (error) console.warn(`[ASSIGNMENT_BUMP] ${error.message}`);
+    });
 
     // 14. Mark memory used
     if (memories?.length) {

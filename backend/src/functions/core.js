@@ -1118,8 +1118,15 @@ export async function processRunQueue() {
   }
 
   // ── Phase 1: Pre-validate all items sequentially (fast DB checks) ──
-  // Run ALL valid items concurrently — Master Orchestrator decides which to continue/stop
-  const MAX_CONCURRENT = 20; // Run up to 20 agents in parallel per cron tick
+  // Run a CAPPED batch of agents per tick — Vercel functions hard-die at 300s.
+  // Prior MAX_CONCURRENT=20 was the root cause of mass failures: 20 agents × 2-4
+  // min each easily exceeds 300s, and everything still 'running' gets killed
+  // without tokens_used > 0, leaving rows orphaned until self-heal reaps them.
+  //
+  // 4 agents × ~60-90s each = ~240-360s (mostly fits in 300s with pre-validation
+  // overhead). Cron ticks every 5 min, so a full 27-agent sweep completes in
+  // ~7 ticks = 35 min. Slower per-click, but agents actually finish.
+  const MAX_CONCURRENT = 4; // Run up to 4 agents in parallel per cron tick (Vercel 300s safe)
   const toExecute = [];
 
   for (const item of queueItems) {

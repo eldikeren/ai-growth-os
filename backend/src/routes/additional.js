@@ -1405,10 +1405,20 @@ router.get('/cron/self-heal', async (req, res) => {
   const errors = [];
 
   try {
-    // ── 1. Cancel stuck runs (>10 min with no heartbeat) ──────
-    const stuckCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    // ── 1. Cancel stuck runs (>15 min with no heartbeat) ──────
+    // Why 15 min (was 10): a heavy agent can run 3-5 min on a single OpenAI call
+    // between tool-call heartbeats. At 10 min, we were killing live runs that
+    // just hadn't touched a tool in a while. 15 min gives breathing room while
+    // still catching Vercel-killed zombies (Vercel 300s limit = 5 min dead).
+    //
+    // We also preserve any tool outputs or partial work the agent produced
+    // BEFORE dying, and mark those runs as 'partial' instead of 'failed'. Only
+    // runs with zero observable progress are marked 'failed'.
+    const stuckCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const { data: stuckRuns } = await supabase
-      .from('runs').select('id, agent_template_id').eq('status', 'running').lt('updated_at', stuckCutoff);
+      .from('runs')
+      .select('id, agent_template_id, created_at, output, output_text, tokens_used, changed_anything, agent_templates(slug, name)')
+      .eq('status', 'running').lt('updated_at', stuckCutoff);
     if (stuckRuns?.length) {
       // Look up orchestrator template ID to add coordination metadata
       const { data: orchTmpl } = await supabase
@@ -1416,11 +1426,47 @@ router.get('/cron/self-heal', async (req, res) => {
       const orchId = orchTmpl?.id;
 
       for (const sr of stuckRuns) {
-        const updateData = {
+        // Did the agent make any progress? Progress indicators (schema-correct):
+        // - tokens_used > 0  → at least one LLM call completed
+        // - output_text set   → agent produced textual output
+        // - output non-empty  → agent wrote structured output
+        // - changed_anything  → agent modified something downstream
+        // - proposed_changes  → agent created a proposal linked via source_run_id
+        const tokensUsed = Number(sr.tokens_used || 0);
+        const hasExistingOutput = sr.output && Object.keys(sr.output || {}).length > 0;
+        const hasOutputText = typeof sr.output_text === 'string' && sr.output_text.trim().length > 0;
+        const didChange = sr.changed_anything === true;
+
+        // Count side-effects produced during this run's lifetime
+        const { count: proposalsMade } = await supabase
+          .from('proposed_changes')
+          .select('id', { count: 'exact', head: true })
+          .eq('source_run_id', sr.id);
+
+        const madeProgress =
+          tokensUsed > 0 ||
+          hasExistingOutput ||
+          hasOutputText ||
+          didChange ||
+          (proposalsMade || 0) > 0;
+
+        const updateData = madeProgress ? {
+          status: 'partial',
+          error: null,
+          output: {
+            ...(sr.output || {}),
+            timeout: true,
+            timeout_reason: 'Exceeded 15-minute execution budget — Vercel serverless killed the function. Partial work preserved.',
+            partial: true,
+            tokens_used_so_far: tokensUsed,
+            proposals_created: proposalsMade || 0,
+          },
+        } : {
           status: 'failed',
-          error: 'Auto-cancelled: stuck in running state for >10 minutes'
+          error: 'Exceeded time budget (15 min) with no observable progress. Likely OpenAI/Anthropic API hang or preflight block.',
         };
-        // For orchestrator runs, add coordination output so audit T5 sees follow-up work
+
+        // Orchestrator special case preserved
         if (orchId && sr.agent_template_id === orchId) {
           updateData.status = 'success';
           updateData.error = null;

@@ -2038,11 +2038,11 @@ router.post('/clients/:clientId/verification/fix', async (req, res) => {
     const results = [];
 
     if (checkId === 'no_orphan_runs' || checkId === 'all') {
-      // Mark stuck runs as failed
-      const { data, error } = await supabase.from('runs')
-        .update({ status: 'failed', error: 'Auto-cancelled: stuck for >10 minutes' })
+      // Mark stuck runs as failed (same 15-min threshold as self-heal)
+      const { data } = await supabase.from('runs')
+        .update({ status: 'failed', error: 'Exceeded time budget (15 min) — Vercel serverless limit reached.' })
         .eq('client_id', clientId).eq('status', 'running')
-        .lt('created_at', new Date(Date.now() - 10 * 60 * 1000).toISOString())
+        .lt('updated_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
         .select('id');
       results.push({ check: 'no_orphan_runs', fixed: true, detail: `Cancelled ${data?.length || 0} stuck runs` });
     }

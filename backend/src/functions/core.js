@@ -1040,10 +1040,42 @@ export async function processRunQueue() {
     .lt('updated_at', zombieCutoff)
     .limit(100);
   if (zombieRuns?.length) {
-    await supabase
-      .from('runs')
-      .update({ status: 'failed', error: 'Auto-cancelled: stuck in running state for >15 minutes' })
-      .in('id', zombieRuns.map(z => z.id));
+    // Match self-heal's partial-vs-failed logic: if the agent produced any work,
+    // keep it as 'partial' rather than marking the whole thing failed.
+    // Progress indicators (schema-correct): tokens_used, output, output_text,
+    // changed_anything, or linked proposed_changes rows.
+    for (const z of zombieRuns) {
+      const { data: full } = await supabase.from('runs')
+        .select('id, output, output_text, tokens_used, changed_anything').eq('id', z.id).single();
+      const tokensUsed = Number(full?.tokens_used || 0);
+      const hasOutput = full?.output && Object.keys(full.output || {}).length > 0;
+      const hasOutputText = typeof full?.output_text === 'string' && full.output_text.trim().length > 0;
+      const didChange = full?.changed_anything === true;
+      const { count: proposals } = await supabase.from('proposed_changes')
+        .select('id', { count: 'exact', head: true }).eq('source_run_id', z.id);
+      const madeProgress =
+        tokensUsed > 0 ||
+        hasOutput ||
+        hasOutputText ||
+        didChange ||
+        (proposals || 0) > 0;
+
+      await supabase.from('runs').update(madeProgress ? {
+        status: 'partial',
+        error: null,
+        output: {
+          ...(full?.output || {}),
+          timeout: true,
+          timeout_reason: 'Exceeded 15-min execution budget — Vercel serverless limit. Partial work preserved.',
+          partial: true,
+          tokens_used_so_far: tokensUsed,
+          proposals_created: proposals || 0,
+        },
+      } : {
+        status: 'failed',
+        error: 'Exceeded time budget (15 min) with no observable progress.',
+      }).eq('id', z.id);
+    }
   }
 
   // Re-queue retry_scheduled items whose time has come

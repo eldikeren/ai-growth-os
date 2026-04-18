@@ -844,11 +844,14 @@ FINAL OUTPUT RULES:
       await writeMemoryFromRun(run.id, clientId, lessons);
     }
 
-    // 16. Update prompt version usage
+    // 16. Update prompt version usage — atomic RPC (same bug as step 13).
     if (promptVersion?.id) {
-      await supabase.from('prompt_versions')
-        .update({ runs_using_this: supabase.rpc('increment', { x: 1 }), last_run_id: run.id })
-        .eq('id', promptVersion.id);
+      await supabase.rpc('bump_prompt_version_usage', {
+        p_prompt_version_id: promptVersion.id,
+        p_run_id: run.id,
+      }).then(({ error }) => {
+        if (error) console.warn(`[PROMPT_BUMP] ${error.message}`);
+      });
     }
 
     // 17. Create approval if needed

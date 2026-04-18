@@ -27,3 +27,18 @@ RETURNS void AS $$
 $$ LANGUAGE sql SECURITY DEFINER;
 
 GRANT EXECUTE ON FUNCTION bump_assignment_run_count(UUID, UUID) TO anon, authenticated, service_role;
+
+-- Same pattern for prompt version usage — the bogus inline rpc('increment') call
+-- never worked, so runs_using_this / last_run_id have also been drifting.
+CREATE OR REPLACE FUNCTION bump_prompt_version_usage(
+  p_prompt_version_id UUID,
+  p_run_id UUID
+)
+RETURNS void AS $$
+  UPDATE prompt_versions
+  SET runs_using_this = COALESCE(runs_using_this, 0) + 1,
+      last_run_id = p_run_id
+  WHERE id = p_prompt_version_id;
+$$ LANGUAGE sql SECURITY DEFINER;
+
+GRANT EXECUTE ON FUNCTION bump_prompt_version_usage(UUID, UUID) TO anon, authenticated, service_role;

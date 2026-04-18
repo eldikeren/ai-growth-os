@@ -184,19 +184,57 @@ export async function runPreflight(supabase, clientId, agentSlug) {
   const blockers = [];
 
   // Check each required connector
+  // Two-table model:
+  //   oauth_credentials — holds the actual tokens (one row per client+provider)
+  //   client_integrations — holds discovery + selected_asset_id per sub_provider
+  //     (e.g. google/ads, google/analytics, google/search_console separately)
+  //
+  // Prior code queried oauth_credentials for columns selected_property and
+  // selected_account, which don't exist on that table. Postgres returned
+  // '42703 column does not exist', maybeSingle returned data=null, and
+  // preflight treated that as 'no credential' — so EVERY agent with a
+  // preflight entry was blocked regardless of real auth state.
   for (const conn of required.connectors || []) {
-    const { data: cred } = await supabase.from('oauth_credentials')
-      .select('id, provider, sub_provider, status, last_error, expires_at, selected_property, selected_account')
+    const { data: cred, error: credErr } = await supabase.from('oauth_credentials')
+      .select('id, provider, sub_provider, status, last_error, expires_at')
       .eq('client_id', clientId).eq('provider', conn.provider).maybeSingle();
+
+    // If the query itself errored (table missing, RLS, etc.), log but do NOT
+    // block the agent — a broken preflight query shouldn't halt every run.
+    if (credErr) {
+      console.warn(`[PREFLIGHT] oauth_credentials query error for ${conn.provider}: ${credErr.message} — allowing run`);
+      checks.push({ type: 'connector', name: conn.provider, ok: true, reason: 'preflight_query_error_ignored' });
+      continue;
+    }
 
     let ok = !!cred;
     let reason = null;
 
     if (!cred) { ok = false; reason = `no_${conn.provider}_credential`; }
     else if (cred.status === 'expired' || cred.status === 'revoked') { ok = false; reason = `${conn.provider}_${cred.status}`; }
+    else if (cred.status === 'limited') { ok = false; reason = `${conn.provider}_limited: OAuth connected but discovery failed — re-run asset discovery`; }
     else if (cred.last_error) { ok = false; reason = `${conn.provider}_last_error: ${cred.last_error}`; }
-    else if (conn.requires_selection && !(cred.selected_property || cred.selected_account)) {
-      ok = false; reason = `${conn.provider}_no_selected_asset`;
+    else if (cred.expires_at && new Date(cred.expires_at).getTime() < Date.now()) {
+      ok = false; reason = `${conn.provider}_token_expired_at_${cred.expires_at}`;
+    }
+
+    // Selection check: source of truth is integration_assets.is_selected=true.
+    // (client_integrations.selected_asset_id exists but isn't wired up — the
+    // picker writes to integration_assets, not client_integrations. Don't trust
+    // that column.) If conn.sub_providers is specified, require a selected
+    // asset on that specific sub_provider; otherwise any sub_provider under
+    // the parent provider satisfies.
+    if (ok && conn.requires_selection) {
+      const subProviderFilter = conn.sub_providers || null;
+      let aQuery = supabase.from('integration_assets')
+        .select('sub_provider, external_id')
+        .eq('client_id', clientId).eq('provider', conn.provider).eq('is_selected', true);
+      if (subProviderFilter) aQuery = aQuery.in('sub_provider', subProviderFilter);
+      const { data: selectedAssets } = await aQuery;
+      if (!selectedAssets?.length) {
+        ok = false;
+        reason = `${conn.provider}_no_selected_asset — pick a${subProviderFilter ? ` ${subProviderFilter.join('/')} ` : ' '}asset in Credentials`;
+      }
     }
 
     checks.push({ type: 'connector', name: conn.provider, ok, reason });
@@ -228,12 +266,13 @@ export async function runPreflight(supabase, clientId, agentSlug) {
 // Agents not listed here have no hard preflight and will run best-effort.
 export const PREFLIGHT_REQUIREMENTS = {
   'seo-core-agent': {
-    // Needs either GSC or DataForSEO + a domain to analyze
-    connectors: [{ provider: 'google', requires_selection: false }],  // GSC auth may be delegated
+    // Needs either GSC or DataForSEO + a domain to analyze. GSC auth may be
+    // delegated, so selection is not strictly required at preflight.
+    connectors: [{ provider: 'google', requires_selection: false }],
     profile_fields: ['language'],
   },
   'gsc-daily-monitor': {
-    connectors: [{ provider: 'google', requires_selection: true }],
+    connectors: [{ provider: 'google', requires_selection: true, sub_providers: ['search_console'] }],
     profile_fields: ['language'],
   },
   'technical-seo-crawl-agent': {
@@ -242,23 +281,25 @@ export const PREFLIGHT_REQUIREMENTS = {
     profile_fields: ['language'],
   },
   'google-ads-campaign-agent': {
-    connectors: [{ provider: 'google_ads', requires_selection: true }],
+    // Ads is stored under provider=google, sub_provider=ads (not a separate
+    // provider=google_ads row). Prior config queried a nonexistent provider.
+    connectors: [{ provider: 'google', requires_selection: true, sub_providers: ['ads'] }],
     profile_fields: [],
   },
   'reviews-gbp-authority-agent': {
-    connectors: [{ provider: 'google', requires_selection: true }],
+    connectors: [{ provider: 'google', requires_selection: true, sub_providers: ['business_profile'] }],
     profile_fields: [],
   },
   'analytics-conversion-integrity-agent': {
-    connectors: [{ provider: 'google', requires_selection: true }],
+    connectors: [{ provider: 'google', requires_selection: true, sub_providers: ['analytics'] }],
     profile_fields: [],
   },
   'facebook-agent': {
-    connectors: [{ provider: 'meta', requires_selection: true }],
+    connectors: [{ provider: 'meta', requires_selection: true, sub_providers: ['facebook'] }],
     profile_fields: [],
   },
   'instagram-agent': {
-    connectors: [{ provider: 'meta', requires_selection: true }],
+    connectors: [{ provider: 'meta', requires_selection: true, sub_providers: ['instagram', 'facebook'] }],
     profile_fields: [],
   },
 };
